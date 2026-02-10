@@ -18,7 +18,7 @@ CELLAR_LAYOUT = [
     "#########...###...###...###...#######ddd#######...###...###...###...###...#########",
     "#########...###...###...###...#               #...###...###...###...###...#########",
     "#########...###...###...###...#     JAIL      #...###...###...###...###...#########",
-    "S.......d...###...###...###...#               #...###...###...###...###....d.......E",
+    "S.......d...###...###...###...#               #...###...###...###...###...d.......E",
     "S.......d...###...###...###...#################...###...###...###...###...d.......E",
     "S.......d...###...###...###.......................###...###...###...###...d.......E",
     "#########...###...###...###.......................###...###...###...###...#########",
@@ -76,7 +76,7 @@ CELLAR_OVERLAY = [
     "###...###############...#########.2.#######.2.#########...###############...###...###",
     "###...###.........###.............2.###.....2.........###.........###.........###.5.###",
     "###...###.........###.............2.###..2222.........###.........###.5555555.###.5.###",
-    "###...###.........###.............2.###.2.............###.........###.5.....5.###.5.###",
+    "###...###.........###.............2.###.22............###.........###.5.....5.###.5.###",
     "###...###...###...###...#########.2.###.2.###...#########...###...###.5.###.5.###.5.###",
     "###...###...###...###...#########.2.###.2.###...#########...###...###.5.###.5.###.5.###",
     "###...###...###...###...#########.2.###.2.###...#########...###...###.5.###.5.###.5.###",
@@ -85,3 +85,56 @@ CELLAR_OVERLAY = [
     "###.........###...............###.........###...............###.........###.....K...###",
     "#######################################################################################",
 ]
+
+CELLAR_SECTORS = [
+    "#######################################################################################",
+    "###AAAAAAAAA###AAAAAAAAAAAABBB###BBBBBBBBB###BBBBBBBBBBBBBBB###CCCCCCC###CCCCCCCCC###",
+    "###AAAAAAAAA###AAAAAAAAAAAABBB###BBBBBBBBB###BBBBBBBBBBBBBBB###CCCCCCC###CCCCCCCCC###",
+    "###AAAAAAAAA###AAAAAAAAAAAABBB###BBBBBBBBB###BBBBBBBBBBBBBBB###CCCCCCC###CCCCCCCCC###",
+    "###AAA###AAA###AAA#########BBB###BBB###BBB###BBB#########BBB###CCCCCCC###CCC###CCC###",
+    "###AAA###AAA###AAA#########BBB###BBB###BBB###BBB#########BBB###CCCCCCC###CCC###CCC###",
+    "###AAA###AAA###AAA#########BBB###BBB###BBB###BBB#########BBB###CCC###CCCCCCC###CCC###",
+    "###AAA###AAAAAAAAA###AAAAAABBBBBBBBB###BBBBBBBBBBBBBBB###BBBBCCCCC###CCCCCCC###CCC###",
+    "###AAA###AAAAAAAAA###AAAAAABBBBBBBBB###BBBBBBBBBBBBBBB###BBBBCCCCC###CCCCCCC###CCC###",
+    "###AAA###AAAAAAAAA###AAAAAABBBBBBBBB###BBBBBBBBBBBBBBB###BBBBCCCCC###CCCCCCC###CCC###",
+    "###AAA###############AAA#########BBB#######BBB#########BBB###############CCC###CCC###",
+    "###AAA###############AAA#########BBB#######BBB#########BBB###############CCC###CCC###",
+    "###AAA###############AAA#########BBB#######BBB#########BBB###############CCC###CCC###",
+    "###AAAAAAAAA###AAAAAAAAA###EEEEEEEEEEEEEEEEEEEEEEEE###BBBBBBBBB###CCCCCCCCC###CCC###",
+    "###AAAAAAAAA###AAAAAAAAA###EEEEEEEEEEEEEEEEEEEEEEE###BBBBBBBBB###CCCCCCCCC###CCC###",
+    "###AAAAAAAAA###AAAAAAAAA###EEEEEEEEEEEEEEEEEEEEEEE###BBBBBBBBB###CCCCCCCCC###CCC###",
+    "#########AAA###AAA###AAA###EEE#######ddd#######EEE###BBB###BBB###CCC###CCC#########",
+    "#########AAA###AAA###AAA###EEE#EEEEEEEEEEEEEEE#EEE###BBB###BBB###CCC###CCC#########",
+    "#########AAA###AAA###AAA###EEE#EEEEEEEEEEEEEEE#EEE###BBB###BBB###CCC###CCC#########",
+    "SDDDDDDDdDDD###DDD###DDD###EEE#EEEEEEEEEEEEEEE#EEE###BBB###BBB###GGG###GGGdGGGGGGGE",
+    "SDDDDDDDdDDD###DDD###DDD###EEE#################EEEE###BBB###BBB###GGG###GGGdGGGGGGGE",
+    "SDDDDDDDdDDD###DDD###DDD###EEEEEEEEEEEEEEEEEEEEEEE###BBB###BBB###GGG###GGGdGGGGGGGE",
+    "#########DDD###DDD###DDD###EEEEEEEEEEEEEEEEEEEEEEE###BBB###BBB###GGG###GGG#########",
+    "#########DDD###DDD###DDD###EEEEEEEEEE###EEEEEEEEEE###BBB###BBB###GGG###GGG#########",
+    "#########DDD###DDD###DDD###EEEEEEEEEE###EEEEEEEEEE###BBB###BBB###GGG###GGG#########",
+    "###DDDDDDDDD###DDDDDDDDD###EEEEEEEEEE######EEEEEEE###BBBBBBBBB###GGGGGGGGG###GGG###",
+    "###DDDDDDDDD###DDDDDDDDD###EEEEEEEEEEEEEEEEEEEEEEE###BBBBBBBBB###GGGGGGGGG###GGG###",
+    "###DDDDDDDDD###DDDDDDDDD###EEEEEEEEEEEEEEEEEEEEEEE###BBBBBBBBB###GGGGGGGGG###GGG###",
+    "###DDD###############DDD#########FFF#######FFF#########BBB###############GGG###GGG###",
+    "###DDD###############DDD#########FFF#######FFF#########FFF###############GGG###GGG###",
+    "###DDD###############DDD#########FFF#######FFF#########FFF###############GGG###GGG###",
+    "###DDD###DDDDDDDDD###DDDFFFFFFFFFFFF###FFFFFFFFFFFFFFF###GGGGGGGGG###GGGGGGGGG###GGG###",
+    "###DDD###DDDDDDDDD###DDDFFFFFFFFFFFF###FFFFFFFFFFFFFFF###GGGGGGGGG###GGGGGGGGG###GGG###",
+    "###DDD###DDDDDDDDD###DDDFFFFFFFFFFFF###FFFFFFFFFFFFFFF###GGGGGGGGG###GGGGGGGGG###GGG###",
+    "###DDD###DDD###DDD###DDD#########FFF###FFF###FFF#########GGG###GGG###GGG###GGG###GGG###",
+    "###DDD###DDD###DDD###DDD#########FFF###FFF###FFF#########GGG###GGG###GGG###GGG###GGG###",
+    "###DDD###DDD###DDD###DDD#########FFF###FFF###FFF#########GGG###GGG###GGG###GGG###GGG###",
+    "###DDDDDDDDD###DDDDDDDDDDDDDDD###FFFFFFFFF###FFFFFFFFFFFFFFF###GGGGGGGGG###GGGGGGGGG###",
+    "###DDDDDDDDD###DDDDDDDDDDDDDDD###FFFFFFFFF###FFFFFFFFFFFFFFF###GGGGGGGGG###GGGGGGGGG###",
+    "###DDDDDDDDD###DDDDDDDDDDDDDDD###FFFFFFFFF###FFFFFFFFFFFFFFF###GGGGGGGGG###GGGGGGGGG###",
+    "#######################################################################################",
+]
+
+_CELLAR_LAYOUT_W = max((len(r) for r in CELLAR_LAYOUT), default=0)
+CELLAR_LAYOUT = [r.ljust(_CELLAR_LAYOUT_W, '#') for r in CELLAR_LAYOUT]
+
+_CELLAR_OVERLAY_W = max((len(r) for r in CELLAR_OVERLAY), default=0)
+CELLAR_OVERLAY = [r.ljust(_CELLAR_OVERLAY_W, '#') for r in CELLAR_OVERLAY]
+
+_CELLAR_SECTORS_W = max((len(r) for r in CELLAR_SECTORS), default=0)
+CELLAR_SECTORS = [r.ljust(_CELLAR_SECTORS_W, '#') for r in CELLAR_SECTORS]

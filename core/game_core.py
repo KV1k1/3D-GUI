@@ -1,10 +1,11 @@
 import math
+import json
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import random
 
-from .map_data import CELLAR_LAYOUT, CELLAR_OVERLAY
+from core.map_data import CELLAR_LAYOUT, CELLAR_OVERLAY
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,8 @@ class Gate:
     lowering: bool = False
     raising: bool = False
     close_delay_timer: float = 0.0
+    opened_from_inside: Optional[bool] = None
+    opened_timer: float = 0.0
 
 
 @dataclass
@@ -108,19 +111,21 @@ class Platform:
     moving_down: bool = False
     wait_timer: float = 0.0
     cycle_time: float = 0.0
-    
+
     bottom_height: float = 0.0
     top_height: float = 2.5
     wait_at_top: float = 1.0
     wait_at_bottom: float = 1.5
-    
+
     def update(self, dt: float) -> None:
         """Update platform position based on cycle"""
         self.cycle_time += dt
-        
-        total_cycle = self.wait_at_bottom + (self.top_height / self.speed) + self.wait_at_top + (self.top_height / self.speed)
+
+        total_cycle = self.wait_at_bottom + \
+            (self.top_height / self.speed) + \
+            self.wait_at_top + (self.top_height / self.speed)
         phase = self.cycle_time % total_cycle
-        
+
         if phase < self.wait_at_bottom:
             self.target_y = self.bottom_height
             self.moving_up = False
@@ -128,7 +133,8 @@ class Platform:
         elif phase < self.wait_at_bottom + (self.top_height / self.speed):
             self.moving_up = True
             self.moving_down = False
-            progress = (phase - self.wait_at_bottom) / (self.top_height / self.speed)
+            progress = (phase - self.wait_at_bottom) / \
+                (self.top_height / self.speed)
             self.target_y = self.bottom_height + (self.top_height * progress)
         elif phase < self.wait_at_bottom + (self.top_height / self.speed) + self.wait_at_top:
             self.target_y = self.top_height
@@ -137,15 +143,17 @@ class Platform:
         else:
             self.moving_up = False
             self.moving_down = True
-            down_progress = (phase - self.wait_at_bottom - (self.top_height / self.speed) - self.wait_at_top) / (self.top_height / self.speed)
+            down_progress = (phase - self.wait_at_bottom - (self.top_height /
+                             self.speed) - self.wait_at_top) / (self.top_height / self.speed)
             self.target_y = self.top_height - (self.top_height * down_progress)
-        
+
         if abs(self.y_offset - self.target_y) > 0.01:
             direction = 1 if self.target_y > self.y_offset else -1
             self.y_offset += direction * self.speed * dt
             ceiling_height = 2.8
             self.y_offset = min(self.y_offset, ceiling_height)
-            self.y_offset = max(self.bottom_height, min(self.top_height, self.y_offset))
+            self.y_offset = max(self.bottom_height, min(
+                self.top_height, self.y_offset))
 
 
 class GameCore:
@@ -164,13 +172,14 @@ class GameCore:
         self.start_cells: List[Tuple[int, int]] = []
         self.exit_cells: List[Tuple[int, int]] = []
 
-        self.ghost_paths: Dict[int, List[Tuple[int, int]]] = {i: [] for i in range(1, 6)}
+        self.ghost_paths: Dict[int, List[Tuple[int, int]]] = {
+            i: [] for i in range(1, 6)}
         self._key_cells: Dict[str, Tuple[int, int]] = {}
         self._spike_seed_cells: Set[Tuple[int, int]] = set()
 
         self._parse_maps()
 
-        spawn = self.start_cells[0] if self.start_cells else (1, 1)
+        spawn = self._pick_spawn_cell()
         self.player = Player(x=spawn[1] + 0.5, y=0.5, z=spawn[0] + 0.5)
 
         self.wall_height = 4.5
@@ -184,6 +193,7 @@ class GameCore:
         self.keys_collected = 0
 
         self.in_jail = False
+        self.paused = False
         self.game_won = False
         self.game_completed = False
         self.screen_closing = False
@@ -192,11 +202,13 @@ class GameCore:
 
         self.jail_spawn_cell: Optional[Tuple[int, int]] = None
         self.jail_book_cell: Optional[Tuple[int, int]] = None
+        self.jail_inside_cells: Set[Tuple[int, int]] = set()
+        self.jail_outside_cells: Set[Tuple[int, int]] = set()
 
         self.gates: Dict[str, Gate] = {}
-        
+
         self.checkpoint_arrow: Optional[CheckpointArrow] = None
-        
+
         self.jail_entries = 0
         self.coin_collection_times = []
         self.last_coin_time = 0.0
@@ -210,22 +222,52 @@ class GameCore:
         self._spike_fall_s: float = 0.6
 
         self._pending_key_fragment_id: Optional[str] = None
+        self._ignored_key_fragment_ids: Set[str] = set()
 
         self.ghosts: Dict[int, Ghost] = {}
         self._init_runtime_entities()
         self._init_jail_room_points()
 
+        self.sector_cols = 4
+        self.sector_rows = 2
+        self.sector_signs: Dict[str, Tuple[Tuple[int, int], str]] = {}
+        self.exit_sector_id: str = ''
+        self._sector_grid: Optional[List[str]] = None
+        self._sector_filled: Dict[Tuple[int, int], str] = {}
+        self.jail_painting: Optional[Tuple[Tuple[int, int], str]] = None
+        self.current_sector_id: str = ''
+        self._sector_popup_timer: float = 0.0
+        self._sector_popup_id: str = ''
+        self._init_sectors()
+
         if 'start' in self.gates:
             self.open_gate('start')
+
+    def _pick_spawn_cell(self) -> Tuple[int, int]:
+        # Prefer a walkable cell adjacent to the start marker.
+        if self.start_cells:
+            sr, sc = self.start_cells[0]
+            for nb in ((sr, sc + 1), (sr, sc - 1), (sr + 1, sc), (sr - 1, sc)):
+                if nb in self.floors and nb not in self.walls:
+                    return nb
+            if (sr, sc) in self.floors and (sr, sc) not in self.walls:
+                return (sr, sc)
+
+        # Fallback: first available walkable floor.
+        for cell in sorted(self.floors):
+            if cell not in self.walls:
+                return cell
+        return (1, 1)
 
     def _parse_maps(self) -> None:
         for r, row in enumerate(self.layout):
             for c in range(self.width):
-                ch = row[c] if c < len(row) else '#'
+                ch = row[c]
                 if ch == '#':
                     self.walls.add((r, c))
                 else:
                     self.floors.add((r, c))
+
                 if ch == 'S':
                     self.start_cells.append((r, c))
                 elif ch == 'E':
@@ -233,10 +275,10 @@ class GameCore:
                 elif ch == 'd':
                     self.gate_cells.add((r, c))
 
-        overlay_width = max((len(row) for row in self.overlay), default=0)
+        overlay_width = self.width
         for r, row in enumerate(self.overlay):
             for c in range(overlay_width):
-                ch = row[c] if c < len(row) else '#'
+                ch = row[c]
                 if ch in '12345':
                     self.ghost_paths[int(ch)].append((r, c))
 
@@ -244,9 +286,7 @@ class GameCore:
             c = 0
             while c < overlay_width:
                 def chars(n: int) -> str:
-                    if c + n <= len(row):
-                        return row[c:c + n]
-                    return ''
+                    return row[c:c + n]
 
                 if chars(2) == 'KH':
                     self._key_cells['kh'] = (r, c)
@@ -257,7 +297,7 @@ class GameCore:
                     self._key_cells['kp'] = (r, c)
                     c += 2
                     continue
-                ch = row[c] if c < len(row) else '#'
+                ch = row[c]
                 if ch == 'K':
                     self._key_cells['k'] = (r, c)
                     c += 1
@@ -271,14 +311,188 @@ class GameCore:
         self._init_spikes()
         self._init_ghosts()
 
+    def sector_id_for_cell(self, cell: Tuple[int, int]) -> str:
+        r, c = cell
+        sid = self._sector_filled.get(cell)
+        if sid:
+            return sid
+        if self._sector_grid is not None:
+            if 0 <= r < len(self._sector_grid) and 0 <= c < len(self._sector_grid[r]):
+                ch = self._sector_grid[r][c]
+                if 'A' <= ch <= 'H':
+                    return ch
+        return ''
+
+    def _init_sectors(self) -> None:
+        self._sector_grid = None
+        self._sector_filled = {}
+        try:
+            from core import map_data as _md
+            grid = getattr(_md, 'CELLAR_SECTORS', None)
+            if isinstance(grid, list) and grid and all(isinstance(r, str) for r in grid):
+                self._sector_grid = grid
+        except Exception:
+            self._sector_grid = None
+
+        # Fill unlabeled walkable cells (e.g. jail interior spaces) from nearest labeled sector.
+        if self._sector_grid is not None:
+            from collections import deque
+
+            q = deque()
+            seen: Set[Tuple[int, int]] = set()
+            for r in range(min(self.height, len(self._sector_grid))):
+                row = self._sector_grid[r]
+                for c in range(min(self.width, len(row))):
+                    ch = row[c]
+                    if 'A' <= ch <= 'H':
+                        cell = (r, c)
+                        if cell in self.floors and cell not in self.walls:
+                            q.append(cell)
+                            seen.add(cell)
+
+            while q:
+                r, c = q.popleft()
+                src = self._sector_grid[r][c]
+                if 'A' <= src <= 'H':
+                    src_sid = src
+                else:
+                    src_sid = self._sector_filled.get((r, c), '')
+                if not src_sid:
+                    continue
+
+                for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                    cell = (nr, nc)
+                    if cell in seen:
+                        continue
+                    if cell not in self.floors or cell in self.walls:
+                        continue
+                    ch = ''
+                    if 0 <= nr < len(self._sector_grid) and 0 <= nc < len(self._sector_grid[nr]):
+                        ch = self._sector_grid[nr][nc]
+                    if 'A' <= ch <= 'H':
+                        seen.add(cell)
+                        q.append(cell)
+                        continue
+                    self._sector_filled[cell] = src_sid
+                    seen.add(cell)
+                    q.append(cell)
+
+        if self.exit_cells:
+            self.exit_sector_id = self.sector_id_for_cell(
+                self.exit_cells[len(self.exit_cells) // 2])
+        else:
+            self.exit_sector_id = self.sector_id_for_cell(
+                (self.height - 1, self.width - 1))
+
+        def facing_for_offset(dr: int, dc: int) -> str:
+            if dr == -1:
+                return 'N'
+            if dr == 1:
+                return 'S'
+            if dc == -1:
+                return 'W'
+            return 'E'
+
+        def pick_wall_sign_for_sector(sid: str) -> Optional[Tuple[Tuple[int, int], str]]:
+            candidates: List[Tuple[Tuple[int, int], str]] = []
+            for (r, c) in self.floors:
+                if (r, c) in self.walls:
+                    continue
+                if self.sector_id_for_cell((r, c)) != sid:
+                    continue
+                for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    wr, wc = r + dr, c + dc
+                    if (wr, wc) in self.walls:
+                        candidates.append(((r, c), facing_for_offset(dr, dc)))
+                        break
+            if not candidates:
+                return None
+            candidates.sort(key=lambda x: (x[0][0], x[0][1]))
+            return candidates[len(candidates) // 2]
+
+        self.sector_signs = {}
+        for sid in 'ABCDEFGH':
+            picked = pick_wall_sign_for_sector(sid)
+            if picked:
+                self.sector_signs[sid] = picked
+
+        # Jail painting: mount inside jail on a wall near the jail book.
+        self.jail_painting = None
+
+        def pick_jail_wall_anchor() -> Optional[Tuple[Tuple[int, int], str]]:
+            if not self.jail_inside_cells:
+                return None
+            cr = sum(r for r, _ in self.jail_inside_cells) / \
+                len(self.jail_inside_cells)
+            cc = sum(c for _, c in self.jail_inside_cells) / \
+                len(self.jail_inside_cells)
+            best: Optional[Tuple[float, Tuple[int, int], str]] = None
+
+            def wall_run_margins(wr: int, wc: int, facing: str) -> Tuple[int, int]:
+                # Returns how many contiguous wall cells exist on each side of (wr,wc)
+                # along the wall direction.
+                neg = 0
+                pos = 0
+                if facing in ('N', 'S'):
+                    cc2 = wc - 1
+                    while (wr, cc2) in self.walls:
+                        neg += 1
+                        cc2 -= 1
+                    cc2 = wc + 1
+                    while (wr, cc2) in self.walls:
+                        pos += 1
+                        cc2 += 1
+                else:
+                    rr2 = wr - 1
+                    while (rr2, wc) in self.walls:
+                        neg += 1
+                        rr2 -= 1
+                    rr2 = wr + 1
+                    while (rr2, wc) in self.walls:
+                        pos += 1
+                        rr2 += 1
+                return neg, pos
+
+            for r, c in self.jail_inside_cells:
+                for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    wr, wc = r + dr, c + dc
+                    if (wr, wc) not in self.walls:
+                        continue
+                    facing = facing_for_offset(dr, dc)
+
+                    # Avoid placing the painting near corners by requiring a long enough
+                    # continuous wall segment and a little margin from its endpoints.
+                    neg, pos = wall_run_margins(wr, wc, facing)
+                    run_len = 1 + neg + pos
+                    if run_len < 4:
+                        continue
+                    if min(neg, pos) < 1:
+                        continue
+
+                    dist2 = (r - cr) ** 2 + (c - cc) ** 2
+                    score = dist2
+                    if best is None or score < best[0]:
+                        best = (score, (r, c), facing)
+            if best is None:
+                return None
+            return best[1], best[2]
+
+        self.jail_painting = pick_jail_wall_anchor()
+
+        # Initialize current sector from player spawn.
+        self.current_sector_id = self.sector_id_for_cell(
+            (int(self.player.z), int(self.player.x)))
+        self._sector_popup_id = self.current_sector_id
+        self._sector_popup_timer = 0.0
+
     def _spawn_coins(self) -> None:
         """Center-prioritized distribution for 3-block wide paths"""
         # Get all valid floor cells (excluding specific gate areas)
         valid_cells = []
-        
+
         # Create targeted exclusion zones for specific gate areas only
         exclusion_zones = set()
-        
+
         # Add exact gate cells and immediate adjacent cells only
         for start_cell in self.start_cells:
             exclusion_zones.add(start_cell)
@@ -287,7 +501,7 @@ class GameCore:
                 for dc in range(-1, 2):
                     adjacent = (start_cell[0] + dr, start_cell[1] + dc)
                     exclusion_zones.add(adjacent)
-        
+
         for exit_cell in self.exit_cells:
             exclusion_zones.add(exit_cell)
             # Only add immediate adjacent cells (1-cell radius)
@@ -295,26 +509,26 @@ class GameCore:
                 for dc in range(-1, 2):
                     adjacent = (exit_cell[0] + dr, exit_cell[1] + dc)
                     exclusion_zones.add(adjacent)
-        
+
         # Add all gate cells to exclusion
         for gate_cell in self.gate_cells:
             exclusion_zones.add(gate_cell)
-        
+
         # Collect valid cells and categorize by path width
         center_cells = []  # Block 2 (middle) in 3-block wide paths
         edge_cells = []    # Blocks 1 and 3 (edges) in paths
-        
+
         for cell in self.floors:
             if cell in exclusion_zones:
                 continue
-            
+
             r, c = cell
-            
+
             # Check if this is a center block in a 3-block wide path
             # A cell is in the center if it has floor cells on both sides in at least one direction
             is_center_horizontal = False
             is_center_vertical = False
-            
+
             # Check horizontal center (left and right are both floor)
             left_cell = (r, c - 1)
             right_cell = (r, c + 1)
@@ -323,10 +537,10 @@ class GameCore:
                     # Check if this forms a 3-block wide path
                     left_left = (r, c - 2)
                     right_right = (r, c + 2)
-                    if ((left_left in self.floors and left_left not in self.walls) or 
-                        (right_right in self.floors and right_right not in self.walls)):
+                    if ((left_left in self.floors and left_left not in self.walls) or
+                            (right_right in self.floors and right_right not in self.walls)):
                         is_center_horizontal = True
-            
+
             # Check vertical center (up and down are both floor)
             up_cell = (r - 1, c)
             down_cell = (r + 1, c)
@@ -335,48 +549,54 @@ class GameCore:
                     # Check if this forms a 3-block wide path
                     up_up = (r - 2, c)
                     down_down = (r + 2, c)
-                    if ((up_up in self.floors and up_up not in self.walls) or 
-                        (down_down in self.floors and down_down not in self.walls)):
+                    if ((up_up in self.floors and up_up not in self.walls) or
+                            (down_down in self.floors and down_down not in self.walls)):
                         is_center_vertical = True
-            
+
             # Categorize cell
             if is_center_horizontal or is_center_vertical:
                 center_cells.append(cell)
             else:
                 edge_cells.append(cell)
-        
+
         # Sort cells for systematic distribution
         center_cells.sort()
         edge_cells.sort()
-        
+
         # Calculate coin allocation - prioritize center cells
         total_coins = self.coins_required
-        center_coins = min(total_coins * 2 // 3, len(center_cells))  # ~2/3 in center
+        center_coins = min(total_coins * 2 // 3,
+                           len(center_cells))  # ~2/3 in center
         edge_coins = total_coins - center_coins
-        
+
         # Select coins from center cells first
-        selected_coins = []
-        
-        # Select from center cells with good spacing
+        selected_coins: List[Tuple[int, int]] = []
+
+        def pick_spaced(candidates: List[Tuple[int, int]], count: int, min_sep: float, rng: random.Random) -> List[Tuple[int, int]]:
+            if count <= 0 or not candidates:
+                return []
+            shuffled = list(candidates)
+            rng.shuffle(shuffled)
+            picked: List[Tuple[int, int]] = []
+            min_sep2 = min_sep * min_sep
+            for cell in shuffled:
+                if len(picked) >= count:
+                    break
+                if all(((cell[0] - pr) ** 2 + (cell[1] - pc) ** 2) >= min_sep2 for (pr, pc) in picked):
+                    picked.append(cell)
+            if len(picked) < count:
+                remaining = [c for c in shuffled if c not in picked]
+                picked.extend(remaining[: max(0, count - len(picked))])
+            return picked
+
+        rng = random.Random(1337)
         if center_cells and center_coins > 0:
-            center_step = max(1, len(center_cells) // center_coins)
-            center_offset = (len(center_cells) % center_coins) // 2
-            
-            for i in range(center_coins):
-                if i < len(center_cells):
-                    index = (center_offset + i * center_step) % len(center_cells)
-                    selected_coins.append(center_cells[index])
-        
-        # Select from edge cells to fill remaining slots
+            selected_coins.extend(pick_spaced(
+                center_cells, center_coins, min_sep=6.0, rng=rng))
         if edge_cells and edge_coins > 0:
-            edge_step = max(1, len(edge_cells) // edge_coins)
-            edge_offset = (len(edge_cells) % edge_coins) // 2
-            
-            for i in range(edge_coins):
-                if i < len(edge_cells):
-                    index = (edge_offset + i * edge_step) % len(edge_cells)
-                    selected_coins.append(edge_cells[index])
-        
+            selected_coins.extend(pick_spaced(
+                edge_cells, edge_coins, min_sep=5.0, rng=rng))
+
         # Special handling for jail room - ensure 1-2 coins there
         jail_coins_added = 0
         jail_gate = self.gates.get('jail')
@@ -389,19 +609,18 @@ class GameCore:
                         nearby = (gate_cell[0] + dr, gate_cell[1] + dc)
                         if nearby in self.floors and nearby not in exclusion_zones:
                             jail_area.add(nearby)
-            
+
             # Count existing coins in jail area
-            existing_jail_coins = [cell for cell in selected_coins if cell in jail_area]
-            
+            existing_jail_coins = [
+                cell for cell in selected_coins if cell in jail_area]
+
             # If no coins in jail, add 1-2
             if len(existing_jail_coins) == 0 and jail_area:
                 # Add jail spawn cell if available
                 if self.jail_spawn_cell in jail_area:
                     # Replace a random coin with jail spawn coin
                     if selected_coins:
-                        import random
-                        random.seed(1337)  # Consistent seed
-                        replace_index = random.randint(0, len(selected_coins) - 1)
+                        replace_index = rng.randint(0, len(selected_coins) - 1)
                         selected_coins[replace_index] = self.jail_spawn_cell
                         jail_coins_added = 1
                 # Add second coin if space allows
@@ -410,12 +629,13 @@ class GameCore:
                     if other_jail_cells:
                         selected_coins.append(other_jail_cells[0])
                         jail_coins_added = 2
-        
+
         # Ensure we have exactly the required number of coins
         selected_coins = selected_coins[:total_coins]
-        
+
         # Create coin objects
-        self.coins = {cell: Coin(cell=cell, taken=False) for cell in selected_coins}
+        self.coins = {cell: Coin(cell=cell, taken=False)
+                      for cell in selected_coins}
 
     def _spawn_key_fragments(self) -> None:
         regular = self._key_cells.get('k')
@@ -423,11 +643,14 @@ class GameCore:
         kp = self._key_cells.get('kp')
 
         if regular is not None:
-            self.key_fragments['frag_k'] = KeyFragment(id='frag_k', cell=regular, kind='K')
+            self.key_fragments['frag_k'] = KeyFragment(
+                id='frag_k', cell=regular, kind='K')
         if kh is not None:
-            self.key_fragments['frag_kh'] = KeyFragment(id='frag_kh', cell=kh, kind='KH')
+            self.key_fragments['frag_kh'] = KeyFragment(
+                id='frag_kh', cell=kh, kind='KH')
         if kp is not None:
-            self.key_fragments['frag_kp'] = KeyFragment(id='frag_kp', cell=kp, kind='KP')
+            self.key_fragments['frag_kp'] = KeyFragment(
+                id='frag_kp', cell=kp, kind='KP')
             self.platforms.append(Platform(cell=kp))
 
     def _init_gates(self) -> None:
@@ -456,13 +679,16 @@ class GameCore:
 
         # Identify start/exit gates by proximity.
         start_ref = self.start_cells[0] if self.start_cells else (0, 0)
-        exit_ref = self.exit_cells[0] if self.exit_cells else (self.height - 1, self.width - 1)
+        if self.exit_cells:
+            exit_ref = self.exit_cells[len(self.exit_cells) // 2]
+        else:
+            exit_ref = (self.height - 1, self.width - 1)
 
         best_start = None
         best_exit = None
         best_start_d = 1e9
         best_exit_d = 1e9
-        
+
         # Check each gate group for start/exit assignment
         for g in groups:
             gr, gc = center_of(g)
@@ -474,46 +700,10 @@ class GameCore:
             if de < best_exit_d:
                 best_exit_d = de
                 best_exit = g
-        
-        # Also check individual gate cells that might not be in groups
-        # This handles cases where exit gate cells are not contiguous
-        individual_gate_cells = set(self.gate_cells)
-        for g in groups:
-            individual_gate_cells.difference_update(set(g))
-        
-        # Find ALL gate cells near exit area, not just the closest one
-        exit_gate_cells = []
-        exit_threshold = 10.0  # Distance threshold for exit gate cells
-        
-        # First, add any grouped gate cells that are near exit
-        for g in groups:
-            if g is best_start:
-                continue  # Skip start gate
-            gr, gc = center_of(g)
-            de = (gr - exit_ref[0]) ** 2 + (gc - exit_ref[1]) ** 2
-            if de < exit_threshold ** 2:  # If group is near exit
-                exit_gate_cells.extend(g)
-        
-        # Then, add individual gate cells near exit
-        if individual_gate_cells:
-            for cell in individual_gate_cells:
-                r, c = cell
-                de = (r - exit_ref[0]) ** 2 + (c - exit_ref[1]) ** 2
-                if de < exit_threshold ** 2:  # If cell is near exit
-                    exit_gate_cells.append(cell)
-        
-        # If we found exit gate cells, use them
-        if exit_gate_cells:
-            # Align all exit gate cells to column 75 for proper alignment
-            target_column = 75
-            
-            # Align all gate cells to the target column
-            aligned_exit_gate_cells = []
-            for cell in exit_gate_cells:
-                r, c = cell
-                aligned_exit_gate_cells.append((r, target_column))
-            
-            best_exit = aligned_exit_gate_cells
+
+        # Note: previously we tried to aggregate "all gate cells near the exit".
+        # That caused the exit gate to be composed of multiple separated parts.
+        # For stable layout behavior, pick a single contiguous group as the exit gate.
 
         # Jail gate is the remaining group with the largest span (ddd at jail corridor).
         jail_group = None
@@ -524,11 +714,13 @@ class GameCore:
                 jail_group = g
 
         if best_start:
-            self.gates['start'] = Gate(id='start', cells=best_start, locked=False)
+            self.gates['start'] = Gate(
+                id='start', cells=best_start, locked=False)
         if jail_group:
             self.gates['jail'] = Gate(id='jail', cells=jail_group, locked=True)
         if best_exit:
-            self.gates['exit'] = Gate(id='exit', cells=best_exit, locked=True)  # Start locked, drop when requirements met
+            # Start locked, drop when requirements met
+            self.gates['exit'] = Gate(id='exit', cells=best_exit, locked=True)
 
     def _init_spikes(self) -> None:
         # test2-style spikes: individual spike tiles with independent timers.
@@ -545,17 +737,20 @@ class GameCore:
                         if (r, c) in self.start_cells:
                             continue
                         self.spikes.append(
-                            Spike(cell=(r, c), active=False, timer=rng.random() * 2.0, period=3.0)
+                            Spike(cell=(r, c), active=False,
+                                  timer=rng.random() * 2.0, period=3.0)
                         )
 
     def _init_ghosts(self) -> None:
         # Per-ghost speeds (reduced for slower movement)
-        speeds = {1: 2.0, 2: 2.5, 3: 1.8, 4: 2.2, 5: 2.8}  # Reduced from 3.0, 3.5, 2.8, 3.2, 3.8
+        # Reduced from 3.0, 3.5, 2.8, 3.2, 3.8
+        speeds = {1: 2.0, 2: 2.5, 3: 1.8, 4: 2.2, 5: 2.8}
         for gid, path in self.ghost_paths.items():
             if not path:
                 continue
             # Filter to walkable cells only (prevents routing through walls if overlay is misaligned).
-            filtered = [cell for cell in path if cell in self.floors and cell not in self.walls]
+            filtered = [
+                cell for cell in path if cell in self.floors and cell not in self.walls]
             if len(filtered) < 2:
                 continue
 
@@ -582,6 +777,12 @@ class GameCore:
             return
 
         outside = self._reachable_from_start_with_locked_gates()
+        self.jail_outside_cells = set(outside)
+
+        # Classify "inside jail" as floors that are not reachable from start with gates locked.
+        # This is intentionally conservative and only used for gate auto-close behavior.
+        self.jail_inside_cells = {
+            cell for cell in self.floors if cell not in self.walls and cell not in outside}
 
         gr = int(round(sum(r for r, _ in gate.cells) / len(gate.cells)))
         gc = int(round(sum(c for _, c in gate.cells) / len(gate.cells)))
@@ -626,10 +827,8 @@ class GameCore:
 
     def _reachable_from_start_with_locked_gates(self) -> Set[Tuple[int, int]]:
         """Cells reachable from the start area assuming currently locked gates are blocked."""
-        if not self.start_cells:
-            return set()
-        start = self.start_cells[0]
-        if start not in self.floors:
+        start = self._pick_spawn_cell()
+        if start not in self.floors or start in self.walls:
             return set()
         q = [start]
         seen: Set[Tuple[int, int]] = {start}
@@ -669,7 +868,8 @@ class GameCore:
             nbs = [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]
             return [nb for nb in nbs if nb in cell_set]
 
-        degrees: Dict[Tuple[int, int], int] = {cell: len(neighbors(cell)) for cell in cell_set}
+        degrees: Dict[Tuple[int, int], int] = {
+            cell: len(neighbors(cell)) for cell in cell_set}
 
         start: Tuple[int, int]
         if loop:
@@ -707,48 +907,142 @@ class GameCore:
         if self.checkpoint_arrow and self.checkpoint_arrow.visible:
             # Update bobbing animation
             self.checkpoint_arrow.bob_phase += dt * 2.0  # Bob speed
-            self.checkpoint_arrow.bob_offset = math.sin(self.checkpoint_arrow.bob_phase) * 0.1
-            
+            self.checkpoint_arrow.bob_offset = math.sin(
+                self.checkpoint_arrow.bob_phase) * 0.1
+
             # Check if player is in arrow hitbox (more forgiving)
             arrow_r, arrow_c = self.checkpoint_arrow.cell
             player_r, player_c = int(self.player.z), int(self.player.x)
-            
+
             # Check if player is at or near arrow cell (within 1.5 block radius)
-            distance = math.sqrt((player_r - arrow_r)**2 + (player_c - arrow_c)**2)
+            distance = math.sqrt((player_r - arrow_r) **
+                                 2 + (player_c - arrow_c)**2)
             if distance <= 1.5:  # Within 1.5 block radius (more forgiving)
                 if not self.game_completed and not self.screen_closing:
                     self.game_completed = True
                     self.screen_closing = True
                     self.screen_close_progress = 0.0
-                    self._trigger_event('checkpoint_reached', {'time_s': self.elapsed_s})
+                    self._trigger_event('checkpoint_reached', {
+                                        'time_s': self.elapsed_s})
+
+    def _update_screen_close(self, dt: float) -> None:
+        if not self.screen_closing:
+            return
+        self.screen_close_progress += dt * 0.5  # 2 seconds to close
+        if self.screen_close_progress >= 1.0:
+            self.screen_close_progress = 1.0
+            self.game_won = True  # End the game after animation
 
     def update(self, dt: float) -> None:
         if self.game_won:
             return
+        if getattr(self, 'paused', False):
+            return
         self.elapsed_s += dt
-        self._update_gates(dt)
-        self._check_jail_gate_proximity(dt)  # Simple proximity-based jail gate control
-        self._update_platforms(dt)
-        self._update_ghosts(dt)
+
+        if self._sector_popup_timer > 0.0:
+            self._sector_popup_timer = max(0.0, self._sector_popup_timer - dt)
+
         self._update_spikes(dt)
-        self._update_checkpoint_arrow(dt)  # Update checkpoint arrow
-        
-        # Update screen closing animation
-        if self.screen_closing:
-            self.screen_close_progress += dt * 0.5  # 2 seconds to close
-            if self.screen_close_progress >= 1.0:
-                self.screen_close_progress = 1.0
-                self.game_won = True  # End the game after animation
-        
+        self._update_gates(dt)
+        self._update_ghosts(dt)
         self._check_collectibles()
         self._check_hazards()
         self._check_exit_condition()
+        # Simple proximity-based jail gate control
+        self._check_jail_gate_proximity(dt)
+        self._update_platforms(dt)
+        self._update_checkpoint_arrow(dt)
+        self._update_screen_close(dt)
+
+        sid = self.sector_id_for_cell((int(self.player.z), int(self.player.x)))
+        if sid and sid != self.current_sector_id:
+            self.current_sector_id = sid
+            self._sector_popup_id = sid
+            self._sector_popup_timer = 2.0
+
+    def get_save_state(self) -> dict:
+        coins_taken = [f"{r},{c}" for (
+            r, c), coin in self.coins.items() if coin.taken]
+        frags_taken = [fid for fid,
+                       frag in self.key_fragments.items() if frag.taken]
+        gates = {}
+        for gid, gate in self.gates.items():
+            gates[gid] = {
+                'locked': bool(gate.locked),
+                'y_offset': float(gate.y_offset),
+                'lowering': bool(gate.lowering),
+                'raising': bool(gate.raising),
+            }
+        return {
+            'version': 1,
+            'player': {
+                'x': float(self.player.x),
+                'y': float(self.player.y),
+                'z': float(self.player.z),
+                'yaw': float(self.player.yaw),
+                'pitch': float(self.player.pitch),
+            },
+            'elapsed_s': float(self.elapsed_s),
+            'coins_collected': int(self.coins_collected),
+            'keys_collected': int(self.keys_collected),
+            'coins_taken': coins_taken,
+            'key_fragments_taken': frags_taken,
+            'in_jail': bool(self.in_jail),
+            'jail_entries': int(self.jail_entries),
+            'gates': gates,
+        }
+
+    def load_save_state(self, state: dict) -> bool:
+        if not isinstance(state, dict):
+            return False
+        player = state.get('player')
+        if not isinstance(player, dict):
+            return False
+
+        self.player.x = float(player.get('x', self.player.x))
+        self.player.y = float(player.get('y', self.player.y))
+        self.player.z = float(player.get('z', self.player.z))
+        self.player.yaw = float(player.get('yaw', self.player.yaw))
+        self.player.pitch = float(player.get('pitch', self.player.pitch))
+
+        self.elapsed_s = float(state.get('elapsed_s', self.elapsed_s))
+        self.coins_collected = int(
+            state.get('coins_collected', self.coins_collected))
+        self.keys_collected = int(
+            state.get('keys_collected', self.keys_collected))
+        self.in_jail = bool(state.get('in_jail', self.in_jail))
+        self.jail_entries = int(state.get('jail_entries', self.jail_entries))
+
+        coins_taken = set(str(x) for x in (state.get('coins_taken') or []))
+        for (r, c), coin in self.coins.items():
+            coin.taken = f"{r},{c}" in coins_taken
+
+        frags_taken = set(str(x)
+                          for x in (state.get('key_fragments_taken') or []))
+        for fid, frag in self.key_fragments.items():
+            frag.taken = fid in frags_taken
+
+        gates = state.get('gates')
+        if isinstance(gates, dict):
+            for gid, gstate in gates.items():
+                gate = self.gates.get(str(gid))
+                if gate is None or not isinstance(gstate, dict):
+                    continue
+                gate.locked = bool(gstate.get('locked', gate.locked))
+                gate.y_offset = float(gstate.get('y_offset', gate.y_offset))
+                gate.lowering = bool(gstate.get('lowering', gate.lowering))
+                gate.raising = bool(gstate.get('raising', gate.raising))
+
+        self._refresh_sector_state(show_popup=False)
+        return True
 
     def _update_gates(self, dt: float) -> None:
         speed = 1.5  # Reduced from 3.0 for much slower gate movement
         for gate in self.gates.values():
             if gate.lowering:
-                gate.y_offset = max(-self.wall_height, gate.y_offset - speed * dt)
+                gate.y_offset = max(-self.wall_height,
+                                    gate.y_offset - speed * dt)
                 if gate.y_offset <= -self.wall_height + 1e-3:
                     gate.lowering = False
             elif gate.raising:
@@ -757,56 +1051,72 @@ class GameCore:
                     gate.raising = False
 
     def _check_jail_gate_proximity(self, dt: float) -> None:
-        """Simple proximity-based jail gate control with delay"""
+        """Jail gate control.
+
+        Keep the jail gate open until the player has crossed to the other side.
+        This prevents soft-locking the player inside the jail area.
+        """
         jail_gate = self.gates.get('jail')
         if not jail_gate:
             return
-            
+
+        # Only manage auto-close when gate is fully open (lowered).
+        if jail_gate.locked or jail_gate.raising or jail_gate.lowering:
+            jail_gate.opened_from_inside = None
+            jail_gate.opened_timer = 0.0
+            return
+
         player_cell = (int(self.player.z), int(self.player.x))
-        
-        # Check if player is near the jail gate (within 2 tiles)
-        near_gate = False
-        for gate_cell in jail_gate.cells:
-            if abs(player_cell[0] - gate_cell[0]) <= 1 and abs(player_cell[1] - gate_cell[1]) <= 1:
-                near_gate = True
-                break
-        
-        # Reset delay timer when player is near gate
-        if near_gate:
-            jail_gate.close_delay_timer = 0.0
-        
-        # Simple logic: if gate is unlocked and player is not near it, start delay timer
-        if not jail_gate.locked and not near_gate and not jail_gate.raising and not jail_gate.lowering:
-            jail_gate.close_delay_timer += dt
-            
-            # Close gate after 2 seconds delay
-            if jail_gate.close_delay_timer >= 2.0:
+
+        # Determine which side the player started on when the gate opened.
+        if jail_gate.opened_from_inside is None:
+            jail_gate.opened_from_inside = player_cell in self.jail_inside_cells
+            jail_gate.opened_timer = 0.0
+
+        jail_gate.opened_timer += dt
+
+        # If the gate was opened while the player was inside, keep it open until they reach the outside.
+        if jail_gate.opened_from_inside:
+            if player_cell in self.jail_outside_cells:
                 self.close_gate('jail')
-                jail_gate.close_delay_timer = 0.0
+                jail_gate.opened_from_inside = None
+                jail_gate.opened_timer = 0.0
+            return
+
+        # If opened from outside, close it once the player leaves the immediate gate area.
+        near_gate = any(
+            abs(player_cell[0] - gate_cell[0]
+                ) <= 1 and abs(player_cell[1] - gate_cell[1]) <= 1
+            for gate_cell in jail_gate.cells
+        )
+        if not near_gate:
+            self.close_gate('jail')
+            jail_gate.opened_from_inside = None
+            jail_gate.opened_timer = 0.0
 
     def _update_platforms(self, dt: float) -> None:
         """Update all elevator platforms"""
         player_on_any_platform = False
-        
+
         for platform in self.platforms:
             platform.update(dt)
-            
+
             # Check if player is on this platform and move them with it
             player_cell = (int(self.player.z), int(self.player.x))
             if player_cell == platform.cell:
                 # Player is on the platform cell, check if they're at the right height
                 player_y = self.player.y
                 platform_top = platform.y_offset + 0.1  # Small platform thickness
-                
+
                 # Check if player is actually standing on platform surface
                 px, pz = self.player.x, self.player.z
                 platform_center_x = platform.cell[1] + 0.5
                 platform_center_z = platform.cell[0] + 0.5
                 platform_radius = 0.4  # Platform radius
-                
+
                 # Only stick to platform if player is within platform bounds
-                if (abs(px - platform_center_x) < platform_radius and 
-                    abs(pz - platform_center_z) < platform_radius):
+                if (abs(px - platform_center_x) < platform_radius and
+                        abs(pz - platform_center_z) < platform_radius):
                     # Player is on platform surface, stick them to it
                     if abs(player_y - platform_top) < 0.3:
                         self.player.y = platform_top
@@ -814,7 +1124,7 @@ class GameCore:
                 else:
                     # Player walked off platform, reset to ground level
                     self.player.y = 0.0
-        
+
         # If player is not on any platform but has height > 0, reset to ground
         if not player_on_any_platform and self.player.y > 0.1:
             self.player.y = 0.0
@@ -926,14 +1236,14 @@ class GameCore:
         if coin and not coin.taken:
             coin.taken = True
             self.coins_collected += 1
-            
+
             # Track coin collection time
             current_time = self.elapsed_s
             if self.last_coin_time > 0:
                 collection_time = current_time - self.last_coin_time
                 self.coin_collection_times.append(collection_time)
             self.last_coin_time = current_time
-            
+
             self._trigger_event('coin_picked', {'count': self.coins_collected})
 
         # Key fragments: auto-trigger minigame on touch (test2-style). The UI decides success.
@@ -941,42 +1251,55 @@ class GameCore:
             for frag in self.key_fragments.values():
                 if frag.taken:
                     continue
+                if frag.id in self._ignored_key_fragment_ids:
+                    r, c = frag.cell
+                    fx = c + 0.5
+                    fz = r + 0.5
+                    if self._distance_xz(self.player.x, self.player.z, fx, fz) > 0.65:
+                        self._ignored_key_fragment_ids.discard(frag.id)
+                    continue
                 r, c = frag.cell
                 fx = c + 0.5
                 fz = r + 0.5
-                
+
                 # Check distance to fragment
-                if self._distance_xz(self.player.x, self.player.z, fx, fz) < 0.3:
+                if self._distance_xz(self.player.x, self.player.z, fx, fz) < 0.45:
                     # For KP fragments, only trigger if platform is moving AND player is standing on platform
                     if frag.kind == 'KP':
                         # Find the platform at this location
-                        platform_moving = False
                         player_on_platform = False
+                        platform_at_top = False
                         for platform in self.platforms:
                             if platform.cell == (r, c):
-                                # Platform is moving if it's not at bottom height
-                                platform_moving = platform.y_offset > 0.1
-                                
                                 # Check if player is standing on platform (within platform bounds)
                                 px, pz = self.player.x, self.player.z
                                 platform_center_x = c + 0.5
                                 platform_center_z = r + 0.5
                                 platform_radius = 0.4  # Platform radius
-                                
+
                                 # Check if player is within platform bounds (standing on it)
-                                if (abs(px - platform_center_x) < platform_radius and 
+                                if (abs(px - platform_center_x) < platform_radius and
                                     abs(pz - platform_center_z) < platform_radius and
-                                    abs(self.player.y - platform.y_offset) < 0.5):  # Player is on platform surface
+                                        abs(self.player.y - platform.y_offset) < 0.5):  # Player is on platform surface
                                     player_on_platform = True
+
+                                platform_at_top = platform.y_offset >= (
+                                    platform.top_height - 0.15)
                                 break
-                        
-                        if not platform_moving or not player_on_platform:
-                            continue  # Don't trigger if platform is at ground level or player not standing on it
-                    
+
+                        if not player_on_platform or not platform_at_top:
+                            continue  # Require riding the platform near the top to trigger
+
                     # Trigger the fragment
                     self._pending_key_fragment_id = frag.id
-                    self._trigger_event('key_fragment_encountered', {'id': frag.id})
+                    self._trigger_event(
+                        'key_fragment_encountered', {'id': frag.id})
                     break
+
+    def defer_key_fragment(self, frag_id: str) -> None:
+        self._ignored_key_fragment_ids.add(frag_id)
+        if self._pending_key_fragment_id == frag_id:
+            self._pending_key_fragment_id = None
 
     def _check_hazards(self) -> None:
         if not self.spikes:
@@ -992,7 +1315,7 @@ class GameCore:
             if self.coins_collected >= self.coins_required and self.keys_collected >= self.keys_required:
                 self.open_gate('exit')
                 self._trigger_event('exit_unlocked', {})
-                
+
                 # Create checkpoint arrow at exit area when all items collected
                 if self.exit_cells:
                     # Place arrow between middle 'd' and 'E' for better visibility
@@ -1003,12 +1326,15 @@ class GameCore:
                         middle_exit_idx = len(self.exit_cells) // 2
                         middle_exit_cell = self.exit_cells[middle_exit_idx]
                         # Move arrow one block back from middle exit
-                        adjusted_arrow_cell = (middle_exit_cell[0], middle_exit_cell[1] - 1)
+                        adjusted_arrow_cell = (
+                            middle_exit_cell[0], middle_exit_cell[1] - 1)
                     else:
                         arrow_cell = self.exit_cells[0]
-                        adjusted_arrow_cell = (arrow_cell[0], arrow_cell[1] - 1)
-                    
-                    print(f"DEBUG: Creating checkpoint arrow at {adjusted_arrow_cell} (middle exit cell: {middle_exit_cell if len(self.exit_cells) >= 2 else self.exit_cells[0]})")
+                        adjusted_arrow_cell = (
+                            arrow_cell[0], arrow_cell[1] - 1)
+
+                    print(
+                        f"DEBUG: Creating checkpoint arrow at {adjusted_arrow_cell} (middle exit cell: {middle_exit_cell if len(self.exit_cells) >= 2 else self.exit_cells[0]})")
                     self.checkpoint_arrow = CheckpointArrow(
                         cell=adjusted_arrow_cell,
                         visible=True,
@@ -1073,7 +1399,8 @@ class GameCore:
             return False
         frag.taken = True
         self.keys_collected += 1
-        self._trigger_event('key_picked', {'id': frag.id, 'count': self.keys_collected})
+        self._trigger_event(
+            'key_picked', {'id': frag.id, 'count': self.keys_collected})
         if self._pending_key_fragment_id == frag.id:
             self._pending_key_fragment_id = None
         return True
@@ -1098,9 +1425,10 @@ class GameCore:
             return False
         self.in_jail = False
         # Teleport to start area after leaving jail
-        spawn = self.start_cells[0] if self.start_cells else (1, 1)
+        spawn = self._pick_spawn_cell()
         self.player.x = spawn[1] + 0.5
         self.player.z = spawn[0] + 0.5
+        self._refresh_sector_state(show_popup=True)
         self._trigger_event('left_jail', {})
         self.close_gate('jail')
         return True
@@ -1113,17 +1441,18 @@ class GameCore:
     def _send_to_jail(self, reason: str) -> None:
         # Always allow sending to jail, but check if player is already in jail position
         current_cell = (int(self.player.z), int(self.player.x))
-        jail_cell = self.jail_spawn_cell or self._find_jail_cell() or (self.start_cells[0] if self.start_cells else (1, 1))
-        
+        jail_cell = self.jail_spawn_cell or self._find_jail_cell() or (
+            self.start_cells[0] if self.start_cells else (1, 1))
+
         # Only count as jail entry if not already in jail
         if not self.in_jail:
             self.jail_entries += 1
-            
+
         self.in_jail = True
         # Only send to jail if not already at jail location
         if current_cell == jail_cell:
             return
-        
+
         # If jail gate is open or lowering, instantly close it to prevent escape
         jail_gate = self.gates.get('jail')
         if jail_gate and not jail_gate.locked:
@@ -1133,10 +1462,11 @@ class GameCore:
             jail_gate.lowering = False
             jail_gate.raising = False
             jail_gate.close_delay_timer = 0.0
-            
+
         self.in_jail = True
         self.player.x = jail_cell[1] + 0.5
         self.player.z = jail_cell[0] + 0.5
+        self._refresh_sector_state(show_popup=True)
         self._trigger_event('sent_to_jail', {'reason': reason})
 
     def _find_jail_cell(self) -> Optional[Tuple[int, int]]:
@@ -1150,7 +1480,7 @@ class GameCore:
 
     def _distance_xz(self, ax: float, az: float, bx: float, bz: float) -> float:
         return math.hypot(ax - bx, az - bz)
-    
+
     @property
     def avg_coin_time(self) -> float:
         """Calculate average time between coin collections"""
@@ -1167,11 +1497,25 @@ class GameCore:
         for cb in self._event_callbacks.get(event_name, []):
             cb(data or {})
 
+    def _refresh_sector_state(self, *, show_popup: bool) -> None:
+        sid = self.sector_id_for_cell((int(self.player.z), int(self.player.x)))
+        if not sid:
+            return
+        if sid != self.current_sector_id:
+            self.current_sector_id = sid
+            self._sector_popup_id = sid
+            self._sector_popup_timer = 2.0 if show_popup else 0.0
+            return
+        if show_popup:
+            self._sector_popup_id = sid
+            self._sector_popup_timer = 2.0
+
     def rotate_player(self, yaw_delta: float) -> None:
         self.player.yaw = (self.player.yaw + yaw_delta) % (2 * math.pi)
 
     def tilt_camera(self, pitch_delta: float) -> None:
-        self.player.pitch = max(-math.pi / 2, min(math.pi / 2, self.player.pitch + pitch_delta))
+        self.player.pitch = max(-math.pi / 2,
+                                min(math.pi / 2, self.player.pitch + pitch_delta))
 
     def move_player(self, dx: float, dz: float) -> bool:
         forward_x = math.sin(self.player.yaw)
@@ -1195,11 +1539,38 @@ class GameCore:
         return False
 
     def _can_move_to(self, x: float, z: float) -> bool:
+        # Keep some margin from the outer border.
         if x < 0.25 or z < 0.25 or x > self.width - 0.25 or z > self.height - 0.25:
             return False
-        cell = (int(z), int(x))
-        if cell in self.walls:
+        cell_r = int(z)
+        cell_c = int(x)
+        if (cell_r, cell_c) not in self.floors:
             return False
+        # Prevent getting too close to walls. If the camera clips into a wall quad,
+        # the near plane will cut it and you'll see "inside" the tile.
+        radius = 0.22
+        for rr in range(cell_r - 1, cell_r + 2):
+            for cc in range(cell_c - 1, cell_c + 2):
+                if (rr, cc) not in self.walls:
+                    continue
+                minx = cc
+                maxx = cc + 1.0
+                minz = rr
+                maxz = rr + 1.0
+                dx = 0.0
+                if x < minx:
+                    dx = minx - x
+                elif x > maxx:
+                    dx = x - maxx
+                dz = 0.0
+                if z < minz:
+                    dz = minz - z
+                elif z > maxz:
+                    dz = z - maxz
+                if dx * dx + dz * dz < radius * radius:
+                    return False
+
+        cell = (cell_r, cell_c)
         # Block closed gates
         for gate in self.gates.values():
             if gate.locked and cell in set(gate.cells):
