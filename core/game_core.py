@@ -5,7 +5,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import random
 
-from core.map_data import CELLAR_LAYOUT, CELLAR_OVERLAY
+from core.map_data import CELLAR_LAYOUT, CELLAR_OVERLAY, LEVEL_DEFS
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,11 @@ class Ghost:
     yaw: float
     forward: bool = True
     target_index: int = 0
+    size_scale: float = 1.0
+    speed_mult: float = 1.0
+    collision_radius: float = 0.75
+    can_phase_walls: bool = False
+    time_penalty_s: float = 0.0
 
 
 @dataclass
@@ -157,11 +162,18 @@ class Platform:
 
 
 class GameCore:
-    def __init__(self):
+    def __init__(self, level_id: str = 'level2'):
         self._event_callbacks: Dict[str, List[Callable[[dict], None]]] = {}
 
-        self.layout = CELLAR_LAYOUT
-        self.overlay = CELLAR_OVERLAY
+        self.level_id = str(level_id or 'level2')
+        level_def = LEVEL_DEFS.get(
+            self.level_id) or LEVEL_DEFS.get('level2') or {}
+
+        self.layout = level_def.get('layout') or CELLAR_LAYOUT
+        self.overlay = level_def.get('overlay') or CELLAR_OVERLAY
+        self._sector_grid_level = level_def.get('sectors')
+        self.enabled_ghost_ids = list(level_def.get(
+            'enabled_ghost_ids') or [1, 2, 3, 4, 5])
 
         self.height = len(self.layout)
         self.width = max((len(row) for row in self.layout), default=0)
@@ -177,6 +189,14 @@ class GameCore:
         self._key_cells: Dict[str, Tuple[int, int]] = {}
         self._spike_seed_cells: Set[Tuple[int, int]] = set()
 
+        self.ghost_abilities: Dict[int, dict] = {
+            1: {'size_scale': 2.10, 'speed_mult': 1.0, 'collision_radius': 1.35, 'can_phase_walls': False, 'time_penalty_s': 0.0},
+            2: {'size_scale': 1.35, 'speed_mult': 1.05, 'collision_radius': 0.95, 'can_phase_walls': True, 'time_penalty_s': 0.0},
+            3: {'size_scale': 1.35, 'speed_mult': 1.0, 'collision_radius': 0.95, 'can_phase_walls': False, 'time_penalty_s': 0.0},
+            4: {'size_scale': 1.35, 'speed_mult': 1.85, 'collision_radius': 1.00, 'can_phase_walls': False, 'time_penalty_s': 0.0},
+            5: {'size_scale': 1.45, 'speed_mult': 1.10, 'collision_radius': 1.05, 'can_phase_walls': False, 'time_penalty_s': 30.0},
+        }
+
         self._parse_maps()
 
         spawn = self._pick_spawn_cell()
@@ -185,8 +205,8 @@ class GameCore:
         self.wall_height = 4.5
         self.ceiling_height = self.wall_height
 
-        self.coins_required = 80
-        self.keys_required = 3
+        self.coins_required = int(level_def.get('coins_required') or 80)
+        self.keys_required = int(level_def.get('keys_required') or 3)
         self.coins: Dict[Tuple[int, int], Coin] = {}
         self.key_fragments: Dict[str, KeyFragment] = {}
         self.coins_collected = 0
@@ -326,13 +346,18 @@ class GameCore:
     def _init_sectors(self) -> None:
         self._sector_grid = None
         self._sector_filled = {}
-        try:
-            from core import map_data as _md
-            grid = getattr(_md, 'CELLAR_SECTORS', None)
-            if isinstance(grid, list) and grid and all(isinstance(r, str) for r in grid):
+        if isinstance(getattr(self, '_sector_grid_level', None), list):
+            grid = getattr(self, '_sector_grid_level', None)
+            if grid and all(isinstance(r, str) for r in grid):
                 self._sector_grid = grid
-        except Exception:
-            self._sector_grid = None
+        if self._sector_grid is None:
+            try:
+                from core import map_data as _md
+                grid = getattr(_md, 'CELLAR_SECTORS', None)
+                if isinstance(grid, list) and grid and all(isinstance(r, str) for r in grid):
+                    self._sector_grid = grid
+            except Exception:
+                self._sector_grid = None
 
         # Fill unlabeled walkable cells (e.g. jail interior spaces) from nearest labeled sector.
         if self._sector_grid is not None:
@@ -504,11 +529,13 @@ class GameCore:
 
         for exit_cell in self.exit_cells:
             exclusion_zones.add(exit_cell)
-            # Only add immediate adjacent cells (1-cell radius)
-            for dr in range(-1, 2):
-                for dc in range(-1, 2):
-                    adjacent = (exit_cell[0] + dr, exit_cell[1] + dc)
-                    exclusion_zones.add(adjacent)
+            # Level 1: exclude a larger area around the exit so coins never spawn near it.
+            # ("10 blocks from E" interpreted as a 10-cell Chebyshev radius.)
+            radius = 10 if str(getattr(self, 'level_id', '')
+                               ) == 'level1' else 1
+            for dr in range(-radius, radius + 1):
+                for dc in range(-radius, radius + 1):
+                    exclusion_zones.add((exit_cell[0] + dr, exit_cell[1] + dc))
 
         # Add all gate cells to exclusion
         for gate_cell in self.gate_cells:
@@ -642,16 +669,22 @@ class GameCore:
         kh = self._key_cells.get('kh')
         kp = self._key_cells.get('kp')
 
-        if regular is not None:
-            self.key_fragments['frag_k'] = KeyFragment(
-                id='frag_k', cell=regular, kind='K')
+        candidates: List[KeyFragment] = []
         if kh is not None:
-            self.key_fragments['frag_kh'] = KeyFragment(
-                id='frag_kh', cell=kh, kind='KH')
+            candidates.append(KeyFragment(id='frag_kh', cell=kh, kind='KH'))
+        if regular is not None:
+            candidates.append(KeyFragment(id='frag_k', cell=regular, kind='K'))
         if kp is not None:
-            self.key_fragments['frag_kp'] = KeyFragment(
-                id='frag_kp', cell=kp, kind='KP')
-            self.platforms.append(Platform(cell=kp))
+            candidates.append(KeyFragment(id='frag_kp', cell=kp, kind='KP'))
+
+        spawned = 0
+        for frag in candidates:
+            if spawned >= max(0, int(self.keys_required)):
+                break
+            self.key_fragments[frag.id] = frag
+            if frag.kind == 'KP':
+                self.platforms.append(Platform(cell=frag.cell))
+            spawned += 1
 
     def _init_gates(self) -> None:
         # Group contiguous 'd' into gate spans.
@@ -746,11 +779,19 @@ class GameCore:
         # Reduced from 3.0, 3.5, 2.8, 3.2, 3.8
         speeds = {1: 2.0, 2: 2.5, 3: 1.8, 4: 2.2, 5: 2.8}
         for gid, path in self.ghost_paths.items():
+            if gid not in set(self.enabled_ghost_ids):
+                continue
             if not path:
                 continue
+            abilities = self.ghost_abilities.get(gid, {})
+
             # Filter to walkable cells only (prevents routing through walls if overlay is misaligned).
-            filtered = [
-                cell for cell in path if cell in self.floors and cell not in self.walls]
+            # If the ghost can phase walls, allow wall cells as waypoints too.
+            if bool(abilities.get('can_phase_walls', False)):
+                filtered = list(path)
+            else:
+                filtered = [
+                    cell for cell in path if cell in self.floors and cell not in self.walls]
             if len(filtered) < 2:
                 continue
 
@@ -769,6 +810,13 @@ class GameCore:
                 yaw=yaw0,
                 forward=True,
                 target_index=1 if len(path_sorted) > 1 else 0,
+                size_scale=float(abilities.get('size_scale', 1.0) or 1.0),
+                speed_mult=float(abilities.get('speed_mult', 1.0) or 1.0),
+                collision_radius=float(abilities.get(
+                    'collision_radius', 0.75) or 0.75),
+                can_phase_walls=bool(abilities.get('can_phase_walls', False)),
+                time_penalty_s=float(abilities.get(
+                    'time_penalty_s', 0.0) or 0.0),
             )
 
     def _init_jail_room_points(self) -> None:
@@ -960,6 +1008,7 @@ class GameCore:
             self.current_sector_id = sid
             self._sector_popup_id = sid
             self._sector_popup_timer = 2.0
+            self._trigger_event('sector_entered', {'id': sid})
 
     def get_save_state(self) -> dict:
         coins_taken = [f"{r},{c}" for (
@@ -1159,7 +1208,7 @@ class GameCore:
             dist = math.hypot(dx, dz)
             if dist < 1e-6:
                 dist = 1e-6
-            step = ghost.speed * dt
+            step = (ghost.speed * ghost.speed_mult) * dt
             if dist <= step:
                 ghost.x = tx
                 ghost.z = tz
@@ -1180,7 +1229,12 @@ class GameCore:
             ghost.yaw = math.atan2(vdx, vdz)
 
             # Collision check
-            if self._distance_xz(ghost.x, ghost.z, self.player.x, self.player.z) < 0.75:
+            if self._distance_xz(ghost.x, ghost.z, self.player.x, self.player.z) < float(getattr(ghost, 'collision_radius', 0.75) or 0.75):
+                penalty = float(getattr(ghost, 'time_penalty_s', 0.0) or 0.0)
+                if penalty > 0.0:
+                    self.elapsed_s += penalty
+                    self._trigger_event(
+                        'time_penalty', {'seconds': int(round(penalty))})
                 self._send_to_jail('ghost')
 
     def _advance_ghost_target(self, ghost: Ghost) -> None:
@@ -1263,32 +1317,37 @@ class GameCore:
                 fz = r + 0.5
 
                 # Check distance to fragment
-                if self._distance_xz(self.player.x, self.player.z, fx, fz) < 0.45:
+                # KP should only trigger when you're actually near the platform/fragment, not from below.
+                pickup_r = 0.50 if frag.kind == 'KP' else 0.55
+                if self._distance_xz(self.player.x, self.player.z, fx, fz) < pickup_r:
                     # For KP fragments, only trigger if platform is moving AND player is standing on platform
                     if frag.kind == 'KP':
                         # Find the platform at this location
                         player_on_platform = False
-                        platform_at_top = False
+                        platform_near_top = False
                         for platform in self.platforms:
                             if platform.cell == (r, c):
                                 # Check if player is standing on platform (within platform bounds)
                                 px, pz = self.player.x, self.player.z
                                 platform_center_x = c + 0.5
                                 platform_center_z = r + 0.5
-                                platform_radius = 0.4  # Platform radius
+                                # Platform radius (for pickup comfort)
+                                platform_radius = 0.55
 
                                 # Check if player is within platform bounds (standing on it)
                                 if (abs(px - platform_center_x) < platform_radius and
                                     abs(pz - platform_center_z) < platform_radius and
-                                        abs(self.player.y - platform.y_offset) < 0.5):  # Player is on platform surface
+                                        abs(self.player.y - platform.y_offset) < 0.75):  # Require being near platform height
                                     player_on_platform = True
 
-                                platform_at_top = platform.y_offset >= (
-                                    platform.top_height - 0.15)
+                                # Beginner-friendly: the fragment should only trigger when the platform is near its top.
+                                # This prevents instant trigger when you first step on (platform is usually at the bottom).
+                                platform_near_top = platform.y_offset >= (
+                                    platform.top_height - 0.45)
                                 break
 
-                        if not player_on_platform or not platform_at_top:
-                            continue  # Require riding the platform near the top to trigger
+                        if (not player_on_platform) or (not platform_near_top):
+                            continue
 
                     # Trigger the fragment
                     self._pending_key_fragment_id = frag.id
@@ -1505,6 +1564,7 @@ class GameCore:
             self.current_sector_id = sid
             self._sector_popup_id = sid
             self._sector_popup_timer = 2.0 if show_popup else 0.0
+            self._trigger_event('sector_entered', {'id': sid})
             return
         if show_popup:
             self._sector_popup_id = sid
@@ -1548,7 +1608,7 @@ class GameCore:
             return False
         # Prevent getting too close to walls. If the camera clips into a wall quad,
         # the near plane will cut it and you'll see "inside" the tile.
-        radius = 0.22
+        radius = 0.30
         for rr in range(cell_r - 1, cell_r + 2):
             for cc in range(cell_c - 1, cell_c + 2):
                 if (rr, cc) not in self.walls:

@@ -5,15 +5,16 @@ from pyqtgraph.opengl import GLGridItem, GLMeshItem, GLViewWidget, MeshData
 
 
 class Assembly3DMinigame(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, kind: str = 'KP'):
         super().__init__(parent)
+        self.kind = str(kind or 'KP').upper()
         self._init_3d()
 
     def _init_3d(self) -> None:
         self.setWindowTitle('3D Assembly Minigame')
         self.setModal(True)
         self.setFixedSize(900, 600)
-        
+
         self.setStyleSheet("""
             QDialog {
                 background-color: #4a4a50;
@@ -52,8 +53,8 @@ class Assembly3DMinigame(QDialog):
             }
         """)
 
-        self.pieces = self._generate_pieces_3d()
-        self.target_structure = self._generate_target_structure_3d()
+        self.pieces = self._generate_pieces_3d(self.kind)
+        self.target_structure = self._generate_target_structure_3d(self.kind)
         self.placed = [False] * len(self.pieces)
         self.selected_piece = None
         self.dragging = False
@@ -82,7 +83,8 @@ class Assembly3DMinigame(QDialog):
         ref_layout.addWidget(self.ref_view, stretch=1)
 
         for i, part in enumerate(self.target_structure):
-            mesh = self._create_mesh_3d(part['type'], color=self.pieces[i]['color'])
+            mesh = self._create_mesh_3d(
+                part['type'], color=self.pieces[i]['color'])
             self._set_mesh_transform_3d(mesh, part['pos'], part['rot'])
             self.ref_view.addItem(mesh)
 
@@ -167,14 +169,15 @@ class Assembly3DMinigame(QDialog):
         for i, piece in enumerate(self.pieces):
             btn = QPushButton(f"{piece['type'].capitalize()} {i + 1}")
             btn.setCheckable(True)
-            btn.clicked.connect(lambda checked=False, idx=i: self._select_piece_by_button_3d(idx))
+            btn.clicked.connect(lambda checked=False,
+                                idx=i: self._select_piece_by_button_3d(idx))
             self.piece_btns.append(btn)
             piece_btn_layout.addWidget(btn)
         asm_layout.addLayout(piece_btn_layout)
 
         arrow_grid = QGridLayout()
         arrow_grid.setSpacing(4)
-        
+
         btn_up = QPushButton('↑')
         btn_up.clicked.connect(lambda: self._move_selected_piece_3d(0, 1, 0))
         btn_up.setFixedSize(40, 40)
@@ -194,9 +197,10 @@ class Assembly3DMinigame(QDialog):
             }
         """)
         arrow_grid.addWidget(btn_up, 0, 1)
-        
+
         btn_left = QPushButton('←')
-        btn_left.clicked.connect(lambda: self._move_selected_piece_3d(-1, 0, 0))
+        btn_left.clicked.connect(
+            lambda: self._move_selected_piece_3d(-1, 0, 0))
         btn_left.setFixedSize(40, 40)
         btn_left.setStyleSheet("""
             QPushButton {
@@ -214,9 +218,10 @@ class Assembly3DMinigame(QDialog):
             }
         """)
         arrow_grid.addWidget(btn_left, 1, 0)
-        
+
         btn_down = QPushButton('↓')
-        btn_down.clicked.connect(lambda: self._move_selected_piece_3d(0, -1, 0))
+        btn_down.clicked.connect(
+            lambda: self._move_selected_piece_3d(0, -1, 0))
         btn_down.setFixedSize(40, 40)
         btn_down.setStyleSheet("""
             QPushButton {
@@ -234,9 +239,10 @@ class Assembly3DMinigame(QDialog):
             }
         """)
         arrow_grid.addWidget(btn_down, 2, 1)
-        
+
         btn_right = QPushButton('→')
-        btn_right.clicked.connect(lambda: self._move_selected_piece_3d(1, 0, 0))
+        btn_right.clicked.connect(
+            lambda: self._move_selected_piece_3d(1, 0, 0))
         btn_right.setFixedSize(40, 40)
         btn_right.setStyleSheet("""
             QPushButton {
@@ -273,9 +279,10 @@ class Assembly3DMinigame(QDialog):
             }
         """)
         arrow_grid.addWidget(btn_zup, 0, 3)
-        
+
         btn_zdown = QPushButton('Z-')
-        btn_zdown.clicked.connect(lambda: self._move_selected_piece_3d(0, 0, -1))
+        btn_zdown.clicked.connect(
+            lambda: self._move_selected_piece_3d(0, 0, -1))
         btn_zdown.setFixedSize(40, 40)
         btn_zdown.setStyleSheet("""
             QPushButton {
@@ -321,18 +328,82 @@ class Assembly3DMinigame(QDialog):
 
         self._update_feedback_3d()
 
-    def _generate_pieces_3d(self):
-        return [
-            {'type': 'cube', 'color': (255, 223, 0, 220), 'pos': np.array([2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
-            {'type': 'cube', 'color': (0, 149, 255, 220), 'pos': np.array([-2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
-            {'type': 'pyramid', 'color': (255, 69, 0, 220), 'pos': np.array([0, 0, 0], dtype=float), 'rot': [0, 0, 0]},
-        ]
+    def _generate_pieces_3d(self, kind: str):
+        yellow = (255, 223, 0, 220)
+        blue = (0, 149, 255, 220)
+        red = (255, 69, 0, 220)
+        kind = str(kind or 'KP').upper()
 
-    def _generate_target_structure_3d(self):
+        # KP: keep existing 2 cubes + 1 pyramid.
+        if kind == 'KP':
+            return [
+                {'type': 'cube', 'color': yellow, 'pos': np.array(
+                    [2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'cube', 'color': blue, 'pos': np.array(
+                    [-2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'pyramid', 'color': red, 'pos': np.array(
+                    [0, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+            ]
+
+        # K: simplified (5 cubes): 3 base cubes, plus 2 cubes stacked on the first two.
+        if kind == 'K':
+            colors = [blue, yellow, red, red, blue]
+            pieces = []
+            for i, col in enumerate(colors):
+                pieces.append({'type': 'cube', 'color': col, 'pos': np.array(
+                    [-3 + i, 0, 0], dtype=float), 'rot': [0, 0, 0]})
+            return pieces
+
+        # KH: simplified (4 pieces): 2 cubes base + 2 pyramids on top.
+        colors = [yellow, red, blue, yellow]
+        types = ['cube', 'cube', 'pyramid', 'pyramid']
+        pieces = []
+        for i, (t, col) in enumerate(zip(types, colors)):
+            pieces.append({'type': t, 'color': col, 'pos': np.array(
+                [-2 + i, 0, 0], dtype=float), 'rot': [0, 0, 0]})
+        return pieces
+
+    def _generate_target_structure_3d(self, kind: str):
+        kind = str(kind or 'KP').upper()
+
+        if kind == 'KP':
+            return [
+                {'type': 'cube', 'pos': np.array(
+                    [0, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'cube', 'pos': np.array(
+                    [0, 1, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'pyramid', 'pos': np.array(
+                    [0, 2, 0], dtype=float), 'rot': [0, 0, 0]},
+            ]
+
+        if kind == 'K':
+            # Simplified per diagram:
+            # Base line of 3 cubes at y=0: x = 0..2
+            # Stack: cubes at (0,1) and (1,1)
+            return [
+                {'type': 'cube', 'pos': np.array(
+                    [0, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'cube', 'pos': np.array(
+                    [1, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'cube', 'pos': np.array(
+                    [2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'cube', 'pos': np.array(
+                    [0, 1, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'cube', 'pos': np.array(
+                    [1, 1, 0], dtype=float), 'rot': [0, 0, 0]},
+            ]
+
+        # KH: simplified per diagram:
+        # Two base cubes at y=0 (x=0..1), with two pyramids at y=1.
         return [
-            {'type': 'cube', 'pos': np.array([0, 0, 0], dtype=float), 'rot': [0, 0, 0]},
-            {'type': 'cube', 'pos': np.array([0, 1, 0], dtype=float), 'rot': [0, 0, 0]},
-            {'type': 'pyramid', 'pos': np.array([0, 2, 0], dtype=float), 'rot': [0, 0, 0]},
+            {'type': 'cube', 'pos': np.array(
+                [0, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+            {'type': 'cube', 'pos': np.array(
+                [1, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+            {'type': 'pyramid', 'pos': np.array(
+                [0, 1, 0], dtype=float), 'rot': [0, 0, 0]},
+            {'type': 'pyramid', 'pos': np.array(
+                [1, 1, 0], dtype=float), 'rot': [0, 0, 0]},
         ]
 
     def _create_mesh_3d(self, type, color):
@@ -370,7 +441,8 @@ class Assembly3DMinigame(QDialog):
             md = MeshData(vertexes=verts, faces=faces)
         elif type == 'pyramid':
             verts = np.array(
-                [[0, 0.5, 0], [0.5, -0.5, 0.5], [0.5, -0.5, -0.5], [-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5]],
+                [[0, 0.5, 0], [0.5, -0.5, 0.5], [0.5, -0.5, -0.5],
+                    [-0.5, -0.5, -0.5], [-0.5, -0.5, 0.5]],
                 dtype=float,
             )
             faces = np.array(
@@ -402,14 +474,16 @@ class Assembly3DMinigame(QDialog):
             pts = np.array([[x, -1.5, 0], [x, 2.5, 0]])
             color = (1.0, 0.84, 0.0, 0.3) if x == 0 else (0.3, 0.3, 0.3, 0.2)
             width = 2.0 if x == 0 else 1.5
-            grid = GLLinePlotItem(pos=pts, color=color, width=width, antialias=True, mode='lines')
+            grid = GLLinePlotItem(pos=pts, color=color,
+                                  width=width, antialias=True, mode='lines')
             glview.addItem(grid)
             grid_lines.append(grid)
         for y in range(-1, 4):
             pts = np.array([[-4, y, 0], [4, y, 0]])
             color = (1.0, 0.84, 0.0, 0.3) if y == 0 else (0.3, 0.3, 0.3, 0.2)
             width = 2.0 if y == 0 else 1.5
-            grid = GLLinePlotItem(pos=pts, color=color, width=width, antialias=True, mode='lines')
+            grid = GLLinePlotItem(pos=pts, color=color,
+                                  width=width, antialias=True, mode='lines')
             glview.addItem(grid)
             grid_lines.append(grid)
         self.grid_lines = grid_lines
@@ -442,7 +516,8 @@ class Assembly3DMinigame(QDialog):
             """)
             self._show_congratulations_3d()
         else:
-            self.feedback_label.setText("Select piece → Use arrows to move → Z+/- for height")
+            self.feedback_label.setText(
+                "Select piece → Use arrows to move → Z+/- for height")
             self.feedback_label.setStyleSheet("""
                 QLabel {
                     color: #ffffff;
@@ -473,7 +548,8 @@ class Assembly3DMinigame(QDialog):
         new_pos[1] = max(self.GRID_MIN, min(self.GRID_MAX, new_pos[1] + dy))
         new_pos[2] = max(self.Z_MIN, min(self.Z_MAX, new_pos[2] + dz))
         self.pieces[self.selected_piece]['pos'] = new_pos
-        self._set_mesh_transform_3d(self.meshes[self.selected_piece], new_pos, self.pieces[self.selected_piece]['rot'])
+        self._set_mesh_transform_3d(
+            self.meshes[self.selected_piece], new_pos, self.pieces[self.selected_piece]['rot'])
         self._update_feedback_3d()
 
     def _check_assembly_3d(self):
@@ -518,9 +594,11 @@ class Assembly3DMinigame(QDialog):
 
     def _reset_pieces_3d(self):
         for i, piece in enumerate(self.pieces):
-            piece['pos'] = np.array([2 if i == 0 else -2 if i == 1 else 0, 0, 0 if i < 2 else 2], dtype=float)
+            piece['pos'] = np.array(
+                [2 if i == 0 else -2 if i == 1 else 0, 0, 0 if i < 2 else 2], dtype=float)
             piece['rot'] = [0, 0, 0]
-            self._set_mesh_transform_3d(self.meshes[i], piece['pos'], piece['rot'])
+            self._set_mesh_transform_3d(
+                self.meshes[i], piece['pos'], piece['rot'])
             self.placed[i] = False
         self.selected_piece = None
         self._update_feedback_3d()
@@ -542,7 +620,8 @@ class Assembly3DMinigame(QDialog):
             pos[0] = round(pos[0])
             pos[1] = round(pos[1])
             self.pieces[self.selected_piece]['pos'] = pos
-            self._set_mesh_transform_3d(self.meshes[self.selected_piece], pos, self.pieces[self.selected_piece]['rot'])
+            self._set_mesh_transform_3d(
+                self.meshes[self.selected_piece], pos, self.pieces[self.selected_piece]['rot'])
             self.last_mouse_pos = event.pos()
             self._update_feedback_3d()
 
@@ -586,5 +665,3 @@ class Assembly3DMinigame(QDialog):
         )
         msg.exec()
         self.accept()
-
-
