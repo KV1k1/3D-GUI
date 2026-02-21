@@ -982,35 +982,115 @@ class OpenGLRenderer:
                 glEnd()
                 glBindTexture(GL_TEXTURE_2D, 0)
 
-        # Key fragments: glowing shards
+        # Key fragments: 3D keys with bob + spin (coin-like)
+        def _draw_key_3d() -> None:
+            # Model space: centered around origin. Y is up.
+            # Ring (handle): simple flat loop built from quads (no GLU dependency).
+            glPushMatrix()
+            glTranslatef(0.23, 0.06, 0.0)
+            outer_r = 0.16
+            inner_r = 0.11
+            thickness = 0.035
+            seg = 24
+            TWO_PI = 6.283185307179586
+            glBegin(GL_QUADS)
+            for i in range(seg):
+                a0 = TWO_PI * (i / seg)
+                a1 = TWO_PI * ((i + 1) / seg)
+                c0 = math.cos(a0)
+                s0 = math.sin(a0)
+                c1 = math.cos(a1)
+                s1 = math.sin(a1)
+
+                # Outer wall
+                glVertex3f(outer_r * c0, -thickness, outer_r * s0)
+                glVertex3f(outer_r * c1, -thickness, outer_r * s1)
+                glVertex3f(outer_r * c1, +thickness, outer_r * s1)
+                glVertex3f(outer_r * c0, +thickness, outer_r * s0)
+
+                # Inner wall
+                glVertex3f(inner_r * c1, -thickness, inner_r * s1)
+                glVertex3f(inner_r * c0, -thickness, inner_r * s0)
+                glVertex3f(inner_r * c0, +thickness, inner_r * s0)
+                glVertex3f(inner_r * c1, +thickness, inner_r * s1)
+
+                # Front face
+                glVertex3f(inner_r * c0, +thickness, inner_r * s0)
+                glVertex3f(inner_r * c1, +thickness, inner_r * s1)
+                glVertex3f(outer_r * c1, +thickness, outer_r * s1)
+                glVertex3f(outer_r * c0, +thickness, outer_r * s0)
+
+                # Back face
+                glVertex3f(outer_r * c0, -thickness, outer_r * s0)
+                glVertex3f(outer_r * c1, -thickness, outer_r * s1)
+                glVertex3f(inner_r * c1, -thickness, inner_r * s1)
+                glVertex3f(inner_r * c0, -thickness, inner_r * s0)
+            glEnd()
+            glPopMatrix()
+
+            # Shaft (thin box)
+            glPushMatrix()
+            glTranslatef(-0.12, 0.06, 0.0)
+            glScalef(0.52, 0.06, 0.08)
+            self._draw_untextured_cube()
+            glPopMatrix()
+
+            # Teeth (2-3 small boxes)
+            for tx, th in ((-0.34, 0.12), (-0.25, 0.09), (-0.18, 0.07)):
+                glPushMatrix()
+                glTranslatef(tx, 0.02, 0.0)
+                glScalef(0.06, th, 0.08)
+                self._draw_untextured_cube()
+                glPopMatrix()
+
         for frag in self.core.key_fragments.values():
             if frag.taken:
                 continue
+
             r, c = frag.cell
             cx = c + 0.5
             cz = r + 0.5
+
             if frag.kind == 'KH':
                 base = (0.55, 0.95, 1.0, 0.95)
-                glow = (0.65, 1.0, 1.0, 0.22)
+                glow_rgb = (0.65, 1.0, 1.0)
             elif frag.kind == 'KP':
                 base = (0.9, 0.65, 1.0, 0.95)
-                glow = (0.95, 0.75, 1.0, 0.22)
+                glow_rgb = (0.95, 0.75, 1.0)
             else:
                 base = (0.75, 1.0, 0.65, 0.95)
-                glow = (0.85, 1.0, 0.75, 0.22)
+                glow_rgb = (0.85, 1.0, 0.75)
 
-            # Place KP fragment relative to the moving platform, others at normal height.
+            # KP stays near ceiling; others float at normal height.
             if frag.kind == 'KP':
-                fragment_y = float(self.core.ceiling_height) - 0.85
+                base_y = float(self.core.ceiling_height) - 0.85
             else:
-                fragment_y = 1.18  # Normal height
+                base_y = 1.18
 
-            billboard_quad(cx, fragment_y, cz, 0.34, 0.46, base)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-            glDepthMask(False)
-            billboard_quad(cx, fragment_y, cz, 0.55, 0.70, glow)
-            glDepthMask(True)
+            # frag.id is a string (e.g. "frag_kh"); derive a stable numeric seed for animation.
+            seed = float(sum((i + 1) * ord(ch)
+                         for i, ch in enumerate(str(getattr(frag, 'id', '')))) % 997)
+            bob = 0.08 * math.sin(self._anim_t * 2.4 + seed)
+            spin_degrees = (self._anim_t * 140.0 + seed * 37.0) % 360.0
+
+            glPushMatrix()
+            glTranslatef(cx, base_y + bob, cz)
+            glRotatef(spin_degrees, 0.0, 1.0, 0.0)
+            glRotatef(90.0, 0.0, 0.0, 1.0)
+            glScalef(1.05, 1.05, 1.05)
+
+            glDisable(GL_LIGHTING)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glColor4f(base[0], base[1], base[2], base[3])
+            _draw_key_3d()
+
+            # Soft glow aura
+            try:
+                soft_aura(cx, base_y + bob + 0.05, cz, 0.55, glow_rgb, 0.12)
+            except Exception:
+                pass
+
+            glPopMatrix()
 
         # Checkpoint arrow: green arrow pointing down, visible through walls
         if self.core.checkpoint_arrow and self.core.checkpoint_arrow.visible:
@@ -1122,14 +1202,16 @@ class OpenGLRenderer:
             5: (0.95, 0.35, 1.0, 0.82),
         }
         for g in self.core.ghosts.values():
-            bob = 0.22 * math.sin(self._anim_t * 3.8 + g.id)
+            bob = 0.05 * math.sin(self._anim_t * 2.0 + g.id)
             wobble = 0.06 * math.sin(self._anim_t * 4.6 + g.id * 0.7)
+            s = float(getattr(g, 'size_scale', 1.0) or 1.0)
+            y_raise = 0.18 + 0.22 * max(0.0, s - 1.0)
             glPushMatrix()
-            glTranslatef(g.x, 1.15 + bob + wobble, g.z)
+            glTranslatef(g.x, 1.15 + y_raise + bob + wobble, g.z)
             # In our coordinate convention yaw=0 means +Z. glRotatef expects degrees.
             glRotatef(math.degrees(g.yaw), 0.0, 1.0, 0.0)
             # Wider + taller silhouette
-            glScalef(2.10, 2.75, 2.10)
+            glScalef(2.10 * s, 2.75 * s, 2.10 * s)
 
             glDepthMask(False)
             _draw_ghost_3d(ghost_colors.get(g.id, (1.0, 0.55, 0.15, 0.92)))
@@ -1138,8 +1220,8 @@ class OpenGLRenderer:
             glPopMatrix()
 
             col = ghost_colors.get(g.id, (1.0, 0.55, 0.15, 0.92))
-            soft_aura(g.x, 1.15 + bob + 0.05, g.z, 0.70,
-                      (col[0], col[1], col[2]), 0.14)
+            soft_aura(g.x, 1.15 + y_raise + bob + 0.05, g.z,
+                      0.70 * s, (col[0], col[1], col[2]), 0.14)
 
         ceil_h = float(self.core.ceiling_height)
 
@@ -1539,19 +1621,19 @@ class OpenGLRenderer:
             return 0
 
         palette = {
-            'A': QColor(40, 70, 180, 255),
-            'B': QColor(150, 95, 40, 255),
-            'C': QColor(40, 150, 65, 255),
-            'D': QColor(60, 150, 150, 255),
-            'E': QColor(150, 60, 110, 255),
-            'F': QColor(150, 150, 55, 255),
-            'G': QColor(130, 60, 170, 255),
-            'H': QColor(120, 120, 120, 255),
+            'A': QColor(80, 120, 200, 255),
+            'B': QColor(180, 130, 80, 255),
+            'C': QColor(80, 180, 100, 255),
+            'D': QColor(110, 180, 180, 255),
+            'E': QColor(180, 100, 140, 255),
+            'F': QColor(180, 180, 90, 255),
+            'G': QColor(160, 100, 190, 255),
+            'H': QColor(150, 150, 150, 255),
         }
 
         w, h = 640, 420
         img = QImage(w, h, QImage.Format.Format_RGBA8888)
-        img.fill(QColor(30, 22, 16, 255))
+        img.fill(QColor(50, 42, 36, 255))
 
         margin = 28
         cell_w = (w - margin * 2) / float(grid_w)
@@ -1609,24 +1691,13 @@ class OpenGLRenderer:
             py = oy + (cr + 0.5) * cell
             p.drawText(int(px - 22), int(py + 22), sid[:1])
 
-        # jail / exit labels
+        # exit labels
         font_small = QFont('Arial', 22)
         font_small.setBold(True)
         p.setFont(font_small)
-        if getattr(self.core, 'jail_spawn_cell', None):
-            jr, jc = self.core.jail_spawn_cell
-            px = ox + (jc + 0.5) * cell
-            py = oy + (jr + 0.5) * cell
-            box_w = 70
-            box_h = 26
-            p.fillRect(int(px - box_w / 2), int(py - box_h / 2),
-                       box_w, box_h, QColor(210, 190, 175, 200))
-            p.setPen(QColor(15, 15, 16, 255))
-            p.drawText(int(px - box_w / 2) + 10, int(py + 9), 'jail')
-            p.setPen(QColor(10, 10, 12, 255))
         if getattr(self.core, 'exit_cells', None):
             er, ec = self.core.exit_cells[0]
-            px = ox + (ec + 0.5) * cell
+            px = ox + (ec + 0.5) * cell + 5
             py = oy + (er + 0.5) * cell
             box_w = 64
             box_h = 26
