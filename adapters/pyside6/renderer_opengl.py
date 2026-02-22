@@ -685,6 +685,14 @@ class OpenGLRenderer:
             floor_glow(cx, cz, 0.015, 1.05, (1.0, 0.90, 0.35), 0.12)
             floor_glow(cx, cz, 0.016, 0.55, (1.0, 0.90, 0.35), 0.14)
 
+            # Subtle halo around the coin (soft, seamless)
+            try:
+                pulse = 0.08 + 0.03 * \
+                    math.sin(anim_time * 2.2 + (r * 0.17 + c * 0.23))
+                soft_aura(cx, 1.24 + bob, cz, 0.40, (1.0, 0.90, 0.35), pulse)
+            except Exception:
+                pass
+
         def _draw_letter(letter: str) -> None:
             glBegin(GL_LINES)
             if letter == 'A':

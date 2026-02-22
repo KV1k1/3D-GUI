@@ -1,6 +1,6 @@
 import numpy as np
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtWidgets import QDialog, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget, QSizePolicy
 from pyqtgraph.opengl import GLGridItem, GLMeshItem, GLViewWidget, MeshData
 
 
@@ -115,6 +115,9 @@ class Assembly3DMinigame(QDialog):
         controls_layout = QHBoxLayout()
         self.feedback_label = QLabel('')
         self.feedback_label.setAlignment(Qt.AlignCenter)
+        self.feedback_label.setFixedHeight(38)
+        self.feedback_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.feedback_label.setFixedWidth(420)
         self.feedback_label.setStyleSheet("""
             QLabel {
                 color: #ffffff;
@@ -506,7 +509,7 @@ class Assembly3DMinigame(QDialog):
             self.feedback_label.setStyleSheet("""
                 QLabel {
                     color: #ffffff;
-                    font-size: 16px;
+                    font-size: 14px;
                     font-weight: 700;
                     padding: 8px;
                     background-color: #2d5a2d;
@@ -553,23 +556,48 @@ class Assembly3DMinigame(QDialog):
         self._update_feedback_3d()
 
     def _check_assembly_3d(self):
-        color_ok = True
-        for i, (piece, target) in enumerate(zip(self.pieces, self.target_structure)):
-            if piece['color'] != self.pieces[i]['color'] or piece['type'] != target['type']:
-                color_ok = False
+        def neighbors_from_positions(positions: list[np.ndarray]) -> dict[int, set[int]]:
+            adj: dict[int, set[int]] = {i: set()
+                                        for i in range(len(positions))}
+            ipos = [np.round(p).astype(int) for p in positions]
+            for i in range(len(ipos)):
+                for j in range(i + 1, len(ipos)):
+                    diff = np.abs(ipos[i] - ipos[j])
+                    touching = (np.sum(diff == 1) == 1) and (
+                        np.sum(diff == 0) == 2)
+                    if touching:
+                        adj[i].add(j)
+                        adj[j].add(i)
+            return adj
+
+        # Build a target adjacency graph from the reference structure.
+        # We match pieces by index: the i-th piece must be the i-th target's type/color.
+        # Placement is considered correct if the touching/connection graph matches, regardless
+        # of whether connections are vertical or side-by-side.
+        color_type_ok = True
+        for i, target in enumerate(self.target_structure):
+            if i >= len(self.pieces):
+                color_type_ok = False
+                break
+            if self.pieces[i]['type'] != target['type']:
+                color_type_ok = False
+                break
+
+        target_adj = neighbors_from_positions(
+            [t['pos'] for t in self.target_structure])
+        placed_adj = neighbors_from_positions([p['pos'] for p in self.pieces])
         adjacency_ok = True
-        for i in range(len(self.pieces) - 1):
-            a = np.round(self.pieces[i]['pos']).astype(int)
-            b = np.round(self.pieces[i + 1]['pos']).astype(int)
-            diff = np.abs(a - b)
-            if not (np.sum(diff == 1) == 1 and np.sum(diff == 0) == 2):
+        for i in range(len(self.target_structure)):
+            if placed_adj.get(i, set()) != target_adj.get(i, set()):
                 adjacency_ok = False
-        if color_ok and adjacency_ok:
+                break
+
+        if color_type_ok and adjacency_ok:
             self.feedback_label.setText("🎉 Perfect Assembly! 🎉")
             self.feedback_label.setStyleSheet("""
                 QLabel {
                     color: #ffffff;
-                    font-size: 16px;
+                    font-size: 14px;
                     font-weight: 700;
                     padding: 8px;
                     background-color: #2d5a2d;

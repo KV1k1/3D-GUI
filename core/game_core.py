@@ -1025,6 +1025,7 @@ class GameCore:
             }
         return {
             'version': 1,
+            'level_id': str(getattr(self, 'level_id', '') or ''),
             'player': {
                 'x': float(self.player.x),
                 'y': float(self.player.y),
@@ -1056,10 +1057,6 @@ class GameCore:
         self.player.pitch = float(player.get('pitch', self.player.pitch))
 
         self.elapsed_s = float(state.get('elapsed_s', self.elapsed_s))
-        self.coins_collected = int(
-            state.get('coins_collected', self.coins_collected))
-        self.keys_collected = int(
-            state.get('keys_collected', self.keys_collected))
         self.in_jail = bool(state.get('in_jail', self.in_jail))
         self.jail_entries = int(state.get('jail_entries', self.jail_entries))
 
@@ -1071,6 +1068,12 @@ class GameCore:
                           for x in (state.get('key_fragments_taken') or []))
         for fid, frag in self.key_fragments.items():
             frag.taken = fid in frags_taken
+
+        # Derive counters from taken flags to avoid over-counting and inconsistent saves.
+        self.coins_collected = sum(
+            1 for coin in self.coins.values() if coin.taken)
+        self.keys_collected = sum(
+            1 for frag in self.key_fragments.values() if frag.taken)
 
         gates = state.get('gates')
         if isinstance(gates, dict):
