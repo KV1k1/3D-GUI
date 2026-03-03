@@ -72,6 +72,12 @@ class GameGLWidget(QOpenGLWidget):
     def resizeGL(self, w: int, h: int) -> None:
         self.renderer.resize(w, h)
 
+    def _safe_update(self) -> None:
+        try:
+            self.update()
+        except Exception:
+            pass
+
     def paintGL(self) -> None:
         self.performance_monitor.start_frame()
 
@@ -98,10 +104,7 @@ class GameGLWidget(QOpenGLWidget):
             self.performance_monitor.set_resolution(
                 self.width(), self.height())
 
-        if self.core.elapsed_s > 0 and self.performance_monitor.gameplay_start_time is None:
-            self.performance_monitor.start_gameplay()
-
-        if self.core.game_completed and self.performance_monitor.gameplay_end_time is None:
+        if self.core.game_completed:
             self.performance_monitor.end_gameplay()
             self.performance_monitor.freeze_stats()
 
@@ -149,8 +152,8 @@ class GameGLWidget(QOpenGLWidget):
 
             font.setPointSize(18)
             painter.setFont(font)
-            time_text = f"Time: {self.core.elapsed_s:.1f} seconds"
-            painter.drawText(0, 100, width, 40, Qt.AlignCenter, time_text)
+            painter.drawText(0, 100, width, 40, Qt.AlignCenter,
+                             f"Time: {self.core.elapsed_s:.1f} seconds")
 
             font.setPointSize(16)
             painter.setFont(font)
@@ -194,10 +197,7 @@ class GameGLWidget(QOpenGLWidget):
             self._lore_queue.append(s)
         if not self._lore_current and self._lore_queue:
             self._advance_lore_line()
-        try:
-            self.update()
-        except Exception:
-            pass
+        self._safe_update()
 
     def _advance_lore_line(self) -> None:
         if not self._lore_queue:
@@ -224,7 +224,6 @@ class GameGLWidget(QOpenGLWidget):
 
         now = time.perf_counter()
         if now >= self._lore_current_end:
-            self._advance_lore_line()
             if not self._lore_current:
                 return
             now = time.perf_counter()
@@ -283,10 +282,7 @@ class GameGLWidget(QOpenGLWidget):
         self._modal_allow_close = bool(allow_close)
         self._modal_return_to_pause = bool(return_to_pause)
         self._modal_btn_rects.clear()
-        try:
-            self.update()
-        except Exception:
-            pass
+        self._safe_update()
 
     def show_tutorial_modal(self, *, title: str, body: str) -> None:
         self._modal_visible = True
@@ -296,10 +292,7 @@ class GameGLWidget(QOpenGLWidget):
         self._modal_allow_close = True
         self._modal_return_to_pause = False
         self._modal_btn_rects.clear()
-        try:
-            self.update()
-        except Exception:
-            pass
+        self._safe_update()
 
     def hide_modal(self) -> None:
         self._modal_visible = False
@@ -309,10 +302,7 @@ class GameGLWidget(QOpenGLWidget):
         self._modal_btn_rects.clear()
         self._modal_allow_close = True
         self._modal_return_to_pause = False
-        try:
-            self.update()
-        except Exception:
-            pass
+        self._safe_update()
 
     def _draw_modal(self, painter: QPainter) -> None:
         w = self.width()
@@ -442,14 +432,14 @@ class GameGLWidget(QOpenGLWidget):
         painter.setFont(self._hud_font)
         painter.setPen(QColor(235, 235, 235))
 
-        fps = self.performance_monitor.avg_fps()
+        fps = self.performance_monitor.stable_fps(update_interval_s=2.5)
         lat = self.performance_monitor.avg_input_latency_ms()
         ram = self.performance_monitor.current_ram_mb()
 
         stats_x = x0 + 36
         stats_y = y0 + 96
         line_h = 24
-        painter.drawText(stats_x, stats_y + line_h * 0, f'Avg FPS: {fps:.1f}')
+        painter.drawText(stats_x, stats_y + line_h * 0, f'FPS: {int(fps)}')
         painter.drawText(stats_x, stats_y + line_h * 1,
                          f'Avg input latency: {lat:.1f} ms')
         painter.drawText(stats_x, stats_y + line_h *
@@ -492,14 +482,14 @@ class GameGLWidget(QOpenGLWidget):
                 # Circular vignette: clear in the center, fades to dark edges.
                 cx = w * 0.5
                 cy = h * 0.52
-                r_inner = 0.28 * min(w, h)
+                r_inner = 0.32 * min(w, h)
                 r_outer = 0.74 * min(w, h)
                 vign = QRadialGradient(
                     QPointF(cx, cy), r_outer, QPointF(cx, cy))
                 vign.setColorAt(0.0, QColor(0, 0, 0, 0))
                 vign.setColorAt(
                     max(0.01, min(0.95, r_inner / r_outer)), QColor(0, 0, 0, 0))
-                vign.setColorAt(1.0, QColor(0, 0, 0, 210))
+                vign.setColorAt(1.0, QColor(0, 0, 0, 190))
                 painter.fillRect(0, 0, w, h, vign)
 
                 # Subtle animated fog/noise in the vignette (very light).
@@ -558,6 +548,7 @@ class GameGLWidget(QOpenGLWidget):
         elif self._time_bonus_text and nowp >= self._time_bonus_until:
             self._time_bonus_text = ''
         painter.setFont(self._hud_font)
+        painter.setPen(QColor(240, 240, 240))
         painter.drawText(
             x + 12, y + 44, f'Coins: {self.core.coins_collected}/{self.core.coins_required}   Keys: {self.core.keys_collected}/{self.core.keys_required}')
 
@@ -793,10 +784,7 @@ class GameGLWidget(QOpenGLWidget):
                         if key == 'close':
                             win = self.window()
                             if hasattr(win, '_on_modal_close_clicked'):
-                                try:
-                                    win._on_modal_close_clicked()
-                                except Exception:
-                                    pass
+                                win._on_modal_close_clicked()
                             return
 
                         if self._modal_kind == 'level_select':
@@ -804,10 +792,7 @@ class GameGLWidget(QOpenGLWidget):
                                 return
                             win = self.window()
                             if hasattr(win, '_on_level_selected'):
-                                try:
-                                    win._on_level_selected(key)
-                                except Exception:
-                                    pass
+                                win._on_level_selected(key)
                             return
             return
         if getattr(self.core, 'paused', False):
@@ -922,26 +907,8 @@ class PySide6GameWindow(QMainWindow):
         self._ghost_sound_timer.timeout.connect(self._play_ghost_sound)
         self._ghost_sound_timer.start(2500)
 
-        self.core.register_event_callback('coin_picked', self._on_coin_picked)
-        self.core.register_event_callback('gate_opened', self._on_gate_moved)
-        self.core.register_event_callback('gate_closed', self._on_gate_moved)
-        self.core.register_event_callback('game_won', self._on_game_won)
-        self.core.register_event_callback(
-            'time_penalty', self._on_time_penalty)
-        self.core.register_event_callback(
-            'exit_unlocked', self._on_exit_unlocked)
-        self.core.register_event_callback(
-            'sector_entered', self._on_sector_entered)
-        self.core.register_event_callback(
-            'sent_to_jail', self._on_sent_to_jail)
-        self.core.register_event_callback('left_jail', self._on_left_jail)
-        self.core.register_event_callback('key_picked', self._on_key_picked)
-        self.core.register_event_callback(
-            'player_move', self._on_player_move_event)
-
         self._key_minigame_open = False
-        self.core.register_event_callback(
-            'key_fragment_encountered', self._on_key_fragment_encountered)
+        self._register_core_callbacks()
 
         self.setWindowTitle('Within the Walls (PySide6)')
         self.resize(1280, 800)
@@ -965,11 +932,11 @@ class PySide6GameWindow(QMainWindow):
         # - First boot / Level 1: show level select first.
         # - After the player has entered Level 2 at least once, restart resumes directly into Level 2.
         if self._current_level_id == 'level2':
-            self.core.paused = False
+            self._set_paused(False)
             self._start_level(
                 'level2', load_save=os.path.exists(self._save_path))
         elif autoload_level1_save:
-            self.core.paused = False
+            self._set_paused(False)
             self._start_level('level1', load_save=True)
         else:
             self._open_level_select_modal(startup=True)
@@ -985,6 +952,34 @@ class PySide6GameWindow(QMainWindow):
         # With the new level system, entering a level always starts fresh.
         # We keep Save Game for convenience. If a save exists and the last level is Level 1,
         # we auto-load it so the player can continue progress.
+
+    def _register_core_callbacks(self) -> None:
+        self.core.register_event_callback('coin_picked', self._on_coin_picked)
+        self.core.register_event_callback('gate_opened', self._on_gate_moved)
+        self.core.register_event_callback('gate_closed', self._on_gate_moved)
+        self.core.register_event_callback(
+            'key_fragment_encountered', self._on_key_fragment_encountered)
+        self.core.register_event_callback('game_won', self._on_game_won)
+        self.core.register_event_callback(
+            'checkpoint_reached', self._on_checkpoint_reached)
+        self.core.register_event_callback(
+            'time_penalty', self._on_time_penalty)
+        self.core.register_event_callback(
+            'exit_unlocked', self._on_exit_unlocked)
+        self.core.register_event_callback(
+            'sector_entered', self._on_sector_entered)
+        self.core.register_event_callback(
+            'sent_to_jail', self._on_sent_to_jail)
+        self.core.register_event_callback('left_jail', self._on_left_jail)
+        self.core.register_event_callback('key_picked', self._on_key_picked)
+        self.core.register_event_callback(
+            'player_move', self._on_player_move_event)
+
+    def _safe_gl_update(self) -> None:
+        try:
+            self.gl.update()
+        except Exception:
+            pass
 
     def _load_progression(self) -> dict:
         if not os.path.exists(self._progress_path):
@@ -1010,11 +1005,7 @@ class PySide6GameWindow(QMainWindow):
 
     def _open_level_select_modal(self, *, startup: bool) -> None:
         unlocked = set(self._progress.get('unlocked_levels') or [])
-        self.core.paused = True
-        try:
-            self._set_footsteps_playing(False)
-        except Exception:
-            pass
+        self._set_paused(True)
         try:
             self.gl.hide_mouse_capture()
         except Exception:
@@ -1024,7 +1015,7 @@ class PySide6GameWindow(QMainWindow):
 
     def _on_level_selected(self, level_id: str) -> None:
         self.gl.hide_modal()
-        self.core.paused = False
+        self._set_paused(False)
 
         # Persist "last_level" so restarting the game can resume at Level 2.
         try:
@@ -1035,14 +1026,6 @@ class PySide6GameWindow(QMainWindow):
 
         # Selecting a level always starts fresh; do NOT load a previous Level 1 save.
         self._start_level(level_id, load_save=False)
-
-        # Level 1 intro flow: one lore thought, then the single Gameplay tutorial modal.
-        if str(level_id) == 'level1':
-            # Only show intro/lore/tutorial on a fresh run.
-            if not self._persist_seen.get('l1_intro'):
-                self._persist_seen['l1_intro'] = True
-                self._show_lore_line('A basement? This feels like a test.')
-                self._pending_gameplay_tutorial = True
 
     def _start_level(self, level_id: str, *, load_save: bool) -> None:
         level_id = str(level_id or 'level1')
@@ -1067,28 +1050,9 @@ class PySide6GameWindow(QMainWindow):
                 pass
 
         self.keys_pressed.clear()
-        self.core.register_event_callback('coin_picked', self._on_coin_picked)
-        self.core.register_event_callback('gate_opened', self._on_gate_moved)
-        self.core.register_event_callback('gate_closed', self._on_gate_moved)
-        self.core.register_event_callback(
-            'key_fragment_encountered', self._on_key_fragment_encountered)
-        self.core.register_event_callback('game_won', self._on_game_won)
-        self.core.register_event_callback(
-            'checkpoint_reached', self._on_checkpoint_reached)
-        self.core.register_event_callback(
-            'time_penalty', self._on_time_penalty)
-        self.core.register_event_callback(
-            'exit_unlocked', self._on_exit_unlocked)
-        self.core.register_event_callback(
-            'sector_entered', self._on_sector_entered)
-        self.core.register_event_callback(
-            'sent_to_jail', self._on_sent_to_jail)
-        self.core.register_event_callback('left_jail', self._on_left_jail)
-        self.core.register_event_callback('key_picked', self._on_key_picked)
-        self.core.register_event_callback(
-            'player_move', self._on_player_move_event)
+        self._register_core_callbacks()
         if paused_was:
-            self.core.paused = True
+            self._set_paused(True)
         self._last_update_time = time.perf_counter()
 
         # Door sound should only play for a fresh run (timer starts at 00:00), not on save resume.
@@ -1099,16 +1063,7 @@ class PySide6GameWindow(QMainWindow):
                 self._audio_gate.play()
             except Exception:
                 pass
-        try:
-            self.gl.update()
-        except Exception:
-            pass
-
-        if level_id == 'level2':
-            # Level 2 entry lore (no tutorials in Level 2) - only on a fresh run.
-            if not self._persist_seen.get('l2_intro'):
-                self._persist_seen['l2_intro'] = True
-                self._show_lore_line('This place feels inhabited.')
+        self._safe_gl_update()
 
         if level_id == 'level2' and load_save:
             self._load_save_if_present()
@@ -1116,6 +1071,22 @@ class PySide6GameWindow(QMainWindow):
         if level_id == 'level1' and load_save:
             # Resume from save.
             self._load_save_if_present()
+
+        if level_id == 'level1':
+            # Level 1 intro flow: one lore thought, then the single Gameplay tutorial modal.
+            # Only show on a fresh start (timer at 00:00).
+            if float(getattr(self.core, 'elapsed_s', 0.0) or 0.0) <= 0.0001:
+                if not self._persist_seen.get('l1_intro'):
+                    self._persist_seen['l1_intro'] = True
+                    self._show_lore_line('A basement? This feels like a test.')
+                    self._pending_gameplay_tutorial = True
+
+        if level_id == 'level2':
+            # Level 2 entry lore (no tutorials in Level 2) - only on a fresh run.
+            if float(getattr(self.core, 'elapsed_s', 0.0) or 0.0) <= 0.0001:
+                if not self._persist_seen.get('l2_intro'):
+                    self._persist_seen['l2_intro'] = True
+                    self._show_lore_line('This place feels inhabited.')
 
     def _on_game_won(self, data: dict) -> None:
         if str(getattr(self, '_current_level_id', '')) != 'level1':
@@ -1129,18 +1100,9 @@ class PySide6GameWindow(QMainWindow):
 
     def _on_checkpoint_reached(self, data: dict) -> None:
         # Freeze player input, but allow the end-screen animation to progress.
-        try:
-            self.core.paused = True
-        except Exception:
-            pass
-        try:
-            self._last_update_time = time.perf_counter()
-        except Exception:
-            pass
-        try:
-            self.gl.update()
-        except Exception:
-            pass
+        self._set_paused(True)
+        self._last_update_time = time.perf_counter()
+        self._safe_gl_update()
 
     def _on_mouse_look(self, dx: float, dy: float) -> None:
         sensitivity = 0.002
@@ -1157,17 +1119,14 @@ class PySide6GameWindow(QMainWindow):
         if event.key() == Qt.Key_Escape:
             # If a modal is open, Esc closes it.
             if getattr(self.gl, '_modal_visible', False):
-                self._close_modal_via_escape()
+                self._on_modal_close_clicked()
                 return
 
             # If we're on the end/stats screen, Esc should open the level select.
             if self.core.screen_closing or self.core.game_completed:
                 if str(getattr(self, '_current_level_id', '')) == 'level2':
                     self.gl._show_the_end = True
-                    try:
-                        self.gl.update()
-                    except Exception:
-                        pass
+                    self._safe_gl_update()
                     return
                 # Ensure Level 2 is unlocked once Level 1 is completed.
                 try:
@@ -1440,12 +1399,11 @@ class PySide6GameWindow(QMainWindow):
         except Exception:
             pass
 
-    def _toggle_pause(self) -> None:
-        if self.core.screen_closing or self.core.game_completed or self.core.game_won:
-            return
-        now_paused = not bool(getattr(self.core, 'paused', False))
-        self.core.paused = now_paused
-        if now_paused:
+    def _set_paused(self, paused: bool) -> None:
+        paused = bool(paused)
+        self.core.paused = paused
+
+        if paused:
             self.keys_pressed.clear()
             self._set_footsteps_playing(False)
             try:
@@ -1473,12 +1431,19 @@ class PySide6GameWindow(QMainWindow):
                 self._ghost_sound_timer.stop()
             except Exception:
                 pass
-        else:
-            try:
-                self._ghost_sound_timer.start(2500)
-            except Exception:
-                pass
-            self._last_update_time = time.perf_counter()
+            return
+
+        try:
+            self._ghost_sound_timer.start(2500)
+        except Exception:
+            pass
+        self._last_update_time = time.perf_counter()
+
+    def _toggle_pause(self) -> None:
+        if self.core.screen_closing or self.core.game_completed or self.core.game_won:
+            return
+        now_paused = not bool(getattr(self.core, 'paused', False))
+        self._set_paused(now_paused)
 
     def _on_pause_action(self, action: str) -> None:
         if action == 'resume':
@@ -1509,17 +1474,11 @@ class PySide6GameWindow(QMainWindow):
             return
         if str(getattr(self.gl, '_modal_kind', '')) == 'level_select' and bool(getattr(self.gl, '_modal_return_to_pause', False)):
             self.gl.hide_modal()
-            self.core.paused = True
-            try:
-                self.gl.update()
-            except Exception:
-                pass
+            self._set_paused(True)
+            self._safe_gl_update()
             return
         self.gl.hide_modal()
-        self.core.paused = False
-
-    def _close_modal_via_escape(self) -> None:
-        self._on_modal_close_clicked()
+        self._set_paused(False)
 
     def _show_lore_line(self, text: str) -> None:
         s = str(text or '').strip()
@@ -1528,12 +1487,8 @@ class PySide6GameWindow(QMainWindow):
         self.gl.enqueue_lore_lines([s])
 
     def _show_tutorial_modal(self, title: str, body: str) -> None:
-        self.core.paused = True
+        self._set_paused(True)
         self.gl.show_tutorial_modal(title=title, body=body)
-        try:
-            self._set_footsteps_playing(False)
-        except Exception:
-            pass
 
     def _trigger_lore(self, key: str) -> None:
         # Backwards-compatible no-op mapping layer.
@@ -1589,18 +1544,19 @@ class PySide6GameWindow(QMainWindow):
 
     def _save_game(self) -> None:
         try:
-            try:
-                self._progress['last_level'] = str(
-                    getattr(self, '_current_level_id', 'level1') or 'level1')
-                self._save_progression()
-            except Exception:
-                pass
+            self._progress['last_level'] = str(
+                getattr(self, '_current_level_id', 'level1') or 'level1')
+            self._save_progression()
+        except Exception as e:
+            print(f"[save] progression save failed: {e}")
+
+        try:
             state = self.core.get_save_state()
             state['ui_seen'] = dict(self._persist_seen)
             with open(self._save_path, 'w', encoding='utf-8') as f:
                 json.dump(state, f, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[save] savegame write failed: {e}")
 
     def _load_save_if_present(self) -> None:
         if not os.path.exists(self._save_path):
@@ -1618,7 +1574,8 @@ class PySide6GameWindow(QMainWindow):
                     self._persist_seen.update(
                         {str(k): bool(v) for k, v in seen.items()})
             self.core.load_save_state(state)
-        except Exception:
+        except Exception as e:
+            print(f"[load] savegame load failed: {e}")
             return
 
     def _restart_game(self) -> None:
@@ -1640,16 +1597,9 @@ class PySide6GameWindow(QMainWindow):
             except Exception:
                 pass
         self.keys_pressed.clear()
-        self.core.register_event_callback('coin_picked', self._on_coin_picked)
-        self.core.register_event_callback('gate_opened', self._on_gate_moved)
-        self.core.register_event_callback('gate_closed', self._on_gate_moved)
-        self.core.register_event_callback(
-            'key_fragment_encountered', self._on_key_fragment_encountered)
-        self.core.register_event_callback('game_won', self._on_game_won)
-        self.core.register_event_callback(
-            'checkpoint_reached', self._on_checkpoint_reached)
+        self._register_core_callbacks()
         if paused_was:
-            self.core.paused = True
+            self._set_paused(True)
         self._last_update_time = time.perf_counter()
         # Restart starts at 00:00 -> play door sound.
         try:
@@ -1658,10 +1608,7 @@ class PySide6GameWindow(QMainWindow):
             self._audio_gate.play()
         except Exception:
             pass
-        try:
-            self.gl.update()
-        except Exception:
-            pass
+        self._safe_gl_update()
 
     def _on_time_penalty(self, data: dict) -> None:
         try:
@@ -1674,7 +1621,7 @@ class PySide6GameWindow(QMainWindow):
         try:
             self.gl._time_bonus_text = f'+{amount}'
             self.gl._time_bonus_until = time.perf_counter() + 2.5
-            self.gl.update()
+            self._safe_gl_update()
         except Exception:
             pass
 

@@ -27,18 +27,34 @@ class PerformanceMonitor:
             'particle_systems': False
         }
 
-        self.start_time = time.perf_counter()
-        self.gameplay_start_time: Optional[float] = None
-        self.gameplay_end_time: Optional[float] = None
-
         self.frozen_stats: Optional[Dict[str, Any]] = None
 
         self.resolution = (0, 0)
+
+        self._stable_fps_value: int = 0
+        self._stable_fps_next_update_t: float = 0.0
 
     def avg_fps(self) -> float:
         if not self.fps_history:
             return 0.0
         return float(sum(self.fps_history) / len(self.fps_history))
+
+    def current_fps(self) -> float:
+        if not self.fps_history:
+            return 0.0
+        return float(self.fps_history[-1])
+
+    def stable_fps(self, *, update_interval_s: float = 2.5) -> int:
+        now = time.perf_counter()
+        if now < float(self._stable_fps_next_update_t or 0.0):
+            return int(self._stable_fps_value or 0)
+
+        latest = int(round(self.current_fps()))
+        if latest != int(self._stable_fps_value or 0):
+            self._stable_fps_value = int(latest)
+
+        self._stable_fps_next_update_t = now + float(update_interval_s)
+        return int(self._stable_fps_value or 0)
 
     def avg_input_latency_ms(self) -> float:
         if not self.input_latencies:
@@ -83,11 +99,7 @@ class PerformanceMonitor:
     def set_resolution(self, width: int, height: int):
         self.resolution = (width, height)
 
-    def start_gameplay(self):
-        self.gameplay_start_time = time.perf_counter()
-
     def end_gameplay(self):
-        self.gameplay_end_time = time.perf_counter()
         self.frozen_stats = self.get_performance_summary()
 
     def freeze_stats(self):
@@ -100,9 +112,6 @@ class PerformanceMonitor:
         self.peak_memory = max(self.peak_memory, current_memory)
 
     def get_performance_summary(self) -> Dict[str, Any]:
-        current_time = time.perf_counter()
-        total_time = current_time - self.start_time
-
         if self.fps_history:
             avg_fps = sum(self.fps_history) / len(self.fps_history)
             min_fps = min(self.fps_history)
@@ -123,18 +132,9 @@ class PerformanceMonitor:
         else:
             avg_input_latency = 0
 
-        if self.gameplay_start_time:
-            if self.gameplay_end_time:
-                playtime = self.gameplay_end_time - self.gameplay_start_time
-            else:
-                playtime = current_time - self.gameplay_start_time
-        else:
-            playtime = 0
-
         return {
             'framework': 'PySide6',
             'resolution': f"{self.resolution[0]}x{self.resolution[1]}",
-            'playtime': f"{playtime:.1f}s",
             'performance': {
                 'avg_fps': f"{avg_fps:.1f}",
                 'min_fps': f"{min_fps:.1f}",
@@ -166,7 +166,7 @@ class PerformanceMonitor:
 
         text += f"Framework: {summary['framework']}\n"
         text += f"Resolution: {summary['resolution']}\n"
-        text += f"Playtime: {summary['playtime']}\n\n"
+        text += "\n"
 
         text += "PERFORMANCE\n"
         perf = summary['performance']

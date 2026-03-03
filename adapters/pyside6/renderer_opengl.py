@@ -1,3 +1,4 @@
+import ctypes
 import math
 import os
 from typing import List, Optional, Tuple
@@ -18,7 +19,13 @@ class OpenGLRenderer:
         self.camera_height = 1.6
         self.fov = 60.0
         self.near_plane = 0.25
-        self.far_plane = 80.0
+        self.far_plane = 42.0
+
+        self._fog_enabled = True
+        self._fog_start = 22.0
+        self._fog_end = 40.0
+
+        self._fast_mode = True
 
         self.wall_color = (0.45, 0.45, 0.5, 1.0)
         self.floor_color = (0.25, 0.23, 0.22, 1.0)
@@ -30,8 +37,22 @@ class OpenGLRenderer:
         self._static_quads: List[Tuple[float, float, Optional[int],
                                        Tuple[Tuple[float, float, float, float, float], ...]]] = []
 
-        self._world_list_floor: Optional[int] = None
-        self._world_list_wall: Optional[int] = None
+        self._world_vbo_floor: Optional[int] = None
+        self._world_vbo_wall: Optional[int] = None
+        self._world_floor_vertex_count: int = 0
+        self._world_wall_vertex_count: int = 0
+
+        self._chunk_size = 12
+        self._chunk_vbos: dict[tuple[int, int],
+                               tuple[Optional[int], int, Optional[int], int]] = {}
+
+        self._ghost_body_vbo: Optional[int] = None
+        self._ghost_body_vertex_count: int = 0
+        self._ghost_eye_vbo: Optional[int] = None
+        self._ghost_eye_vertex_count: int = 0
+        self._ghost_tail_vbos: list[Optional[int]] = []
+        self._ghost_tail_vertex_counts: list[int] = []
+        self._ghost_tail_pose_count: int = 0
 
         self._anim_t = 0.0
 
@@ -49,6 +70,16 @@ class OpenGLRenderer:
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glLightfv(GL_LIGHT0, 0x1203, [10.0, 12.0, 10.0, 1.0])
 
+        if self._fog_enabled:
+            glEnable(GL_FOG)
+            glFogi(GL_FOG_MODE, GL_LINEAR)
+            glFogf(GL_FOG_START, float(self._fog_start))
+            glFogf(GL_FOG_END, float(self._fog_end))
+            glFogfv(GL_FOG_COLOR, [float(self.sky_color[0]), float(
+                self.sky_color[1]), float(self.sky_color[2]), 1.0])
+        else:
+            glDisable(GL_FOG)
+
         glEnable(GL_TEXTURE_2D)
         self._tex_wall = self._load_texture(
             os.path.join('assets', 'image.png'))
@@ -64,61 +95,394 @@ class OpenGLRenderer:
             glBindTexture(GL_TEXTURE_2D, 0)
 
         self._build_static_geometry()
-        self._build_world_display_lists()
+        self._build_world_vbos()
+        self._build_ghost_vbo()
 
-    def _delete_world_display_lists(self) -> None:
-        if self._world_list_floor is not None:
-            glDeleteLists(int(self._world_list_floor), 1)
-            self._world_list_floor = None
-        if self._world_list_wall is not None:
-            glDeleteLists(int(self._world_list_wall), 1)
-            self._world_list_wall = None
+    def _delete_world_vbos(self) -> None:
+        try:
+            if self._world_vbo_floor is not None:
+                glDeleteBuffers(1, [int(self._world_vbo_floor)])
+        except Exception:
+            pass
+        try:
+            if self._world_vbo_wall is not None:
+                glDeleteBuffers(1, [int(self._world_vbo_wall)])
+        except Exception:
+            pass
+        self._world_vbo_floor = None
+        self._world_vbo_wall = None
+        self._world_floor_vertex_count = 0
+        self._world_wall_vertex_count = 0
 
-    def _build_world_display_lists(self) -> None:
-        self._delete_world_display_lists()
+        for vbo in (self._ghost_body_vbo, self._ghost_eye_vbo):
+            try:
+                if vbo is not None:
+                    glDeleteBuffers(1, [int(vbo)])
+            except Exception:
+                pass
+        if self._ghost_tail_vbos:
+            for vbo in self._ghost_tail_vbos:
+                try:
+                    if vbo is not None:
+                        glDeleteBuffers(1, [int(vbo)])
+                except Exception:
+                    pass
+        self._ghost_body_vbo = None
+        self._ghost_body_vertex_count = 0
+        self._ghost_eye_vbo = None
+        self._ghost_eye_vertex_count = 0
+        self._ghost_tail_vbos = []
+        self._ghost_tail_vertex_counts = []
+        self._ghost_tail_pose_count = 0
 
-        floor_id = glGenLists(1)
-        wall_id = glGenLists(1)
-        if floor_id == 0 or wall_id == 0:
-            self._world_list_floor = None
-            self._world_list_wall = None
+        if self._chunk_vbos:
+            for floor_vbo, _, wall_vbo, _ in self._chunk_vbos.values():
+                try:
+                    if floor_vbo is not None:
+                        glDeleteBuffers(1, [int(floor_vbo)])
+                except Exception:
+                    pass
+                try:
+                    if wall_vbo is not None:
+                        glDeleteBuffers(1, [int(wall_vbo)])
+                except Exception:
+                    pass
+            self._chunk_vbos.clear()
+
+    def _build_world_vbos(self) -> None:
+        # Build separate VBOs for floors and walls (static geometry). If VBO creation fails,
+        # we gracefully fall back to immediate mode in _draw_world().
+        from array import array
+
+        self._delete_world_vbos()
+
+        floor_data = array('f')
+        wall_data = array('f')
+        chunk_floor: dict[tuple[int, int], array] = {}
+        chunk_wall: dict[tuple[int, int], array] = {}
+
+        # Vertex layout: [x, y, z, u, v] per vertex.
+        for cr, cc, tex_id, quad in self._static_quads:
+            target = floor_data if tex_id == self._tex_floor else wall_data
+            if tex_id not in (self._tex_floor, self._tex_wall):
+                continue
+
+            ch_r = int(float(cr) // float(self._chunk_size))
+            ch_c = int(float(cc) // float(self._chunk_size))
+            ch_key = (ch_r, ch_c)
+            if tex_id == self._tex_floor:
+                ch_target = chunk_floor.get(ch_key)
+                if ch_target is None:
+                    ch_target = array('f')
+                    chunk_floor[ch_key] = ch_target
+            else:
+                ch_target = chunk_wall.get(ch_key)
+                if ch_target is None:
+                    ch_target = array('f')
+                    chunk_wall[ch_key] = ch_target
+
+            for (u, v, x, y, z) in quad:
+                target.extend(
+                    [float(x), float(y), float(z), float(u), float(v)])
+                ch_target.extend(
+                    [float(x), float(y), float(z), float(u), float(v)])
+
+        self._world_floor_vertex_count = int(len(floor_data) // 5)
+        self._world_wall_vertex_count = int(len(wall_data) // 5)
+
+        self._chunk_vbos.clear()
+
+        try:
+            if self._world_floor_vertex_count > 0:
+                vbo = glGenBuffers(1)
+                self._world_vbo_floor = int(vbo) if vbo else None
+                if self._world_vbo_floor:
+                    glBindBuffer(GL_ARRAY_BUFFER, int(self._world_vbo_floor))
+                    glBufferData(GL_ARRAY_BUFFER,
+                                 floor_data.tobytes(), GL_STATIC_DRAW)
+
+            if self._world_wall_vertex_count > 0:
+                vbo = glGenBuffers(1)
+                self._world_vbo_wall = int(vbo) if vbo else None
+                if self._world_vbo_wall:
+                    glBindBuffer(GL_ARRAY_BUFFER, int(self._world_vbo_wall))
+                    glBufferData(GL_ARRAY_BUFFER,
+                                 wall_data.tobytes(), GL_STATIC_DRAW)
+
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+            # Build per-chunk VBOs so we can cull distant static geometry.
+            for ch_key in sorted(set(chunk_floor.keys()) | set(chunk_wall.keys())):
+                fd = chunk_floor.get(ch_key)
+                wd = chunk_wall.get(ch_key)
+
+                floor_vbo: Optional[int] = None
+                wall_vbo: Optional[int] = None
+                floor_count = int(len(fd) // 5) if fd else 0
+                wall_count = int(len(wd) // 5) if wd else 0
+
+                if floor_count > 0:
+                    vbo = glGenBuffers(1)
+                    floor_vbo = int(vbo) if vbo else None
+                    if floor_vbo:
+                        glBindBuffer(GL_ARRAY_BUFFER, int(floor_vbo))
+                        glBufferData(GL_ARRAY_BUFFER,
+                                     fd.tobytes(), GL_STATIC_DRAW)
+
+                if wall_count > 0:
+                    vbo = glGenBuffers(1)
+                    wall_vbo = int(vbo) if vbo else None
+                    if wall_vbo:
+                        glBindBuffer(GL_ARRAY_BUFFER, int(wall_vbo))
+                        glBufferData(GL_ARRAY_BUFFER,
+                                     wd.tobytes(), GL_STATIC_DRAW)
+
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                self._chunk_vbos[ch_key] = (
+                    floor_vbo, floor_count, wall_vbo, wall_count)
+        except Exception:
+            self._delete_world_vbos()
+
+    def _build_ghost_vbo(self) -> None:
+        from array import array
+
+        # Delete old VBOs first (if any)
+        for vbo in (self._ghost_body_vbo, self._ghost_eye_vbo):
+            try:
+                if vbo is not None:
+                    glDeleteBuffers(1, [int(vbo)])
+            except Exception:
+                pass
+        if self._ghost_tail_vbos:
+            for vbo in self._ghost_tail_vbos:
+                try:
+                    if vbo is not None:
+                        glDeleteBuffers(1, [int(vbo)])
+                except Exception:
+                    pass
+
+        self._ghost_body_vbo = None
+        self._ghost_body_vertex_count = 0
+        self._ghost_eye_vbo = None
+        self._ghost_eye_vertex_count = 0
+        self._ghost_tail_vbos = []
+        self._ghost_tail_vertex_counts = []
+        self._ghost_tail_pose_count = 0
+
+        segments = 18 if self._fast_mode else 28
+        body_layers = 11
+        tail_layers = 8
+        radius = 0.20
+
+        def y_and_r(t: float) -> tuple[float, float]:
+            if t < 0.5:
+                yv = radius * 0.62 * math.cos(t * math.pi)
+                rv = radius * 0.95 * math.sin(t * math.pi)
+            else:
+                yv = -radius * 0.25 * (t - 0.5) * 2.0
+                rv = radius * 0.95
+            return yv, rv
+
+        def add_strip(data: array, y0: float, r0: float, y1: float, r1: float) -> None:
+            for i in range(segments + 1):
+                a = (i / segments) * (2.0 * math.pi)
+                ca = math.cos(a)
+                sa = math.sin(a)
+
+                x = ca * r0
+                z = sa * r0
+                data.extend([x, y0, z, ca, 0.0, sa])
+
+                x = ca * r1
+                z = sa * r1
+                data.extend([x, y1, z, ca, 0.0, sa])
+
+        # Body VBO (static)
+        body = array('f')
+        for layer in range(1, body_layers):
+            layer_ratio = layer / (body_layers - 1)
+            prev_ratio = (layer - 1) / (body_layers - 1)
+            y_prev, r_prev = y_and_r(prev_ratio)
+            y_curr, r_curr = y_and_r(layer_ratio)
+            add_strip(body, y_prev, r_prev, y_curr, r_curr)
+
+        self._ghost_body_vertex_count = int(len(body) // 6)
+
+        # Eyes VBO (static, 2 quads)
+        eye = array('f')
+        eye_y = radius * 0.22
+        eye_z = radius * 1.05
+        eye_x = radius * 0.34
+        ew = radius * 0.22
+        eh = radius * 0.28
+
+        def add_eye_quad(cx: float) -> None:
+            # Normal points forward (+Z)
+            nx, ny, nz = 0.0, 0.0, 1.0
+            x0 = cx - ew
+            x1 = cx + ew
+            y0 = eye_y - eh
+            y1 = eye_y + eh
+            z0 = eye_z
+            # Two triangles
+            eye.extend([x0, y0, z0, nx, ny, nz])
+            eye.extend([x1, y0, z0, nx, ny, nz])
+            eye.extend([x1, y1, z0, nx, ny, nz])
+            eye.extend([x0, y0, z0, nx, ny, nz])
+            eye.extend([x1, y1, z0, nx, ny, nz])
+            eye.extend([x0, y1, z0, nx, ny, nz])
+
+        add_eye_quad(-eye_x)
+        add_eye_quad(eye_x)
+        self._ghost_eye_vertex_count = int(len(eye) // 6)
+
+        # Tail poses VBOs (animated via pose switching)
+        pose_count = 12
+        self._ghost_tail_pose_count = int(pose_count)
+        tail_vbos: list[Optional[int]] = []
+        tail_counts: list[int] = []
+
+        # Precompute pose data without relying on runtime _anim_t.
+        for pose in range(pose_count):
+            phase = (pose / max(1, pose_count)) * (2.0 * math.pi)
+            tail = array('f')
+
+            for layer in range(tail_layers):
+                layer_ratio = layer / tail_layers
+                prev_ratio = (layer - 1) / tail_layers
+
+                base_r = radius * 0.95 * (1.0 - layer_ratio * 0.35)
+                wave_amp = radius * (0.08 + 0.14 * layer_ratio)
+                y_curr = -radius * 0.52 - layer_ratio * radius * 0.48
+
+                def skirt_val(a: float, layer_idx: int, amp: float, ph: float) -> float:
+                    return (
+                        math.sin(a * 3.0 + ph + layer_idx * 0.55) * amp
+                        + math.sin(a * 7.0 - ph * 0.7 +
+                                   layer_idx * 0.35) * (amp * 0.55)
+                    )
+
+                if layer == 0:
+                    for i in range(segments + 1):
+                        a = (i / segments) * (2.0 * math.pi)
+                        ca = math.cos(a)
+                        sa = math.sin(a)
+                        skirt = skirt_val(a, layer, wave_amp, phase)
+                        r_curr = max(radius * 0.02, base_r + skirt)
+
+                        # body connection ring
+                        tail.extend([ca * radius * 0.95, -radius *
+                                    0.25, sa * radius * 0.95, ca, 0.0, sa])
+                        tail.extend(
+                            [ca * r_curr, y_curr, sa * r_curr, ca, 0.0, sa])
+                else:
+                    prev_base_r = radius * 0.95 * (1.0 - prev_ratio * 0.35)
+                    prev_amp = radius * (0.08 + 0.14 * prev_ratio)
+                    y_prev = -radius * 0.52 - prev_ratio * radius * 0.48
+
+                    for i in range(segments + 1):
+                        a = (i / segments) * (2.0 * math.pi)
+                        ca = math.cos(a)
+                        sa = math.sin(a)
+                        skirt_prev = skirt_val(a, layer - 1, prev_amp, phase)
+                        skirt_curr = skirt_val(a, layer, wave_amp, phase)
+                        r_prev = max(radius * 0.02, prev_base_r + skirt_prev)
+                        r_curr = max(radius * 0.02, base_r + skirt_curr)
+                        tail.extend(
+                            [ca * r_prev, y_prev, sa * r_prev, ca, 0.0, sa])
+                        tail.extend(
+                            [ca * r_curr, y_curr, sa * r_curr, ca, 0.0, sa])
+
+            tail_counts.append(int(len(tail) // 6))
+            try:
+                vbo = glGenBuffers(1)
+                tv = int(vbo) if vbo else None
+                if tv and tail_counts[-1] > 0:
+                    glBindBuffer(GL_ARRAY_BUFFER, int(tv))
+                    glBufferData(GL_ARRAY_BUFFER,
+                                 tail.tobytes(), GL_STATIC_DRAW)
+                    glBindBuffer(GL_ARRAY_BUFFER, 0)
+                else:
+                    tv = None
+                tail_vbos.append(tv)
+            except Exception:
+                tail_vbos.append(None)
+
+        try:
+            if self._ghost_body_vertex_count > 0:
+                vbo = glGenBuffers(1)
+                self._ghost_body_vbo = int(vbo) if vbo else None
+                if self._ghost_body_vbo:
+                    glBindBuffer(GL_ARRAY_BUFFER, int(self._ghost_body_vbo))
+                    glBufferData(GL_ARRAY_BUFFER,
+                                 body.tobytes(), GL_STATIC_DRAW)
+                    glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+            if self._ghost_eye_vertex_count > 0:
+                vbo = glGenBuffers(1)
+                self._ghost_eye_vbo = int(vbo) if vbo else None
+                if self._ghost_eye_vbo:
+                    glBindBuffer(GL_ARRAY_BUFFER, int(self._ghost_eye_vbo))
+                    glBufferData(GL_ARRAY_BUFFER,
+                                 eye.tobytes(), GL_STATIC_DRAW)
+                    glBindBuffer(GL_ARRAY_BUFFER, 0)
+        except Exception:
+            self._ghost_body_vbo = None
+            self._ghost_body_vertex_count = 0
+            self._ghost_eye_vbo = None
+            self._ghost_eye_vertex_count = 0
+
+        self._ghost_tail_vbos = tail_vbos
+        self._ghost_tail_vertex_counts = tail_counts
+
+    def _draw_ghost_vbo(self, color: Tuple[float, float, float, float]) -> None:
+        if self._ghost_body_vbo is None or self._ghost_body_vertex_count <= 0:
+            self._draw_ghost_3d(color)
             return
 
-        self._world_list_floor = int(floor_id)
-        self._world_list_wall = int(wall_id)
+        stride = 6 * 4
 
-        glNewList(self._world_list_floor, GL_COMPILE)
-        glEnable(GL_TEXTURE_2D)
-        self._bind_texture(self._tex_floor)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-        glBegin(GL_QUADS)
-        for _, _, tex_id, quad in self._static_quads:
-            if tex_id != self._tex_floor:
-                continue
-            for (u, v, x, y, z) in quad:
-                glTexCoord2f(u, v)
-                glVertex3f(x, y, z)
-        glEnd()
-        glEndList()
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glEnableClientState(GL_NORMAL_ARRAY)
 
-        glNewList(self._world_list_wall, GL_COMPILE)
-        glEnable(GL_TEXTURE_2D)
-        self._bind_texture(self._tex_wall)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-        glBegin(GL_QUADS)
-        for _, _, tex_id, quad in self._static_quads:
-            if tex_id != self._tex_wall:
-                continue
-            for (u, v, x, y, z) in quad:
-                glTexCoord2f(u, v)
-                glVertex3f(x, y, z)
-        glEnd()
-        glEndList()
+        # Body
+        glColor4f(*color)
+        glBindBuffer(GL_ARRAY_BUFFER, int(self._ghost_body_vbo))
+        glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
+        glNormalPointer(GL_FLOAT, stride, ctypes.c_void_p(12))
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, int(self._ghost_body_vertex_count))
+
+        # Tail pose
+        if self._ghost_tail_pose_count > 0 and self._ghost_tail_vbos:
+            pose_fps = 6.0
+            pose_idx = int(
+                self._anim_t * pose_fps) % int(self._ghost_tail_pose_count)
+            if 0 <= pose_idx < len(self._ghost_tail_vbos):
+                vbo = self._ghost_tail_vbos[pose_idx]
+                cnt = self._ghost_tail_vertex_counts[pose_idx] if pose_idx < len(
+                    self._ghost_tail_vertex_counts) else 0
+                if vbo is not None and cnt > 0:
+                    glBindBuffer(GL_ARRAY_BUFFER, int(vbo))
+                    glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
+                    glNormalPointer(GL_FLOAT, stride, ctypes.c_void_p(12))
+                    glDrawArrays(GL_TRIANGLE_STRIP, 0, int(cnt))
+
+        # Eyes (draw after tail; same transform)
+        if self._ghost_eye_vbo is not None and self._ghost_eye_vertex_count > 0:
+            glColor4f(0.06, 0.06, 0.08, 0.96)
+            glBindBuffer(GL_ARRAY_BUFFER, int(self._ghost_eye_vbo))
+            glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
+            glNormalPointer(GL_FLOAT, stride, ctypes.c_void_p(12))
+            glDrawArrays(GL_TRIANGLES, 0, int(self._ghost_eye_vertex_count))
+
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        glDisableClientState(GL_NORMAL_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
 
     def _draw_world_immediate(self) -> None:
-        """Draw world geometry using immediate mode"""
-        glDisable(GL_LIGHTING)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
+        """Fallback immediate-mode draw for world geometry"""
+        pr = int(round(float(self.core.player.z)))
+        pc = int(round(float(self.core.player.x)))
 
         pr = self.core.player.z
         pc = self.core.player.x
@@ -167,17 +531,72 @@ class OpenGLRenderer:
 
     def _draw_world(self) -> None:
         """Draw world geometry"""
-        if self._world_list_floor is None or self._world_list_wall is None:
+        if self._world_vbo_floor is None or self._world_vbo_wall is None:
             self._draw_world_immediate()
             return
 
         glDisable(GL_LIGHTING)
         glColor4f(1.0, 1.0, 1.0, 1.0)
-        glEnable(GL_TEXTURE_2D)
-        glCallList(int(self._world_list_floor))
-        glCallList(int(self._world_list_wall))
-        self._bind_texture(None)
-        glDisable(GL_TEXTURE_2D)
+
+        try:
+            glEnableClientState(GL_VERTEX_ARRAY)
+            glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+            stride = 5 * 4
+
+            glEnable(GL_TEXTURE_2D)
+
+            # Draw nearby chunks only (conservative radius based on fog end)
+            px = float(self.core.player.x)
+            pz = float(self.core.player.z)
+            ch_r0 = int(pz // float(self._chunk_size))
+            ch_c0 = int(px // float(self._chunk_size))
+
+            chunk_radius = max(
+                2, int(math.ceil(float(self._fog_end) / float(self._chunk_size))) + 1)
+
+            for dr in range(-chunk_radius, chunk_radius + 1):
+                for dc in range(-chunk_radius, chunk_radius + 1):
+                    key = (ch_r0 + dr, ch_c0 + dc)
+                    entry = self._chunk_vbos.get(key)
+                    if not entry:
+                        continue
+
+                    floor_vbo, floor_count, wall_vbo, wall_count = entry
+
+                    if floor_vbo is not None and floor_count > 0:
+                        self._bind_texture(self._tex_floor)
+                        glBindBuffer(GL_ARRAY_BUFFER, int(floor_vbo))
+                        glVertexPointer(3, GL_FLOAT, stride,
+                                        ctypes.c_void_p(0))
+                        glTexCoordPointer(2, GL_FLOAT, stride,
+                                          ctypes.c_void_p(12))
+                        glDrawArrays(GL_QUADS, 0, int(floor_count))
+
+                    if wall_vbo is not None and wall_count > 0:
+                        self._bind_texture(self._tex_wall)
+                        glBindBuffer(GL_ARRAY_BUFFER, int(wall_vbo))
+                        glVertexPointer(3, GL_FLOAT, stride,
+                                        ctypes.c_void_p(0))
+                        glTexCoordPointer(2, GL_FLOAT, stride,
+                                          ctypes.c_void_p(12))
+                        glDrawArrays(GL_QUADS, 0, int(wall_count))
+
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            self._bind_texture(None)
+            glDisable(GL_TEXTURE_2D)
+        except Exception:
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            try:
+                glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+                glDisableClientState(GL_VERTEX_ARRAY)
+            except Exception:
+                pass
+            glEnable(GL_LIGHTING)
+            self._draw_world_immediate()
+            return
+
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+        glDisableClientState(GL_VERTEX_ARRAY)
         glEnable(GL_LIGHTING)
 
     def resize(self, width: int, height: int) -> None:
@@ -188,6 +607,12 @@ class OpenGLRenderer:
         glLoadIdentity()
         gluPerspective(self.fov, self.width / self.height,
                        self.near_plane, self.far_plane)
+
+        if self._fog_enabled:
+            glFogf(GL_FOG_START, float(self._fog_start))
+            glFogf(GL_FOG_END, float(self._fog_end))
+            glFogfv(GL_FOG_COLOR, [float(self.sky_color[0]), float(
+                self.sky_color[1]), float(self.sky_color[2]), 1.0])
 
     def render(self) -> None:
         glEnable(GL_DEPTH_TEST)
@@ -410,6 +835,26 @@ class OpenGLRenderer:
             glDepthMask(True)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
+        def radial_sprite_glow(cx: float, cy: float, cz: float, radius: float, color: Tuple[float, float, float], alpha: float) -> None:
+            # Seamless circular glow oriented towards the camera (no rectangular billboard edges).
+            from OpenGL.GL import GL_TRIANGLE_FAN
+
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+            glDepthMask(False)
+            glBegin(GL_TRIANGLE_FAN)
+            glColor4f(color[0], color[1], color[2], alpha)
+            glVertex3f(cx, cy, cz)
+            steps = 28
+            glColor4f(color[0], color[1], color[2], 0.0)
+            for i in range(steps + 1):
+                a = (i / steps) * (2.0 * math.pi)
+                x = math.cos(a) * radius
+                y = math.sin(a) * radius
+                glVertex3f(cx + x * right_x, cy + y, cz + x * right_z)
+            glEnd()
+            glDepthMask(True)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
         def floor_glow(cx: float, cz: float, y: float, radius: float, color: Tuple[float, float, float], alpha: float) -> None:
             # Camera-independent circular glow projected onto the floor.
             from OpenGL.GL import GL_TRIANGLE_FAN
@@ -537,7 +982,7 @@ class OpenGLRenderer:
         def _draw_ghost_3d(color: Tuple[float, float, float, float]) -> None:
             from OpenGL.GL import GL_TRIANGLE_STRIP
             radius = 0.20
-            segments = 40
+            segments = 26 if self._fast_mode else 40
             body_layers = 11
             tail_layers = 8
 
@@ -645,6 +1090,12 @@ class OpenGLRenderer:
         TWO_PI = 6.283185307179586
         RAD_TO_DEG = 57.29577951308232
 
+        px = float(self.core.player.x)
+        pz = float(self.core.player.z)
+
+        entity_draw_radius = float(self._fog_end) + 4.0
+        entity_r2 = entity_draw_radius * entity_draw_radius
+
         # Coins: 3D spinning coins (Mario-style) - clean and optimal
         for coin in self.core.coins.values():
             if coin.taken:
@@ -654,6 +1105,11 @@ class OpenGLRenderer:
             r, c = coin.cell
             cx = c + 0.5
             cz = r + 0.5
+
+            dx = float(cx) - px
+            dz = float(cz) - pz
+            if dx * dx + dz * dz > entity_r2:
+                continue
 
             # Direct animation calculation
             anim_time = self._anim_t
@@ -681,17 +1137,11 @@ class OpenGLRenderer:
 
             glPopMatrix()
 
-            # Glow effects - clean ground lighting only
-            floor_glow(cx, cz, 0.015, 1.05, (1.0, 0.90, 0.35), 0.12)
-            floor_glow(cx, cz, 0.016, 0.55, (1.0, 0.90, 0.35), 0.14)
-
-            # Subtle halo around the coin (soft, seamless)
-            try:
-                pulse = 0.08 + 0.03 * \
-                    math.sin(anim_time * 2.2 + (r * 0.17 + c * 0.23))
-                soft_aura(cx, 1.24 + bob, cz, 0.40, (1.0, 0.90, 0.35), pulse)
-            except Exception:
-                pass
+            # Glow around the coin only (seamless circle, no floor spill)
+            pulse = 0.16 + 0.06 * \
+                math.sin(anim_time * 2.2 + (r * 0.17 + c * 0.23))
+            radial_sprite_glow(cx, 1.22 + bob, cz, 0.34,
+                               (1.0, 0.90, 0.35), pulse)
 
         def _draw_letter(letter: str) -> None:
             glBegin(GL_LINES)
@@ -1059,6 +1509,11 @@ class OpenGLRenderer:
             cx = c + 0.5
             cz = r + 0.5
 
+            dx = float(cx) - px
+            dz = float(cz) - pz
+            if dx * dx + dz * dz > entity_r2:
+                continue
+
             if frag.kind == 'KH':
                 base = (0.55, 0.95, 1.0, 0.95)
                 glow_rgb = (0.65, 1.0, 1.0)
@@ -1093,10 +1548,7 @@ class OpenGLRenderer:
             _draw_key_3d()
 
             # Soft glow aura
-            try:
-                soft_aura(cx, base_y + bob + 0.05, cz, 0.55, glow_rgb, 0.12)
-            except Exception:
-                pass
+            soft_aura(cx, base_y + bob + 0.05, cz, 0.55, glow_rgb, 0.12)
 
             glPopMatrix()
 
@@ -1195,8 +1647,8 @@ class OpenGLRenderer:
             # Book glow marker
             glBlendFunc(GL_SRC_ALPHA, GL_ONE)
             glDepthMask(False)
-            billboard_quad(0.0, 0.70, 0.0, 0.60, 0.60,
-                           (0.95, 0.85, 0.35, 0.22))
+            radial_sprite_glow(0.0, 0.70, 0.0, 0.55, (0.95, 0.85, 0.35), 0.16)
+            radial_sprite_glow(0.0, 0.70, 0.0, 0.95, (0.95, 0.85, 0.35), 0.06)
             glDepthMask(True)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
             glPopMatrix()
@@ -1210,6 +1662,10 @@ class OpenGLRenderer:
             5: (0.95, 0.35, 1.0, 0.82),
         }
         for g in self.core.ghosts.values():
+            dx = float(getattr(g, 'x', 0.0) or 0.0) - px
+            dz = float(getattr(g, 'z', 0.0) or 0.0) - pz
+            if dx * dx + dz * dz > entity_r2:
+                continue
             bob = 0.05 * math.sin(self._anim_t * 2.0 + g.id)
             wobble = 0.06 * math.sin(self._anim_t * 4.6 + g.id * 0.7)
             s = float(getattr(g, 'size_scale', 1.0) or 1.0)
@@ -1228,8 +1684,10 @@ class OpenGLRenderer:
             glPopMatrix()
 
             col = ghost_colors.get(g.id, (1.0, 0.55, 0.15, 0.92))
-            soft_aura(g.x, 1.15 + y_raise + bob + 0.05, g.z,
-                      0.70 * s, (col[0], col[1], col[2]), 0.14)
+            radial_sprite_glow(g.x, 1.15 + y_raise + bob + 0.08,
+                               g.z, 0.55 * s, (col[0], col[1], col[2]), 0.12)
+            radial_sprite_glow(g.x, 1.15 + y_raise + bob + 0.08,
+                               g.z, 0.95 * s, (col[0], col[1], col[2]), 0.05)
 
         ceil_h = float(self.core.ceiling_height)
 

@@ -504,6 +504,10 @@ class GameCore:
 
         self.jail_painting = pick_jail_wall_anchor()
 
+        if self.jail_painting is not None:
+            (pr, pc), pf = self.jail_painting
+            self.jail_painting = ((pr, pc - 2), pf)
+
         # Initialize current sector from player spawn.
         self.current_sector_id = self.sector_id_for_cell(
             (int(self.player.z), int(self.player.x)))
@@ -945,10 +949,6 @@ class GameCore:
 
         # If loop, ensure path is cyclic by keeping it as-is; movement logic wraps.
         return ordered
-
-    def _init_checkpoint_arrow(self) -> None:
-        """Initialize checkpoint arrow - will be spawned when exit gate opens"""
-        pass
 
     def _update_checkpoint_arrow(self, dt: float) -> None:
         """Update checkpoint arrow bobbing animation and check hitbox"""
@@ -1395,8 +1395,6 @@ class GameCore:
                         adjusted_arrow_cell = (
                             arrow_cell[0], arrow_cell[1] - 1)
 
-                    print(
-                        f"DEBUG: Creating checkpoint arrow at {adjusted_arrow_cell} (middle exit cell: {middle_exit_cell if len(self.exit_cells) >= 2 else self.exit_cells[0]})")
                     self.checkpoint_arrow = CheckpointArrow(
                         cell=adjusted_arrow_cell,
                         visible=True,
