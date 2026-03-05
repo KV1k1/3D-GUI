@@ -18,7 +18,7 @@ class OpenGLRenderer:
         self.height = 600
         self.camera_height = 1.6
         self.fov = 60.0
-        self.near_plane = 0.25
+        self.near_plane = 0.15
         self.far_plane = 42.0
 
         self._fog_enabled = True
@@ -634,7 +634,24 @@ class OpenGLRenderer:
         ly = py + math.sin(pitch)
         lz = pz + math.cos(yaw) * math.cos(pitch)
 
-        gluLookAt(px, py, pz, lx, ly, lz, 0.0, 1.0, 0.0)
+        # When looking near straight up/down, the view direction becomes almost collinear
+        # with the fixed up-vector (0,1,0). Some GLU implementations can produce an
+        # unstable matrix in this case. Use a dynamic up-vector to keep the basis valid.
+        fx = float(lx - px)
+        fy = float(ly - py)
+        fz = float(lz - pz)
+        f_len = math.sqrt(fx * fx + fy * fy + fz * fz)
+        if f_len > 0.0:
+            fx /= f_len
+            fy /= f_len
+            fz /= f_len
+
+        if abs(fy) > 0.97:
+            upx, upy, upz = 1.0, 0.0, 0.0
+        else:
+            upx, upy, upz = 0.0, 1.0, 0.0
+
+        gluLookAt(px, py, pz, lx, ly, lz, upx, upy, upz)
 
         glDisable(GL_BLEND)
         glDepthMask(True)
@@ -1093,7 +1110,7 @@ class OpenGLRenderer:
         px = float(self.core.player.x)
         pz = float(self.core.player.z)
 
-        entity_draw_radius = float(self._fog_end) + 4.0
+        entity_draw_radius = max(18.0, float(self._fog_end) - 2.0)
         entity_r2 = entity_draw_radius * entity_draw_radius
 
         # Coins: 3D spinning coins (Mario-style) - clean and optimal
