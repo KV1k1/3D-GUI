@@ -21,7 +21,7 @@ class SilhouetteMatchDialog(QDialog):
         self.setWindowTitle('Silhouette Matching')
         self.setModal(True)
         self.setMinimumSize(720, 420)
-        
+
         self.setStyleSheet("""
             QDialog {
                 background-color: #2d2d30;
@@ -85,7 +85,8 @@ class SilhouetteMatchDialog(QDialog):
 
         self._target_img = QLabel()
         self._target_img.setAlignment(Qt.AlignCenter)
-        self._target_img.setPixmap(self._render_pattern(self._target, cell_px=26, pad=10))
+        self._target_img.setPixmap(self._render_pattern(
+            self._target, cell_px=26, pad=10))
         left.addWidget(self._target_img, stretch=1)
 
         right = QVBoxLayout()
@@ -96,7 +97,8 @@ class SilhouetteMatchDialog(QDialog):
 
         grid_host = QWidget()
         grid_host.setLayout(self._grid)
-        grid_host.setStyleSheet('background: #404040; border-radius: 10px; border: 2px solid #555555; padding: 12px;')
+        grid_host.setStyleSheet(
+            'background: #404040; border-radius: 10px; border: 2px solid #555555; padding: 12px;')
         right.addWidget(grid_host, stretch=1)
 
         self._cells: list[list[QPushButton]] = []
@@ -107,7 +109,8 @@ class SilhouetteMatchDialog(QDialog):
                 b.setCheckable(True)
                 b.setFixedSize(46, 46)
                 b.setStyleSheet(self._cell_style(False))
-                b.toggled.connect(lambda checked=False, rr=r, cc=c: self._on_toggle(rr, cc, checked))
+                b.toggled.connect(lambda checked=False, rr=r,
+                                  cc=c: self._on_toggle(rr, cc, checked))
                 self._grid.addWidget(b, r, c)
                 row.append(b)
             self._cells.append(row)
@@ -250,7 +253,8 @@ class SilhouetteMatchDialog(QDialog):
             for c in range(self._size):
                 x = pad + c * cell_px
                 y = pad + r * cell_px
-                p.fillRect(x, y, cell_px - 2, cell_px - 2, on if pattern[r][c] else off)
+                p.fillRect(x, y, cell_px - 2, cell_px - 2,
+                           on if pattern[r][c] else off)
 
         p.setPen(QColor(255, 215, 0, 128))
         p.drawRect(1, 1, w - 2, h - 2)

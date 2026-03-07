@@ -162,7 +162,7 @@ class Platform:
 
 
 class GameCore:
-    def __init__(self, level_id: str = 'level2'):
+    def __init__(self, level_id: str = 'level1'):
         self._event_callbacks: Dict[str, List[Callable[[dict], None]]] = {}
 
         self.level_id = str(level_id or 'level2')
@@ -214,6 +214,10 @@ class GameCore:
 
         self.in_jail = False
         self.paused = False
+
+        # Used for minigames: freeze hazards/world updates but keep elapsed time running.
+        # This keeps the run fair (time still counts) without killing the player while in a modal.
+        self.simulation_frozen = False
         self.game_won = False
         self.game_completed = False
         self.screen_closing = False
@@ -991,6 +995,9 @@ class GameCore:
         if self._sector_popup_timer > 0.0:
             self._sector_popup_timer = max(0.0, self._sector_popup_timer - dt)
 
+        if getattr(self, 'simulation_frozen', False):
+            return
+
         self._update_spikes(dt)
         self._update_gates(dt)
         self._update_ghosts(dt)
@@ -1575,8 +1582,11 @@ class GameCore:
         self.player.yaw = (self.player.yaw + yaw_delta) % (2 * math.pi)
 
     def tilt_camera(self, pitch_delta: float) -> None:
-        self.player.pitch = max(-math.pi / 2,
-                                min(math.pi / 2, self.player.pitch + pitch_delta))
+        # Avoid exactly +/- 90 degrees: when looking perfectly straight up/down,
+        # the look direction becomes collinear with the up vector and the view can go unstable.
+        limit = (math.pi / 2) - 0.05
+        self.player.pitch = max(-limit, min(limit,
+                                self.player.pitch + pitch_delta))
 
     def move_player(self, dx: float, dz: float) -> bool:
         forward_x = math.sin(self.player.yaw)

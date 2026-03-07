@@ -350,7 +350,11 @@ class GameGLWidget(QOpenGLWidget):
 
                 return
 
-            now = time.perf_counter()
+            self._lore_current = ''
+            self._lore_current_start = 0.0
+            self._lore_current_end = 0.0
+            self._safe_update()
+            return
 
         duration = max(0.01, self._lore_current_end - self._lore_current_start)
 
@@ -982,11 +986,11 @@ class GameGLWidget(QOpenGLWidget):
 
             bx = (self.width() - tw) // 2
 
-            by = self.height() - 28
+            by = self.height() - 25
 
             pad = 10
 
-            painter.fillRect(bx - pad, by - th + 6, tw + pad * 2,
+            painter.fillRect(bx - pad, by - th, tw + pad * 2,
                              th + 10, QColor(0, 0, 0, int(150 * alpha)))
 
             painter.setPen(QColor(255, 220, 110, int(255 * alpha)))
@@ -1936,6 +1940,10 @@ class PySide6GameWindow(QMainWindow):
 
             return
 
+        if self._key_minigame_open and bool(getattr(self.core, 'simulation_frozen', False)):
+
+            self._safe_gl_update()
+
         move_speed = 0.18 if str(
             getattr(self, '_current_level_id', '')) == 'level1' else 0.30
 
@@ -2169,9 +2177,18 @@ class PySide6GameWindow(QMainWindow):
 
             self._release_mouse_buttons()
 
+            prev_frozen = bool(getattr(self.core, 'simulation_frozen', False))
+            self.core.simulation_frozen = True
+
             dlg = SilhouetteMatchDialog(self)
 
-            if dlg.exec():
+            ok = False
+            try:
+                ok = bool(dlg.exec())
+            finally:
+                self.core.simulation_frozen = prev_frozen
+
+            if ok:
 
                 self.core.mark_jail_puzzle_success()
 
@@ -2236,13 +2253,22 @@ class PySide6GameWindow(QMainWindow):
 
         self._release_mouse_buttons()
 
+        prev_frozen = bool(getattr(self.core, 'simulation_frozen', False))
+        self.core.simulation_frozen = True
+
         if self._assembly_minigame is None:
             self._assembly_minigame = Assembly3DMinigame(
                 self, kind=frag_kind or 'KP')
         else:
             self._assembly_minigame.reset(kind=frag_kind or 'KP')
 
-        if self._assembly_minigame.exec():
+        ok = False
+        try:
+            ok = bool(self._assembly_minigame.exec())
+        finally:
+            self.core.simulation_frozen = prev_frozen
+
+        if ok:
 
             self.core.mark_key_fragment_taken(frag_id)
 

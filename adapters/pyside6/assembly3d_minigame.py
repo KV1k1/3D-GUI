@@ -23,6 +23,13 @@ class Assembly3DMinigame(QDialog):
         self._selection_flash_timer.timeout.connect(self._tick_selection_flash)
         self._selection_flash_timer.start()
 
+        # Add a timer to keep the parent's game timer running during the minigame
+        self._game_timer = QTimer(self)
+        self._game_timer.setInterval(16)  # ~60 FPS, same as main game
+        self._game_timer.timeout.connect(self._update_parent_game_time)
+        self._game_timer.start()
+        self._last_game_update = time.perf_counter()
+
         self._init_3d()
 
     def closeEvent(self, event) -> None:
@@ -30,6 +37,9 @@ class Assembly3DMinigame(QDialog):
             self._clear_gl_views()
         except Exception:
             pass
+        # Stop the game timer when dialog closes
+        if hasattr(self, '_game_timer'):
+            self._game_timer.stop()
         super().closeEvent(event)
 
     def reset(self, *, kind: str) -> None:
@@ -38,6 +48,12 @@ class Assembly3DMinigame(QDialog):
         self._build_scene_for_kind()
         self._ensure_piece_controls_match_scene()
         self._update_feedback_3d()
+        # Reset game timer for new fragment type
+        if hasattr(self, '_game_timer'):
+            self._last_game_update = time.perf_counter()
+            # Ensure timer is running
+            if not self._game_timer.isActive():
+                self._game_timer.start()
 
     def _clear_gl_views(self) -> None:
         if getattr(self, 'ref_view', None) is not None:
@@ -77,6 +93,17 @@ class Assembly3DMinigame(QDialog):
                                 idx=i: self._select_piece_by_button_3d(idx))
             self.piece_btns.append(btn)
             layout.addWidget(btn)
+
+    def _update_parent_game_time(self) -> None:
+        """Update the parent's core elapsed time during the minigame"""
+        parent = self.parent()
+        if parent and hasattr(parent, 'core'):
+            current_time = time.perf_counter()
+            if hasattr(self, '_last_game_update'):
+                dt = current_time - self._last_game_update
+                dt = min(dt, 0.1)  # Cap dt to prevent large jumps
+                parent.core.elapsed_s += dt
+            self._last_game_update = current_time
 
     def _tick_selection_flash(self) -> None:
         if getattr(self, 'selected_piece', None) is None:
@@ -970,9 +997,9 @@ class Assembly3DMinigame(QDialog):
 
                 c = self.pieces[i]['color']
 
-                # Smooth flash between original color and green (~0.5s period).
+                # Smooth flash between original color and green (~1.0s period).
                 t = float(time.perf_counter())
-                period = 0.5
+                period = 1.0
                 phase = (t % period) / period
                 w = 0.5 - 0.5 * math.cos(phase * 2.0 * math.pi)
 

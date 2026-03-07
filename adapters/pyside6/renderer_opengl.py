@@ -21,6 +21,9 @@ class OpenGLRenderer:
         self.near_plane = 0.15
         self.far_plane = 42.0
 
+        self._anim_clock_s = 0.0
+        self._last_anim_elapsed_s: Optional[float] = None
+
         self._fog_enabled = True
         self._fog_start = 22.0
         self._fog_end = 40.0
@@ -616,7 +619,19 @@ class OpenGLRenderer:
 
     def render(self) -> None:
         glEnable(GL_DEPTH_TEST)
-        self._anim_t = float(self.core.elapsed_s)
+
+        elapsed_s = float(getattr(self.core, 'elapsed_s', 0.0) or 0.0)
+        frozen = bool(getattr(self.core, 'simulation_frozen', False))
+
+        if self._last_anim_elapsed_s is None:
+            self._last_anim_elapsed_s = elapsed_s
+        else:
+            dt_anim = max(0.0, elapsed_s - float(self._last_anim_elapsed_s))
+            self._last_anim_elapsed_s = elapsed_s
+            if not frozen:
+                self._anim_clock_s += dt_anim
+
+        self._anim_t = float(self._anim_clock_s)
         glClearColor(*self.sky_color)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
@@ -897,7 +912,7 @@ class OpenGLRenderer:
             y0 = -thickness / 2.0
             y1 = thickness / 2.0
 
-            stripe_segments = segments // 24
+            stripe_segments = max(1, segments // 24)
             glBegin(GL_QUADS)
             for i in range(segments):
                 a0 = (i / segments) * (2.0 * math.pi)
@@ -1113,6 +1128,9 @@ class OpenGLRenderer:
         entity_draw_radius = max(18.0, float(self._fog_end) - 2.0)
         entity_r2 = entity_draw_radius * entity_draw_radius
 
+        glow_draw_radius = max(12.0, entity_draw_radius * 0.70)
+        glow_r2 = glow_draw_radius * glow_draw_radius
+
         # Coins: 3D spinning coins (Mario-style) - clean and optimal
         for coin in self.core.coins.values():
             if coin.taken:
@@ -1125,7 +1143,8 @@ class OpenGLRenderer:
 
             dx = float(cx) - px
             dz = float(cz) - pz
-            if dx * dx + dz * dz > entity_r2:
+            d2 = dx * dx + dz * dz
+            if d2 > entity_r2:
                 continue
 
             # Direct animation calculation
@@ -1147,18 +1166,20 @@ class OpenGLRenderer:
             glDisable(GL_LIGHTING)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
             glColor4f(1.0, 0.84, 0.18, 0.98)
+            seg = 24 if d2 <= glow_r2 else 16
             _draw_coin_3d_mario(radius=0.14, thickness=0.04,
-                                segments=24, textured=True)
+                                segments=seg, textured=True)
 
             glColor4f(1.0, 1.0, 1.0, 1.0)
 
             glPopMatrix()
 
             # Glow around the coin only (seamless circle, no floor spill)
-            pulse = 0.16 + 0.06 * \
-                math.sin(anim_time * 2.2 + (r * 0.17 + c * 0.23))
-            radial_sprite_glow(cx, 1.22 + bob, cz, 0.34,
-                               (1.0, 0.90, 0.35), pulse)
+            if d2 <= glow_r2:
+                pulse = 0.16 + 0.06 * \
+                    math.sin(anim_time * 2.2 + (r * 0.17 + c * 0.23))
+                radial_sprite_glow(cx, 1.22 + bob, cz, 0.34,
+                                   (1.0, 0.90, 0.35), pulse)
 
         def _draw_letter(letter: str) -> None:
             glBegin(GL_LINES)
@@ -1564,8 +1585,9 @@ class OpenGLRenderer:
             glColor4f(base[0], base[1], base[2], base[3])
             _draw_key_3d()
 
-            # Soft glow aura
-            soft_aura(cx, base_y + bob + 0.05, cz, 0.55, glow_rgb, 0.12)
+            # Soft glow aura (skip when far for performance)
+            if d2 <= glow_r2:
+                soft_aura(cx, base_y + bob + 0.05, cz, 0.55, glow_rgb, 0.12)
 
             glPopMatrix()
 
