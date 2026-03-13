@@ -8,34 +8,171 @@ import wx
 import wx.adv
 from wx import glcanvas
 
+from .silhouette_minigame import SilhouetteMatchDialog
+from .assembly3d_minigame import Assembly3DMinigame
+
 from OpenGL.GL import (
     GL_BLEND,
     GL_DEPTH_TEST,
+    GL_LINES,
     GL_LIGHTING,
     GL_MODELVIEW,
     GL_ONE_MINUS_SRC_ALPHA,
     GL_PROJECTION,
     GL_QUADS,
+    GL_TEXTURE_ENV,
+    GL_TEXTURE_ENV_MODE,
     GL_TRIANGLE_FAN,
+    GL_TRIANGLE_STRIP,
     GL_SRC_ALPHA,
     GL_TEXTURE_2D,
+    GL_MODULATE,
+    GL_REPLACE,
     glBegin,
     glBlendFunc,
     glColor4f,
     glDisable,
     glEnable,
     glEnd,
+    glIsEnabled,
+    glLineWidth,
     glLoadIdentity,
     glMatrixMode,
     glOrtho,
     glPopMatrix,
     glPushMatrix,
     glTexCoord2f,
+    glTexEnvi,
     glVertex2f,
- )
+)
 
 from core.game_core import GameCore
 from .renderer_opengl import OpenGLRenderer
+from core.performance_monitor import PerformanceMonitor
+
+
+class _SimpleAudio:
+    """
+    Single-channel audio wrapper around wx.adv.Sound.
+
+    wx.adv.Sound plays only one sound at a time system-wide. The priority scheme is:
+      ghost / gate (long SFX) > coin (short SFX) > footsteps (looping background)
+
+    All wx calls must be made from the main thread. threading.Timer is NOT used —
+    wx is not thread-safe. wx.CallLater schedules the footstep resume on the main thread.
+    """
+
+    def __init__(self, asset_dir: str):
+        self._asset_dir = str(asset_dir or '')
+        self._footsteps_requested = False
+        self._footsteps_playing = False
+        # Absolute perf_counter time until which the channel belongs to a priority SFX.
+        self._sfx_until = 0.0
+
+        self._footsteps_path = os.path.join(
+            self._asset_dir, 'running-on-concrete-268478.wav')
+        self._coin_path = os.path.join(self._asset_dir, 'drop-coin-384921.wav')
+        self._gate_path = os.path.join(
+            self._asset_dir, 'closing-metal-door-44280.wav')
+        self._ghost_path = os.path.join(
+            self._asset_dir, 'ghost-horror-sound-382709.wav')
+
+        self._snd_footsteps = wx.adv.Sound(
+            self._footsteps_path) if os.path.exists(self._footsteps_path) else None
+        self._snd_coin = wx.adv.Sound(
+            self._coin_path) if os.path.exists(self._coin_path) else None
+        self._snd_gate = wx.adv.Sound(
+            self._gate_path) if os.path.exists(self._gate_path) else None
+        self._snd_ghost = wx.adv.Sound(
+            self._ghost_path) if os.path.exists(self._ghost_path) else None
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def shutdown(self) -> None:
+        try:
+            self.set_footsteps(False)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Internal helpers — main thread only
+    # ------------------------------------------------------------------
+
+    def _start_footsteps_loop(self) -> None:
+        if self._snd_footsteps is None:
+            return
+        try:
+            self._snd_footsteps.Play(wx.adv.SOUND_ASYNC | wx.adv.SOUND_LOOP)
+            self._footsteps_playing = True
+        except Exception:
+            self._footsteps_playing = False
+
+    def _stop_footsteps(self) -> None:
+        self._footsteps_playing = False
+        if self._snd_footsteps is None:
+            return
+        try:
+            self._snd_footsteps.Stop()
+        except Exception:
+            pass
+
+    def _resume_footsteps_if_needed(self) -> None:
+        """Scheduled via wx.CallLater — always runs on the main thread."""
+        if not self._footsteps_requested:
+            return
+        if time.perf_counter() < self._sfx_until:
+            # A later SFX extended the window; don't fight it — let its CallLater handle it.
+            return
+        if not self._footsteps_playing:
+            self._start_footsteps_loop()
+
+    def _play_priority_sfx(self, snd: Optional[wx.adv.Sound], *, cooldown_s: float) -> None:
+        """
+        Play a priority SFX (coin, gate, ghost).
+        Stops footsteps, plays the sound, schedules footstep resume via wx.CallLater.
+        """
+        if snd is None:
+            return
+        self._stop_footsteps()
+        now = time.perf_counter()
+        # Extend the silent window if a longer SFX is already running.
+        self._sfx_until = max(self._sfx_until, now + cooldown_s)
+        try:
+            snd.Play(wx.adv.SOUND_ASYNC)
+        except Exception:
+            return
+        try:
+            wx.CallLater(int(cooldown_s * 1000),
+                         self._resume_footsteps_if_needed)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def set_footsteps(self, playing: bool) -> None:
+        playing = bool(playing)
+        self._footsteps_requested = playing
+        if not playing:
+            self._stop_footsteps()
+            return
+        if time.perf_counter() < self._sfx_until:
+            return  # Priority SFX still owns the channel
+        if self._footsteps_playing:
+            return
+        self._start_footsteps_loop()
+
+    def play_coin(self) -> None:
+        self._play_priority_sfx(self._snd_coin, cooldown_s=0.35)
+
+    def play_gate(self, *, volume: float = 0.8) -> None:
+        self._play_priority_sfx(self._snd_gate, cooldown_s=3.0)
+
+    def play_ghost(self, *, volume: float = 0.8) -> None:
+        self._play_priority_sfx(self._snd_ghost, cooldown_s=3.5)
 
 
 HUD_FS_SMALL = 14
@@ -84,7 +221,8 @@ class GameGLCanvas(glcanvas.GLCanvas):
 
         try:
             if ctx_attribs is not None:
-                self._gl_context = glcanvas.GLContext(self, ctxAttribs=ctx_attribs)
+                self._gl_context = glcanvas.GLContext(
+                    self, ctxAttribs=ctx_attribs)
             else:
                 self._gl_context = glcanvas.GLContext(self)
         except Exception:
@@ -96,11 +234,14 @@ class GameGLCanvas(glcanvas.GLCanvas):
         self._mouse_captured = False
         self._mouse_center: tuple[int, int] | None = None
 
+        self._assets_dir = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), '..', '..', 'assets'))
         self._cam_icon = None
         self._cam_icon_scaled_cache: dict[int, wx.Bitmap] = {}
         self._cam_icon_tex: Optional[int] = None
         try:
-            self._cam_icon = wx.Bitmap(os.path.join('assets', 'cam.jpg'))
+            self._cam_icon = wx.Bitmap(
+                os.path.join(self._assets_dir, 'cam.jpg'))
         except Exception:
             self._cam_icon = None
 
@@ -121,15 +262,34 @@ class GameGLCanvas(glcanvas.GLCanvas):
         self._lore_current_start: float = 0.0
         self._lore_current_end: float = 0.0
 
+        self._show_the_end: bool = False
+
         self._pause_btn_rects: dict[str, wx.Rect] = {}
 
-        self._hud_font = wx.Font(10, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, faceName='Segoe UI')
-        self._hud_font_bold = wx.Font(11, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
-        self._hud_font_big_bold = wx.Font(22, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
-        self._hud_font_level_title = wx.Font(28, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
-        self._hud_font_level_sub = wx.Font(13, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, faceName='Segoe UI')
-        self._hud_font_pause_title = wx.Font(22, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
-        self._hud_font_modal_btn = wx.Font(18, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
+        # Performance monitor (assigned by WxGameWindow after construction)
+        self.performance_monitor: Optional[PerformanceMonitor] = None
+
+        # Stats / end-screen state
+        # True while frozen stats screen is shown
+        self._stats_visible: bool = False
+        self._stats_text: str = ''                 # Formatted summary text
+        # True on level-2 completion (final end)
+        self._end_screen_visible: bool = False
+
+        self._hud_font = wx.Font(
+            10, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, faceName='Segoe UI')
+        self._hud_font_bold = wx.Font(
+            11, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
+        self._hud_font_big_bold = wx.Font(
+            22, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
+        self._hud_font_level_title = wx.Font(
+            28, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
+        self._hud_font_level_sub = wx.Font(
+            13, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, faceName='Segoe UI')
+        self._hud_font_pause_title = wx.Font(
+            22, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
+        self._hud_font_modal_btn = wx.Font(
+            18, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
 
         self.Bind(wx.EVT_PAINT, self._on_paint)
         self.Bind(wx.EVT_SIZE, self._on_size)
@@ -140,6 +300,25 @@ class GameGLCanvas(glcanvas.GLCanvas):
         self.Bind(wx.EVT_MOTION, self._on_mouse_move)
 
         self.SetFocus()
+
+    def show_stats_screen(self, text: str) -> None:
+        """Freeze the game and display the performance-summary stats screen."""
+        self._stats_text = str(text or '')
+        self._stats_visible = True
+        self._end_screen_visible = False
+        self.hide_mouse_capture()
+
+    def show_end_screen(self, text: str) -> None:
+        """Show the final 'The End' screen (level 2 completion)."""
+        self._stats_text = str(text or '')
+        self._stats_visible = True
+        self._end_screen_visible = True
+        self.hide_mouse_capture()
+
+    def hide_stats_screen(self) -> None:
+        self._stats_visible = False
+        self._end_screen_visible = False
+        self._stats_text = ''
 
     def _on_erase_background(self, _evt: wx.EraseEvent) -> None:
         # No background erase; OpenGL clears the scene and we draw overlays in EVT_PAINT.
@@ -153,7 +332,8 @@ class GameGLCanvas(glcanvas.GLCanvas):
 
         # Optional: load cam icon as a GL texture for the HUD.
         try:
-            self._cam_icon_tex = self.renderer._load_texture(os.path.join('assets', 'cam.jpg'))
+            self._cam_icon_tex = self.renderer._load_texture(
+                os.path.join(self._assets_dir, 'cam.jpg'))
         except Exception:
             self._cam_icon_tex = None
 
@@ -178,6 +358,10 @@ class GameGLCanvas(glcanvas.GLCanvas):
         self.Refresh(False)
 
     def _on_left_down(self, evt: wx.MouseEvent) -> None:
+        # Ignore all clicks while the end/stats screen is showing
+        if getattr(self, '_stats_visible', False):
+            return
+
         if bool(getattr(self.core, 'paused', False)):
             evt.Skip()
             return
@@ -246,11 +430,11 @@ class GameGLCanvas(glcanvas.GLCanvas):
         w, h = self.GetClientSize()
         self.renderer.resize(int(w), int(h))
         self.renderer.render()
+        self._draw_hud_gl(int(w), int(h))
 
-        try:
-            self._draw_hud_gl(int(w), int(h))
-        except Exception:
-            pass
+        # Restore proper GL state after HUD rendering (PySide parity)
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
 
         self.SwapBuffers()
 
@@ -270,13 +454,38 @@ class GameGLCanvas(glcanvas.GLCanvas):
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
+        # Fix matrix stack overflow - completely reset both stacks
+        # Reset PROJECTION stack to clean state
         glMatrixMode(GL_PROJECTION)
+        while True:
+            try:
+                glPopMatrix()
+            except Exception:
+                break  # Stack is empty now
+        glLoadIdentity()
         glPushMatrix()
+
         glLoadIdentity()
         glOrtho(0.0, float(w), float(h), 0.0, -1.0, 1.0)
+
+        # Reset MODELVIEW stack to clean state
         glMatrixMode(GL_MODELVIEW)
+        while True:
+            try:
+                glPopMatrix()
+            except Exception:
+                break  # Stack is empty now
+        glLoadIdentity()
         glPushMatrix()
         glLoadIdentity()
+
+        # Vignette first - directly on top of 3D scene, below all HUD elements
+        self._draw_vignette_gl(w, h)
+
+        # ADD THIS: Guaranteed state reset before any HUD text rendering
+        glDisable(GL_LIGHTING)
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE)
+        glColor4f(1.0, 1.0, 1.0, 1.0)
 
         # Objective HUD
         pad = 10
@@ -284,18 +493,23 @@ class GameGLCanvas(glcanvas.GLCanvas):
         box_h = 56
         x = (w - box_w) // 2
         y = pad
-        rect(float(x), float(y), float(box_w), float(box_h), 0.0, 0.0, 0.0, 0.62)
+        rect(float(x), float(y), float(box_w),
+             float(box_h), 0.0, 0.0, 0.0, 0.62)
+        self._gl_outline_rect(float(x), float(y), float(
+            box_w), float(box_h), color=(240, 240, 240, 255))
 
         t = int(getattr(self.core, 'elapsed_s', 0.0) or 0.0)
         mm = t // 60
         ss = t % 60
-        self._gl_text(float(x + 12), float(y + 6), f'Time: {mm:02d}:{ss:02d}', 1.0, font_size=HUD_FS_MED, bold=True, color=HUD_COL_WHITE)
+        self._gl_text(float(x + 12), float(y + 6),
+                      f'Time: {mm:02d}:{ss:02d}', 1.0, font_size=HUD_FS_MED, bold=True, color=HUD_COL_WHITE)
 
         coins = int(getattr(self.core, 'coins_collected', 0))
         coins_req = int(getattr(self.core, 'coins_required', 0))
         keys = int(getattr(self.core, 'keys_collected', 0))
         keys_req = int(getattr(self.core, 'keys_required', 0))
-        self._gl_text(float(x + 12), float(y + 32), f'Coins: {coins}/{coins_req}   Keys: {keys}/{keys_req}', 1.0, font_size=HUD_FS_SMALL, bold=False, color=HUD_COL_WHITE)
+        self._gl_text(float(x + 12), float(y + 32),
+                      f'Coins: {coins}/{coins_req}   Keys: {keys}/{keys_req}', 1.0, font_size=HUD_FS_SMALL, bold=False, color=HUD_COL_WHITE)
 
         # Minimap icon
         icon_size = 54
@@ -303,7 +517,10 @@ class GameGLCanvas(glcanvas.GLCanvas):
         iy = h - icon_size - 16
         self._cam_icon_rect = wx.Rect(ix, iy, icon_size, icon_size)
 
-        rect(float(ix - 6), float(iy - 6), float(icon_size + 12), float(icon_size + 12), 0.0, 0.0, 0.0, 0.50)
+        rect(float(ix - 6), float(iy - 6), float(icon_size + 12),
+             float(icon_size + 12), 0.0, 0.0, 0.0, 0.50)
+        self._gl_outline_rect(float(ix - 6), float(iy - 6), float(icon_size + 12),
+                              float(icon_size + 12), color=(220, 220, 220, 255))
 
         if self._cam_icon_tex:
             from OpenGL.GL import glBindTexture
@@ -327,8 +544,10 @@ class GameGLCanvas(glcanvas.GLCanvas):
         now = time.perf_counter()
         if now < float(self._minimap_cooldown_until):
             remaining = max(0.0, float(self._minimap_cooldown_until) - now)
-            rect(float(ix), float(iy), float(icon_size), float(icon_size), 0.0, 0.0, 0.0, 0.62)
-            self._gl_text(float(ix + 10), float(iy + 16), f'{int(math.ceil(remaining))}s', 1.0, font_size=HUD_FS_MED, bold=True, color=(255, 210, 90, 255))
+            rect(float(ix), float(iy), float(icon_size),
+                 float(icon_size), 0.0, 0.0, 0.0, 0.62)
+            self._gl_text(float(ix + 10), float(iy + 16), f'{int(math.ceil(remaining))}s',
+                          1.0, font_size=HUD_FS_MED, bold=True, color=(255, 210, 90, 255))
 
         if now < float(self._minimap_until):
             self._draw_minimap_overlay_gl(w, h)
@@ -342,38 +561,88 @@ class GameGLCanvas(glcanvas.GLCanvas):
             total = 2.0
             alpha = 1.0
             if popup_t > (total - fade_in):
-                alpha = max(0.0, min(1.0, (total - popup_t) / max(0.001, fade_in)))
+                alpha = max(
+                    0.0, min(1.0, (total - popup_t) / max(0.001, fade_in)))
             elif popup_t < fade_out:
                 alpha = max(0.0, min(1.0, popup_t / max(0.001, fade_out)))
 
             txt = f'SECTOR {popup_id}'
-            _, tw_px, th_px = self.renderer.get_text_texture(txt, font_family='Segoe UI', font_size=28, bold=True, color=(255, 220, 110, 255), pad=8)
+            # Match PySide: uses _hud_font_bold (Segoe UI 11).
+            _, tw_px, th_px = self.renderer.get_text_texture(
+                txt, font_family='Segoe UI', font_size=16, bold=True, color=(255, 220, 110, 255), pad=8)
             tw = float(tw_px)
             th = float(th_px)
             bx = float((w - tw) * 0.5)
             by = float(h - 25)
             pad_px = 10.0
-            self._gl_rect(float(bx - pad_px), float(by - th), float(tw + pad_px * 2), float(th + 10), 0.0, 0.0, 0.0, float((150 / 255) * alpha))
-            self._gl_text(float(bx), float(by - th + 6), txt, 1.0, font_size=28, bold=True, color=(255, 220, 110, int(255 * alpha)))
+            self._gl_rect(float(bx - pad_px), float(by - th), float(tw + pad_px * 2),
+                          float(th + 10), 0.0, 0.0, 0.0, float((150 / 255) * alpha))
+            self._gl_text(float(bx), float(by - th), txt, 1.0, font_size=16,
+                          bold=True, color=(255, 220, 110, int(255 * alpha)))
 
         if (not self._modal_visible) and bool(getattr(self.core, 'paused', False)):
             self._draw_pause_panel_gl(w, h)
 
-        if self._modal_visible:
-            self._draw_modal_gl(w, h)
+        # Closing animation: iris-wipe to black when screen_closing is set.
+        # Suppressed once stats/end screen takes over (it draws its own black bg).
+        if not getattr(self, '_stats_visible', False):
+            screen_close_progress = float(
+                getattr(self.core, 'screen_close_progress', 0.0) or 0.0)
+            if screen_close_progress > 0.0:
+                self._draw_closing_animation_gl(w, h, screen_close_progress)
 
+        # Stats / end screen overlays (drawn on top of everything else)
+        if getattr(self, '_stats_visible', False):
+            if getattr(self, '_end_screen_visible', False):
+                self._draw_end_screen_gl(w, h)
+            else:
+                self._draw_stats_screen_gl(w, h)
+            # Draw modal on top of stats/end screen (e.g. level-select after completion)
+            if getattr(self, '_modal_visible', False):
+                self._draw_modal_gl(w, h)
+
+        # Draw lore fade (drawn after modal, before pause panel)
         self._draw_lore_fade_gl(w, h)
 
-        # Restore matrices
-        glPopMatrix()
-        glMatrixMode(GL_PROJECTION)
-        glPopMatrix()
+        # Draw "THE END" screen (if Level 2 complete)
+        if getattr(self, '_show_the_end', False):
+            self._draw_the_end_gl(w, h)
+
+        # Draw modal on top of everything else (when stats not visible) - ENSURE IT'S LAST
+        if getattr(self, '_modal_visible', False) and not getattr(self, '_stats_visible', False):
+            self._draw_modal_gl(w, h)
+
+        # Restore matrices - safe cleanup even if stack was reset
+        try:
+            glMatrixMode(GL_MODELVIEW)
+            glPopMatrix()
+        except Exception:
+            pass  # Stack was reset, nothing to pop
+
+        try:
+            glMatrixMode(GL_PROJECTION)
+            glPopMatrix()
+        except Exception:
+            pass  # Stack was reset, nothing to pop
+
         glMatrixMode(GL_MODELVIEW)
 
         glDisable(GL_TEXTURE_2D)
         glEnable(GL_DEPTH_TEST)
 
+    def _draw_the_end_gl(self, w: int, h: int) -> None:
+        """Draw 'THE END' screen with black background and white text - matches PySide version"""
+        # Draw black background
+        self._gl_rect(0.0, 0.0, float(w), float(h), 0.0, 0.0, 0.0, 1.0)
+
+        # Draw "THE END" text in white, centered, large font
+        self._gl_text_center(0.0, 0.0, float(w), float(
+            h), 'THE END', 1.0, font_size=68, bold=True, color=(255, 255, 255, 255))
+
     def _gl_rect(self, x: float, y: float, ww: float, hh: float, r: float, g: float, b: float, a: float) -> None:
+        # Save and manage OpenGL state properly
+        # Note: In HUD context, only manage texture state, don't affect depth testing
+        texture_2d_enabled = glIsEnabled(GL_TEXTURE_2D)
         glDisable(GL_TEXTURE_2D)
         glColor4f(r, g, b, a)
         glBegin(GL_QUADS)
@@ -383,6 +652,10 @@ class GameGLCanvas(glcanvas.GLCanvas):
         glVertex2f(x, y + hh)
         glEnd()
 
+        # Restore only texture state, preserve depth testing state for HUD
+        if texture_2d_enabled:
+            glEnable(GL_TEXTURE_2D)
+
     def _gl_text(self, x: float, y: float, txt: str, scale: float = 1.0, *,
                  font_size: int = 28, bold: bool = True,
                  color: tuple[int, int, int, int] = (240, 240, 240, 255)) -> None:
@@ -391,7 +664,7 @@ class GameGLCanvas(glcanvas.GLCanvas):
             font_family='Segoe UI',
             font_size=int(font_size),
             bold=bool(bold),
-            color=tuple(int(x) for x in color),
+            color=tuple(int(c) for c in color),
             pad=8,
         )
         tex_id = int(tex_id)
@@ -399,7 +672,16 @@ class GameGLCanvas(glcanvas.GLCanvas):
             return
         tw = float(tw_px) * float(scale)
         th = float(th_px) * float(scale)
+
+        # Force proper OpenGL state for text rendering
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_LIGHTING)
         glEnable(GL_TEXTURE_2D)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        # ADD THIS: Use texture color directly
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE)
+
         from OpenGL.GL import glBindTexture
 
         glBindTexture(GL_TEXTURE_2D, tex_id)
@@ -426,12 +708,60 @@ class GameGLCanvas(glcanvas.GLCanvas):
             font_family='Segoe UI',
             font_size=int(font_size),
             bold=bool(bold),
-            color=tuple(int(x) for x in color),
+            color=tuple(int(c) for c in color),
             pad=8,
         )
         tw = float(tw_px) * float(scale)
         th = float(th_px) * float(scale)
-        self._gl_text(float(x + (ww - tw) * 0.5), float(y + (hh - th) * 0.5), txt, scale, font_size=font_size, bold=bold, color=color)
+        self._gl_text(float(x + (ww - tw) * 0.5), float(y + (hh - th) * 0.5),
+                      txt, scale, font_size=font_size, bold=bold, color=color)
+
+    def _gl_line(self, x1: float, y1: float, x2: float, y2: float, *, color: tuple[int, int, int, int]) -> None:
+        # Save and manage OpenGL state properly
+        # Note: In HUD context, only manage texture state, don't affect depth testing
+        texture_2d_enabled = glIsEnabled(GL_TEXTURE_2D)
+        glDisable(GL_TEXTURE_2D)
+        glColor4f(float(color[0]) / 255.0, float(color[1]) / 255.0,
+                  float(color[2]) / 255.0, float(color[3]) / 255.0)
+        glBegin(GL_LINES)
+        glVertex2f(float(x1), float(y1))
+        glVertex2f(float(x2), float(y2))
+        glEnd()
+
+        # Restore only texture state, preserve depth testing state for HUD
+        if texture_2d_enabled:
+            glEnable(GL_TEXTURE_2D)
+
+    def _gl_outline_rect(self, x: float, y: float, ww: float, hh: float, *, color: tuple[int, int, int, int]) -> None:
+        self._gl_line(float(x), float(y), float(x + ww), float(y), color=color)
+        self._gl_line(float(x + ww), float(y), float(x + ww),
+                      float(y + hh), color=color)
+        self._gl_line(float(x + ww), float(y + hh),
+                      float(x), float(y + hh), color=color)
+        self._gl_line(float(x), float(y + hh), float(x), float(y), color=color)
+
+    def _wrap_text_lines(self, text: str, *, max_width_px: int, font_size: int, bold: bool) -> list[str]:
+        s = str(text or '')
+        out: list[str] = []
+        for para in s.split('\n'):
+            p = str(para).strip()
+            if not p:
+                out.append('')
+                continue
+            words = p.split(' ')
+            line = ''
+            for w in words:
+                trial = (line + ' ' + w).strip() if line else w
+                _, tw, _ = self.renderer.get_text_texture(trial, font_family='Segoe UI', font_size=int(
+                    font_size), bold=bool(bold), color=(220, 220, 220, 255), pad=8)
+                if int(tw) <= int(max_width_px) or not line:
+                    line = trial
+                    continue
+                out.append(line)
+                line = w
+            if line:
+                out.append(line)
+        return out
 
     def _try_open_minimap(self) -> None:
         now = time.perf_counter()
@@ -449,6 +779,10 @@ class GameGLCanvas(glcanvas.GLCanvas):
         if (not self._lore_current) and self._lore_queue:
             self._advance_lore_line()
 
+    def is_lore_playing(self) -> bool:
+        """Check if lore is currently playing"""
+        return bool(self._lore_current)
+
     def _advance_lore_line(self) -> None:
         if not self._lore_queue:
             self._lore_current = ''
@@ -459,6 +793,95 @@ class GameGLCanvas(glcanvas.GLCanvas):
         self._lore_current = self._lore_queue.pop(0)
         self._lore_current_start = now
         self._lore_current_end = now + 2.5
+
+    def _draw_vignette_gl(self, w: int, h: int) -> None:
+        """Optimized vignette matching PySide6 exactly: 2 passes like QRadialGradients."""
+        # Note: In HUD context, depth testing is already disabled by _draw_hud_gl
+        # Only manage texture state, don't restore depth testing during HUD rendering
+        texture_2d_enabled = glIsEnabled(GL_TEXTURE_2D)
+
+        glDisable(GL_TEXTURE_2D)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        cx = float(w) * 0.5
+        cy = float(h) * 0.52
+        min_dim = min(float(w), float(h))
+        r_inner = 0.32 * min_dim       # transparent centre — matches PySide
+        r_outer = 0.74 * min_dim       # max-dark ring — matches PySide
+        # Far enough to cover all four corners of any window shape
+        r_corner = math.sqrt((max(cx, w - cx))**2 + (max(cy, h - cy))**2) + 4.0
+        max_alpha = 255.0 / 255.0  # Full dark (completely opaque)
+        steps = 64  # Reduced from 128 for performance
+
+        # Pass 1: Main vignette (matches PySide6 QRadialGradient #1)
+        # Single pass from transparent center to dark corners
+        glBegin(GL_TRIANGLE_STRIP)
+        for i in range(steps + 1):
+            a = (i / steps) * 2.0 * math.pi
+            ca, sa = math.cos(a), math.sin(a)
+
+            # Inner vertex: transparent at r_inner
+            glColor4f(0.0, 0.0, 0.0, 0.0)
+            glVertex2f(cx + ca * r_inner, cy + sa * r_inner)
+
+            # Outer vertex: dark at corners (combines r_outer + corner extension)
+            glColor4f(0.0, 0.0, 0.0, max_alpha)
+            glVertex2f(cx + ca * r_corner, cy + sa * r_corner)
+        glEnd()
+
+        # Pass 2: Animated fog layer (matches PySide6 QRadialGradient #2)
+        t = time.perf_counter()
+        fog_cx = cx + 18.0 * math.sin(t * 0.35)
+        fog_cy = cy + 14.0 * math.cos(t * 0.31)
+        fog_r_inner = r_outer * 0.55  # Matches PySide6 0.55 stop
+        fog_r_outer = r_corner * 1.02
+
+        glBegin(GL_TRIANGLE_STRIP)
+        for i in range(steps + 1):
+            a = (i / steps) * 2.0 * math.pi
+            ca, sa = math.cos(a), math.sin(a)
+
+            # Inner vertex: transparent
+            glColor4f(0.0, 0.0, 0.0, 0.0)
+            glVertex2f(fog_cx + ca * fog_r_inner, fog_cy + sa * fog_r_inner)
+
+            # Outer vertex: subtle fog (matches PySide6)
+            glColor4f(0.0, 0.0, 0.0, 32.0 / 255.0)
+            glVertex2f(fog_cx + ca * fog_r_outer, fog_cy + sa * fog_r_outer)
+        glEnd()
+
+        # Restore only texture state, keep depth testing disabled for HUD
+        if texture_2d_enabled:
+            glEnable(GL_TEXTURE_2D)
+
+    def _draw_closing_animation_gl(self, w: int, h: int, progress: float) -> None:
+        """Iris-wipe to black as screen_close_progress goes 0 → 1."""
+        # The iris shrinks from full screen to a dot, then covers everything
+        cx = float(w) * 0.5
+        cy = float(h) * 0.5
+        max_r = math.sqrt(cx * cx + cy * cy) + 4.0
+        # Ease the iris inward
+        ease = progress * progress
+        inner_r = max_r * (1.0 - ease)
+
+        glDisable(GL_TEXTURE_2D)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glColor4f(0.0, 0.0, 0.0, 1.0)
+
+        # Draw a full-screen black quad with a circular hole (stencil-free approach:
+        # draw the outer ring as a triangle fan from edge to inner_r)
+        steps = 64
+        outer_r = max_r + 4.0
+        glBegin(GL_TRIANGLE_STRIP)
+        for i in range(steps + 1):
+            a = (i / steps) * 2.0 * math.pi
+            ca = math.cos(a)
+            sa = math.sin(a)
+            glVertex2f(cx + ca * inner_r, cy + sa * inner_r)
+            glVertex2f(cx + ca * outer_r, cy + sa * outer_r)
+        glEnd()
 
     def _draw_lore_fade_gl(self, w: int, h: int) -> None:
         if not self._lore_current:
@@ -476,7 +899,8 @@ class GameGLCanvas(glcanvas.GLCanvas):
             self._lore_current_end = 0.0
             return
 
-        duration = max(0.01, float(self._lore_current_end) - float(self._lore_current_start))
+        duration = max(0.01, float(self._lore_current_end) -
+                       float(self._lore_current_start))
         t = max(0.0, min(1.0, (now - float(self._lore_current_start)) / duration))
         fade = 0.18
         if t < fade:
@@ -491,17 +915,25 @@ class GameGLCanvas(glcanvas.GLCanvas):
             return
 
         text = str(self._lore_current)
-        # Render centered around 56% height, outlined with 8 offsets.
-        _, tw_px, th_px = self.renderer.get_text_texture(text, font_family='Segoe UI', font_size=18, bold=False, color=(255, 255, 255, 255), pad=10)
+        # Match PySide: Segoe UI 18, centered box at 56% height, outlined with a thick pen.
+        _, tw_px, th_px = self.renderer.get_text_texture(
+            text, font_family='Segoe UI', font_size=18, bold=False, color=(255, 255, 255, 255), pad=10)
         tw = float(min(w - 80, int(tw_px)))
         th = float(th_px)
         bx = float((w - tw) * 0.5)
         by = float(int(h * 0.56))
 
         outline_col = (0, 0, 0, alpha)
-        for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
-            self._gl_text(bx + float(ox), by + float(oy), text, 1.0, font_size=18, bold=False, color=outline_col)
-        self._gl_text(bx, by, text, 1.0, font_size=18, bold=False, color=(255, 255, 255, alpha))
+        # Approximate QPen width(3) using two rings of offsets.
+        offsets = [
+            (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1),
+            (-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (2, 2), (-2, 2), (2, -2),
+        ]
+        for ox, oy in offsets:
+            self._gl_text_center(bx + float(ox), by + float(oy), tw, th +
+                                 4.0, text, 1.0, font_size=18, bold=False, color=outline_col)
+        self._gl_text_center(bx, by, tw, th + 4.0, text, 1.0,
+                             font_size=18, bold=False, color=(255, 255, 255, alpha))
 
     def _draw_minimap_overlay_gl(self, w: int, h: int) -> None:
         # Centered full-maze minimap (match PySide sizing heuristics)
@@ -525,11 +957,12 @@ class GameGLCanvas(glcanvas.GLCanvas):
         glBegin(GL_QUADS)
         glVertex2f(float(x0), float(y0))
         glVertex2f(float(x0 + maze_content_width), float(y0))
-        glVertex2f(float(x0 + maze_content_width), float(y0 + maze_content_height))
+        glVertex2f(float(x0 + maze_content_width),
+                   float(y0 + maze_content_height))
         glVertex2f(float(x0), float(y0 + maze_content_height))
         glEnd()
 
-        # Walls/floors
+        # Walls/floors (match PySide palette)
         for r in range(maze_rows):
             row = layout[r]
             for c in range(maze_cols):
@@ -537,9 +970,12 @@ class GameGLCanvas(glcanvas.GLCanvas):
                 rx = x0 + c * cell_px
                 ry = y0 + r * cell_px
                 if ch == '#':
-                    glColor4f(18 / 255, 18 / 255, 22 / 255, 1.0)
+                    glColor4f(45 / 255, 45 / 255, 55 / 255, 1.0)
                 else:
-                    glColor4f(55 / 255, 55 / 255, 62 / 255, 1.0)
+                    if (r, c) in getattr(self.core, 'floors', set()):
+                        glColor4f(125 / 255, 125 / 255, 135 / 255, 1.0)
+                    else:
+                        glColor4f(15 / 255, 15 / 255, 18 / 255, 1.0)
                 glBegin(GL_QUADS)
                 glVertex2f(float(rx), float(ry))
                 glVertex2f(float(rx + cell_px), float(ry))
@@ -552,9 +988,19 @@ class GameGLCanvas(glcanvas.GLCanvas):
             sy = int(y0 + world_r * cell_px)
             return sx, sy
 
-        # Coins
-        coin_size = max(4, int(cell_px * 0.35))
-        glColor4f(1.0, 0.85, 0.25, 0.95)
+        def _circle(cx: float, cy: float, radius: float, col: tuple[float, float, float, float]) -> None:
+            glColor4f(col[0], col[1], col[2], col[3])
+            glBegin(GL_TRIANGLE_FAN)
+            glVertex2f(cx, cy)
+            steps = 18
+            for i in range(steps + 1):
+                a = (i / steps) * (2.0 * math.pi)
+                glVertex2f(cx + math.cos(a) * radius,
+                           cy + math.sin(a) * radius)
+            glEnd()
+
+        # Coins (match PySide: yellow circle with subtle outline)
+        coin_size = max(6, int(cell_px * 0.35))
         for coin in getattr(self.core, 'coins', {}).values():
             try:
                 if getattr(coin, 'taken', False):
@@ -563,26 +1009,9 @@ class GameGLCanvas(glcanvas.GLCanvas):
             except Exception:
                 continue
             sx, sy = to_screen(float(rr) + 0.5, float(cc) + 0.5)
-            self._gl_rect(float(sx - coin_size // 2), float(sy - coin_size // 2), float(coin_size), float(coin_size), 1.0, 0.85, 0.25, 0.9)
-
-        # Key fragments
-        frag_size = max(6, int(cell_px * 0.45))
-        for frag in getattr(self.core, 'key_fragments', {}).values():
-            try:
-                if getattr(frag, 'taken', False):
-                    continue
-                rr, cc = frag.cell
-                kind = str(getattr(frag, 'kind', '') or '')
-            except Exception:
-                continue
-            if kind == 'KH':
-                col = (0.55, 0.95, 1.0)
-            elif kind == 'KP':
-                col = (0.9, 0.65, 1.0)
-            else:
-                col = (0.75, 1.0, 0.65)
-            sx, sy = to_screen(float(rr) + 0.5, float(cc) + 0.5)
-            self._gl_rect(float(sx - frag_size // 2), float(sy - frag_size // 2), float(frag_size), float(frag_size), col[0], col[1], col[2], 0.95)
+            r = float(coin_size) * 0.5
+            _circle(float(sx), float(sy), r * 1.08, (1.0, 200 / 255, 0.0, 1.0))
+            _circle(float(sx), float(sy), r, (1.0, 215 / 255, 0.0, 1.0))
 
         # Ghosts
         ghost_colors: dict[int, tuple[float, float, float]] = {
@@ -593,16 +1022,6 @@ class GameGLCanvas(glcanvas.GLCanvas):
             5: (1.0, 90 / 255, 1.0),
         }
         ghost_size = max(8, int(cell_px * 0.6))
-
-        def _circle(cx: float, cy: float, radius: float, col: tuple[float, float, float, float]) -> None:
-            glColor4f(col[0], col[1], col[2], col[3])
-            glBegin(GL_TRIANGLE_FAN)
-            glVertex2f(cx, cy)
-            steps = 18
-            for i in range(steps + 1):
-                a = (i / steps) * (2.0 * math.pi)
-                glVertex2f(cx + math.cos(a) * radius, cy + math.sin(a) * radius)
-            glEnd()
 
         for ghost in getattr(self.core, 'ghosts', {}).values():
             try:
@@ -617,18 +1036,23 @@ class GameGLCanvas(glcanvas.GLCanvas):
             sx, sy = to_screen(gr + 0.5, gc + 0.5)
 
             # Body (circle)
-            _circle(float(sx), float(sy), float(gsz) * 0.5, (col[0], col[1], col[2], 0.95))
+            _circle(float(sx), float(sy), float(gsz) *
+                    0.5, (col[0], col[1], col[2], 0.95))
 
             # Eyes (match PySide minimap: white eyes + black pupils)
             eye_size = max(2, int(gsz * 0.15))
             eye_offset_x = float(gsz) * 0.25
             eye_offset_y = float(gsz) * 0.10
-            _circle(float(sx - eye_offset_x), float(sy - eye_offset_y), float(eye_size) * 0.6, (1.0, 1.0, 1.0, 1.0))
-            _circle(float(sx + eye_offset_x), float(sy - eye_offset_y), float(eye_size) * 0.6, (1.0, 1.0, 1.0, 1.0))
+            _circle(float(sx - eye_offset_x), float(sy - eye_offset_y),
+                    float(eye_size) * 0.6, (1.0, 1.0, 1.0, 1.0))
+            _circle(float(sx + eye_offset_x), float(sy - eye_offset_y),
+                    float(eye_size) * 0.6, (1.0, 1.0, 1.0, 1.0))
 
             pupil_size = max(1, int(eye_size * 0.5))
-            _circle(float(sx - eye_offset_x), float(sy - eye_offset_y), float(pupil_size) * 0.6, (0.0, 0.0, 0.0, 1.0))
-            _circle(float(sx + eye_offset_x), float(sy - eye_offset_y), float(pupil_size) * 0.6, (0.0, 0.0, 0.0, 1.0))
+            _circle(float(sx - eye_offset_x), float(sy - eye_offset_y),
+                    float(pupil_size) * 0.6, (0.0, 0.0, 0.0, 1.0))
+            _circle(float(sx + eye_offset_x), float(sy - eye_offset_y),
+                    float(pupil_size) * 0.6, (0.0, 0.0, 0.0, 1.0))
 
         # Player marker
         px = float(getattr(self.core.player, 'x', 0.0))
@@ -640,16 +1064,40 @@ class GameGLCanvas(glcanvas.GLCanvas):
         cx = x0 + int((pc + 0.5) * cell_px)
         cy = y0 + int((pr + 0.5) * cell_px)
 
-        r0 = max(2, int(cell_px * 0.25))
-        glColor4f(1.0, 220 / 255, 110 / 255, 0.86)
+        player_size = max(12, int(cell_px * 0.7))
+        half = float(player_size) * 0.5
+        # Diamond fill
+        glColor4f(50 / 255, 255 / 255, 50 / 255, 1.0)
         glBegin(GL_QUADS)
-        glVertex2f(float(cx - r0), float(cy - r0))
-        glVertex2f(float(cx + r0), float(cy - r0))
-        glVertex2f(float(cx + r0), float(cy + r0))
-        glVertex2f(float(cx - r0), float(cy + r0))
+        glVertex2f(float(cx), float(cy - half))
+        glVertex2f(float(cx + half), float(cy))
+        glVertex2f(float(cx), float(cy + half))
+        glVertex2f(float(cx - half), float(cy))
         glEnd()
+        # Outline (green, width 2)
+        try:
+            glLineWidth(2.0)
+        except Exception:
+            pass
+        self._gl_line(float(cx), float(cy - half), float(cx +
+                      half), float(cy), color=(0, 255, 0, 255))
+        self._gl_line(float(cx + half), float(cy), float(cx),
+                      float(cy + half), color=(0, 255, 0, 255))
+        self._gl_line(float(cx), float(cy + half), float(cx -
+                      half), float(cy), color=(0, 255, 0, 255))
+        self._gl_line(float(cx - half), float(cy), float(cx),
+                      float(cy - half), color=(0, 255, 0, 255))
+        try:
+            glLineWidth(1.0)
+        except Exception:
+            pass
 
-        # Facing line
+        # Center white dot
+        center_size = float(player_size) * 0.4
+        _circle(float(cx), float(cy), float(
+            center_size) * 0.5, (1.0, 1.0, 1.0, 1.0))
+
+        # Facing line (keep as-is for now)
         fx = math.sin(yaw)
         fz = math.cos(yaw)
         line_len = max(6, int(cell_px * 0.75))
@@ -673,19 +1121,36 @@ class GameGLCanvas(glcanvas.GLCanvas):
         x0 = (w - panel_w) // 2
         y0 = (h - panel_h) // 2
 
-        self._gl_rect(float(x0), float(y0), float(panel_w), float(panel_h), 18 / 255, 18 / 255, 22 / 255, 235 / 255)
+        self._gl_rect(float(x0), float(y0), float(panel_w), float(
+            panel_h), 18 / 255, 18 / 255, 22 / 255, 235 / 255)
 
         # Title
         title = 'PAUSED'
-        self._gl_text_center(float(x0), float(y0 + 10), float(panel_w), 54.0, title, 1.0, font_size=HUD_FS_PAUSE_TITLE, bold=True, color=HUD_COL_YELLOW)
+        self._gl_text_center(float(x0), float(y0 + 10), float(panel_w), 54.0, title,
+                             1.0, font_size=HUD_FS_PAUSE_TITLE, bold=True, color=HUD_COL_YELLOW)
 
-        # Stats area (visual parity; values can be refined later)
+        # Stats area — live values from PerformanceMonitor
         stats_x = x0 + 36
         stats_y = y0 + 96
         line_h = 24
-        self._gl_text(float(stats_x), float(stats_y + line_h * 0), 'FPS: ...', 1.0, font_size=HUD_FS_SMALL, bold=False, color=(235, 235, 235, 255))
-        self._gl_text(float(stats_x), float(stats_y + line_h * 1), 'Avg input latency: ... ms', 1.0, font_size=HUD_FS_SMALL, bold=False, color=(235, 235, 235, 255))
-        self._gl_text(float(stats_x), float(stats_y + line_h * 2), 'RAM usage: ... MB', 1.0, font_size=HUD_FS_SMALL, bold=False, color=(235, 235, 235, 255))
+        pm = getattr(self, 'performance_monitor', None)
+        if pm is not None:
+            fps_val = int(pm.stable_fps())
+            lat_val = pm.avg_input_latency_ms()
+            ram_val = pm.current_ram_mb()
+            fps_str = f'FPS: {fps_val}'
+            lat_str = f'Avg input latency: {lat_val:.1f} ms'
+            ram_str = f'RAM usage: {ram_val:.1f} MB'
+        else:
+            fps_str = 'FPS: —'
+            lat_str = 'Avg input latency: — ms'
+            ram_str = 'RAM usage: — MB'
+        self._gl_text(float(stats_x), float(stats_y + line_h * 0), fps_str,
+                      1.0, font_size=HUD_FS_SMALL, bold=False, color=(235, 235, 235, 255))
+        self._gl_text(float(stats_x), float(stats_y + line_h * 1), lat_str,
+                      1.0, font_size=HUD_FS_SMALL, bold=False, color=(235, 235, 235, 255))
+        self._gl_text(float(stats_x), float(stats_y + line_h * 2), ram_str,
+                      1.0, font_size=HUD_FS_SMALL, bold=False, color=(235, 235, 235, 255))
 
         btn_w = 280
         btn_h = 48
@@ -706,20 +1171,133 @@ class GameGLCanvas(glcanvas.GLCanvas):
         for key, label, bx, by in buttons:
             r = wx.Rect(int(bx), int(by), int(btn_w), int(btn_h))
             self._pause_btn_rects[key] = r
-            self._gl_rect(float(r.x), float(r.y), float(r.width), float(r.height), 32 / 255, 32 / 255, 40 / 255, 235 / 255)
-            self._gl_text_center(float(r.x), float(r.y), float(r.width), float(r.height), label, 1.0, font_size=HUD_FS_MED, bold=True, color=(255, 255, 255, 255))
+            self._gl_rect(float(r.x), float(r.y), float(r.width), float(
+                r.height), 32 / 255, 32 / 255, 40 / 255, 235 / 255)
+            self._gl_text_center(float(r.x), float(r.y), float(r.width), float(
+                r.height), label, 1.0, font_size=HUD_FS_MED, bold=True, color=(255, 255, 255, 255))
+
+    def _draw_stats_screen_gl(self, w: int, h: int) -> None:
+        """Full-screen stats overlay drawn when the level ends."""
+        self._gl_rect(0.0, 0.0, float(w), float(h), 0.0, 0.0, 0.0, 1.0)
+
+        text = str(getattr(self, '_stats_text', '') or '')
+        if not text:
+            return
+
+        lines = [ln.rstrip() for ln in text.split('\n')]
+        # Remove leading/trailing blank lines
+        while lines and not lines[0]:
+            lines.pop(0)
+        while lines and not lines[-1]:
+            lines.pop()
+
+        # Auto-fit: shrink line height so all lines fit with top/bottom padding
+        usable_h = h - 80  # 40px padding top + 40px for ESC hint at bottom
+        ideal_line_h = 26
+        line_h = min(ideal_line_h, max(14, usable_h // max(1, len(lines))))
+        total_h = len(lines) * line_h
+        start_y = max(36, (h - total_h - 50) // 2)
+
+        # Font size scales with line height
+        fs_body = max(10, min(14, line_h - 4))
+        fs_header = fs_body + 1
+
+        for i, ln in enumerate(lines):
+            y = start_y + i * line_h
+            is_sep = ln.startswith('─')
+            is_header = (ln.isupper() and len(ln) > 2
+                         and not ln.startswith('•') and not is_sep)
+            if is_sep:
+                color: tuple[int, int, int, int] = (100, 100, 100, 200)
+                fs = fs_body
+            elif is_header:
+                color = (255, 220, 80, 255)
+                fs = fs_header
+            else:
+                color = (230, 230, 230, 255)
+                fs = fs_body
+            self._gl_text_center(0.0, float(y), float(w), float(line_h),
+                                 ln, 1.0, font_size=fs, bold=is_header, color=color)
+
+        self._gl_text_center(0.0, float(h - 46), float(w), 30.0,
+                             'Press ESC to continue', 1.0,
+                             font_size=13, bold=False, color=(160, 160, 160, 255))
+
+    def _draw_end_screen_gl(self, w: int, h: int) -> None:
+        """End screen stats display (Level 2) - shows only stats, no extra text."""
+        # Draw black background
+        self._gl_rect(0.0, 0.0, float(w), float(h), 0.0, 0.0, 0.0, 1.0)
+
+        # Draw stats text (same as _draw_stats_screen_gl)
+        text = str(getattr(self, '_stats_text', '') or '')
+        if text:
+            lines = [ln.rstrip() for ln in text.split('\n')]
+            while lines and not lines[0]:
+                lines.pop(0)
+            while lines and not lines[-1]:
+                lines.pop()
+            # Auto-fit: shrink line height so all lines fit with top/bottom padding
+            usable_h = h - 80  # 40px padding top + 40px for ESC hint at bottom
+            ideal_line_h = 26
+            line_h = min(ideal_line_h, max(14, usable_h // max(1, len(lines))))
+            total_h = len(lines) * line_h
+            start_y = max(36, (h - total_h - 50) // 2)
+
+            # Font size scales with line height
+            fs_body = max(10, min(14, line_h - 4))
+            fs_header = fs_body + 1
+
+            for i, ln in enumerate(lines):
+                y = start_y + i * line_h
+                is_sep = ln.startswith('─')
+                is_header = (ln.isupper() and len(ln) > 2
+                             and not ln.startswith('•') and not is_sep)
+                if is_sep:
+                    color: tuple[int, int, int, int] = (100, 100, 100, 200)
+                    fs = fs_body
+                elif is_header:
+                    color = (255, 210, 60, 255)
+                    fs = fs_header
+                else:
+                    color = (210, 210, 210, 255)
+                    fs = fs_body
+                self._gl_text_center(0.0, float(y), float(w), float(line_h),
+                                     ln, 1.0, font_size=fs, bold=is_header, color=color)
+
+        self._gl_text_center(0.0, float(h - 46), float(w), 30.0,
+                             'Press ESC to continue', 1.0, font_size=14, bold=False,
+                             color=(150, 150, 150, 255))
 
     def _draw_modal_gl(self, w: int, h: int) -> None:
-        self._gl_rect(0.0, 0.0, float(w), float(h), 0.0, 0.0, 0.0, 150 / 255)
+        # Save current OpenGL state before modal rendering
+        texture_2d_enabled = glIsEnabled(GL_TEXTURE_2D)
+        blend_enabled = glIsEnabled(GL_BLEND)
+        depth_test_enabled = glIsEnabled(GL_DEPTH_TEST)
+        lighting_enabled = glIsEnabled(GL_LIGHTING)
+
+        # Set proper state for modal rendering
+        glDisable(GL_DEPTH_TEST)
+        glDisable(GL_LIGHTING)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        if self._modal_kind == 'level_select':
+            self._gl_rect(0.0, 0.0, float(w), float(h),
+                          0.0, 0.0, 0.0, 255 / 255)
+        else:
+            self._gl_rect(0.0, 0.0, float(w), float(h),
+                          0.0, 0.0, 0.0, 160 / 255)
         self._modal_btn_rects.clear()
 
         if self._modal_kind == 'level_select':
             title = self._modal_title or 'Select Level'
             body = self._modal_body or ''
 
-            self._gl_text_center(float(0), float(h * 0.10), float(w), 80.0, title, 1.0, font_size=38, bold=True, color=HUD_COL_WHITE)
+            self._gl_text_center(float(0), float(
+                h * 0.10), float(w), 80.0, title, 1.0, font_size=38, bold=True, color=HUD_COL_WHITE)
             if body:
-                self._gl_text_center(float(0), float(h * 0.10 + 60), float(w), 50.0, body, 1.0, font_size=18, bold=False, color=(200, 200, 200, 255))
+                self._gl_text_center(float(0), float(h * 0.10 + 60), float(
+                    w), 50.0, body, 1.0, font_size=18, bold=False, color=(200, 200, 200, 255))
 
             btn_w = min(620, int(w * 0.62))
             btn_h = 82
@@ -728,29 +1306,113 @@ class GameGLCanvas(glcanvas.GLCanvas):
             by1 = int(h * 0.34)
             by2 = by1 + btn_h + gap
 
-            modal_unlocked = set(getattr(self, '_modal_unlocked', None) or set())
+            modal_unlocked = set(
+                getattr(self, '_modal_unlocked', None) or set())
 
             def draw_btn(key: str, yy: int, label: str, enabled: bool) -> None:
                 r = wx.Rect(int(bx), int(yy), int(btn_w), int(btn_h))
                 if enabled:
-                    self._gl_rect(float(r.x), float(r.y), float(r.width), float(r.height), 22 / 255, 22 / 255, 26 / 255, 1.0)
+                    self._gl_rect(float(r.x), float(r.y), float(r.width), float(
+                        r.height), 22 / 255, 22 / 255, 26 / 255, 1.0)
                 else:
-                    self._gl_rect(float(r.x), float(r.y), float(r.width), float(r.height), 22 / 255, 22 / 255, 26 / 255, 190 / 255)
-                self._gl_text_center(float(r.x), float(r.y), float(r.width), float(r.height), label, 1.0, font_size=26, bold=True, color=HUD_COL_WHITE if enabled else (140, 140, 140, 255))
+                    self._gl_rect(float(r.x), float(r.y), float(r.width), float(
+                        r.height), 22 / 255, 22 / 255, 26 / 255, 190 / 255)
+                self._gl_text_center(float(r.x), float(r.y), float(r.width), float(
+                    r.height), label, 1.0, font_size=26, bold=True, color=HUD_COL_WHITE if enabled else (140, 140, 140, 255))
                 self._modal_btn_rects[key] = r
 
             draw_btn('level1', by1, 'Level 1', True)
             lvl2_enabled = 'level2' in modal_unlocked
-            draw_btn('level2', by2, 'Level 2' if lvl2_enabled else 'Level 2 (Locked)', lvl2_enabled)
+            draw_btn(
+                'level2', by2, 'Level 2' if lvl2_enabled else 'Level 2 (Locked)', lvl2_enabled)
 
             close_size = 38
             close_x = w - close_size - 20
             close_y = 18
-            close_r = wx.Rect(int(close_x), int(close_y), int(close_size), int(close_size))
+            close_r = wx.Rect(int(close_x), int(close_y),
+                              int(close_size), int(close_size))
             self._modal_btn_rects['close'] = close_r
 
             a = 220 / 255 if self._modal_allow_close else 120 / 255
-            self._gl_rect(float(close_r.x), float(close_r.y), float(close_r.width), float(close_r.height), a, a, a, 0.15)
+            self._gl_rect(float(close_r.x), float(close_r.y), float(
+                close_r.width), float(close_r.height), a, a, a, 0.15)
+            self._gl_text_center(float(close_r.x), float(close_r.y), float(close_r.width), float(
+                close_r.height), 'X', 1.0, font_size=22, bold=True, color=(255, 255, 255, 255 if self._modal_allow_close else 140))
+
+        elif self._modal_kind == 'tutorial':
+            title = str(self._modal_title or '')
+            body = str(self._modal_body or '')
+
+            panel_w = min(840, int(w * 0.74))
+            panel_h = min(440, int(h * 0.56))
+            x0 = (w - panel_w) // 2
+            y0 = (h - panel_h) // 2
+
+            self._gl_rect(float(x0), float(y0), float(panel_w), float(
+                panel_h), 18 / 255, 18 / 255, 22 / 255, 245 / 255)
+            self._gl_outline_rect(float(x0), float(y0), float(
+                panel_w), float(panel_h), color=(235, 235, 235, 255))
+
+            # Title
+            if title:
+                self._gl_text(float(x0 + 24), float(y0 + 44), title, 1.0,
+                              font_size=18, bold=True, color=(235, 235, 235, 255))
+
+            # Body (multiline)
+            body_rect_x = x0 + 24
+            body_rect_y = y0 + 84
+            body_rect_w = panel_w - 48
+            lines = self._wrap_text_lines(body, max_width_px=int(
+                body_rect_w), font_size=14, bold=False)
+            lh = 18
+            for i, ln in enumerate(lines):
+                if ln == '':
+                    continue
+                self._gl_text(float(body_rect_x), float(body_rect_y + i * lh),
+                              ln, 1.0, font_size=14, bold=False, color=(220, 220, 220, 255))
+
+            # Close button (top-right)
+            close_size = 32
+            close_x = x0 + panel_w - 24 - close_size
+            close_y = y0 + 22
+            close_r = wx.Rect(int(close_x), int(close_y),
+                              int(close_size), int(close_size))
+            self._modal_btn_rects['close'] = close_r
+            pen = (220, 220, 220, 255) if self._modal_allow_close else (
+                120, 120, 120, 255)
+            self._gl_line(float(close_x), float(close_y), float(
+                close_x + close_size), float(close_y), color=pen)
+            self._gl_line(float(close_x + close_size), float(close_y),
+                          float(close_x + close_size), float(close_y + close_size), color=pen)
+            self._gl_line(float(close_x + close_size), float(close_y + close_size),
+                          float(close_x), float(close_y + close_size), color=pen)
+            self._gl_line(float(close_x), float(close_y + close_size),
+                          float(close_x), float(close_y), color=pen)
+            self._gl_line(float(close_x + 7), float(close_y + 7), float(close_x +
+                          close_size - 7), float(close_y + close_size - 7), color=pen)
+            self._gl_line(float(close_x + close_size - 7), float(close_y + 7),
+                          float(close_x + 7), float(close_y + close_size - 7), color=pen)
+
+        # Restore OpenGL state after modal rendering
+        if texture_2d_enabled:
+            glEnable(GL_TEXTURE_2D)
+        else:
+            glDisable(GL_TEXTURE_2D)
+
+        if blend_enabled:
+            glEnable(GL_BLEND)
+        else:
+            glDisable(GL_BLEND)
+
+        if depth_test_enabled:
+            glEnable(GL_DEPTH_TEST)
+        else:
+            glDisable(GL_DEPTH_TEST)
+
+        if lighting_enabled:
+            glEnable(GL_LIGHTING)
+        else:
+            glDisable(GL_LIGHTING)
 
     def show_level_select_modal(self, *, unlocked: set[str], allow_close: bool, return_to_pause: bool) -> None:
         self._modal_visible = True
@@ -791,7 +1453,7 @@ class WxGameWindow(wx.Frame):
     def __init__(self):
         super().__init__(None, title='Within the Walls (WxPython)', size=(1280, 800))
 
-        self._progress_path = os.path.abspath('progression.json')
+        self._progress_path = os.path.abspath('progression_wx.json')
         self._progress = self._load_progression()
 
         unlocked = set(self._progress.get('unlocked_levels') or [])
@@ -799,7 +1461,7 @@ class WxGameWindow(wx.Frame):
         if last_level not in unlocked:
             last_level = 'level1'
 
-        self._save_path = os.path.abspath('savegame.json')
+        self._save_path = os.path.abspath('savegame_wx.json')
 
         autoload_level1_save = False
         if last_level == 'level1' and os.path.exists(self._save_path):
@@ -808,32 +1470,52 @@ class WxGameWindow(wx.Frame):
         self.core = GameCore(level_id=last_level)
         self._current_level_id = last_level
 
-        self._asset_dir = os.path.abspath('assets')
-        self._sfx_coin = self._load_sound('drop-coin-384921.wav')
-        self._sfx_gate = self._load_sound('closing-metal-door-44280.wav')
-        self._sfx_ghost = self._load_sound('ghost-horror-sound-382709.wav')
-        self._sfx_footsteps = self._load_sound('running-on-concrete-268478.wav')
+        self._asset_dir = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), '..', '..', 'assets'))
+
+        # Use the working audio system
+        self._audio = _SimpleAudio(self._asset_dir)
+
+        # Ghost sound timer - every 10 seconds globally
+        self._ghost_sound_timer_active = True
+        self._schedule_ghost_sound()
+
+        self._key_minigame_open = False
+        self._assembly_minigame: Optional[Assembly3DMinigame] = None
 
         self._lore_flags: dict[str, bool] = {}
         self._persist_seen: dict[str, bool] = {}
+
+        self._pending_gameplay_tutorial = False
 
         self._callbacks_core_token: int = 0
 
         self.keys_pressed: set[int] = set()
 
+        # Performance monitor — shared reference given to canvas after construction
+        self.performance_monitor = PerformanceMonitor(framework='wxPython')
+
         self.canvas = GameGLCanvas(self, self.core)
+        self.canvas.performance_monitor = self.performance_monitor
+
+        # Level-end flow state
+        # True once we've handled game_won for this level
+        self._level_end_triggered: bool = False
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(self.canvas, 1, wx.EXPAND)
         self.SetSizer(sizer)
 
         self.Bind(wx.EVT_CLOSE, self._on_close)
+        self.Bind(wx.EVT_ACTIVATE, self._on_activate)
+        self.Bind(wx.EVT_ICONIZE, self._on_iconize)
         self.Bind(wx.EVT_TIMER, self._on_tick)
 
         # Route input through the canvas (focus stays there during gameplay).
         self.canvas.Bind(wx.EVT_KEY_DOWN, self._on_key_down)
         self.canvas.Bind(wx.EVT_KEY_UP, self._on_key_up)
         self.canvas.Bind(wx.EVT_LEFT_DOWN, self._on_click)
+        self.canvas.Bind(wx.EVT_KILL_FOCUS, self._on_kill_focus)
 
         self._tick = wx.Timer(self)
         self._tick.Start(16)
@@ -844,32 +1526,82 @@ class WxGameWindow(wx.Frame):
 
         if self._current_level_id == 'level2':
             self._set_paused(False)
-            self._start_level('level2', load_save=os.path.exists(self._save_path))
+            self._start_level(
+                'level2', load_save=os.path.exists(self._save_path))
         elif autoload_level1_save:
             self._set_paused(False)
             self._start_level('level1', load_save=True)
         else:
             self._open_level_select_modal(startup=True)
 
-    def _load_sound(self, filename: str) -> Optional[wx.adv.Sound]:
-        try:
-            path = os.path.join(self._asset_dir, str(filename))
-            if not os.path.exists(path):
-                return None
-            snd = wx.adv.Sound(path)
-            if not snd.IsOk():
-                return None
-            return snd
-        except Exception:
-            return None
+    def _schedule_ghost_sound(self) -> None:
+        """Schedule next ghost sound check using CallLater"""
+        if not getattr(self, '_ghost_sound_timer_active', False):
+            return
+        # Every 10 seconds globally
+        wx.CallLater(10000, self._ghost_sound_check)
 
-    def _play_sfx(self, snd: Optional[wx.adv.Sound]) -> None:
+    def _ghost_sound_check(self) -> None:
+        """Called by CallLater to play ghost sounds globally"""
+        if not getattr(self, '_ghost_sound_timer_active', False):
+            return
+        self._play_ghost_sound_global()
+        # Schedule next check
+        self._schedule_ghost_sound()
+
+    def _play_ghost_sound_global(self) -> None:
+        """Play ghost sound globally"""
         try:
-            if snd is None:
+            # Only check if game is paused or won - ignore player movement
+            if getattr(self.core, 'paused', False):
                 return
-            snd.Play(wx.adv.SOUND_ASYNC)
+            if bool(getattr(self.core, 'game_won', False)) or bool(getattr(self.core, 'game_completed', False)):
+                return
+
+            # Play ghost sound globally using the working method
+            self._audio.play_ghost(volume=0.8)
         except Exception:
             pass
+
+    def _set_footsteps_playing(self, playing: bool) -> None:
+        try:
+            self._audio.set_footsteps(bool(playing))
+        except Exception:
+            pass
+
+    def _reset_input_state(self) -> None:
+        try:
+            self.keys_pressed.clear()
+        except Exception:
+            pass
+        try:
+            self.canvas.hide_mouse_capture()
+        except Exception:
+            pass
+        try:
+            self._set_footsteps_playing(False)
+        except Exception:
+            pass
+
+    def _on_activate(self, evt: wx.ActivateEvent) -> None:
+        try:
+            if not bool(evt.GetActive()):
+                self._reset_input_state()
+        except Exception:
+            pass
+        evt.Skip()
+
+    def _on_iconize(self, evt: wx.IconizeEvent) -> None:
+        try:
+            if bool(evt.IsIconized()):
+                self._reset_input_state()
+        except Exception:
+            pass
+        evt.Skip()
+
+    def _on_kill_focus(self, evt: wx.FocusEvent) -> None:
+        self._reset_input_state()
+        evt.Skip()
 
     def _register_core_callbacks(self) -> None:
         try:
@@ -878,16 +1610,67 @@ class WxGameWindow(wx.Frame):
                 return
             self._callbacks_core_token = int(token)
 
-            self.core.register_event_callback('coin_picked', self._on_coin_picked)
-            self.core.register_event_callback('gate_opened', self._on_gate_moved)
-            self.core.register_event_callback('gate_closed', self._on_gate_moved)
-            self.core.register_event_callback('time_penalty', self._on_time_penalty)
-            self.core.register_event_callback('exit_unlocked', self._on_exit_unlocked)
-            self.core.register_event_callback('sector_entered', self._on_sector_entered)
-            self.core.register_event_callback('sent_to_jail', self._on_sent_to_jail)
+            self.core.register_event_callback(
+                'coin_picked', self._on_coin_picked)
+            self.core.register_event_callback(
+                'gate_opened', self._on_gate_moved)
+            self.core.register_event_callback(
+                'gate_closed', self._on_gate_moved)
+            self.core.register_event_callback(
+                'time_penalty', self._on_time_penalty)
+            self.core.register_event_callback(
+                'exit_unlocked', self._on_exit_unlocked)
+            self.core.register_event_callback(
+                'sector_entered', self._on_sector_entered)
+            self.core.register_event_callback(
+                'sent_to_jail', self._on_sent_to_jail)
             self.core.register_event_callback('left_jail', self._on_left_jail)
-            self.core.register_event_callback('key_fragment_encountered', self._on_key_fragment_encountered)
-            self.core.register_event_callback('key_picked', self._on_key_picked)
+            self.core.register_event_callback(
+                'key_fragment_encountered', self._on_key_fragment_encountered)
+            self.core.register_event_callback(
+                'key_picked', self._on_key_picked)
+        except Exception:
+            pass
+
+    def _trigger_lore(self, key: str) -> None:
+        """Trigger lore events"""
+        # Backwards-compatible no-op mapping layer.
+        # Lore is now code-driven (no lore.md dependency). Only a small set of keys are supported.
+        key = str(key or '').strip()
+        if not key:
+            return
+
+        txt: Optional[str] = None
+
+        if key == 'ON_GHOST_CLOSE':
+            if self._current_level_id == 'level1':
+                txt = 'Why are you here?'
+            elif self._current_level_id == 'level2':
+                txt = 'Wake me up.'
+        elif key == 'COIN_HALF':
+            if self._current_level_id == 'level1':
+                txt = 'Halfway.'
+            elif self._current_level_id == 'level2':
+                txt = 'The maze likes it when I collect.'
+        elif key == 'LEVEL1_INTRO':
+            txt = 'A basement? This feels like a test.'
+        elif key == 'LEVEL2_INTRO':
+            txt = 'This place feels familiar.'
+
+        if txt is not None:
+            self._show_lore_line(txt)
+
+    def _show_tutorial_modal(self, title: str, body: str) -> None:
+        """Show tutorial modal"""
+        try:
+            self._set_paused(True)
+            self.canvas._modal_visible = True
+            self.canvas._modal_kind = 'tutorial'
+            self.canvas._modal_title = title
+            self.canvas._modal_body = body
+            self.canvas._modal_return_to_pause = False
+            self.canvas.hide_mouse_capture()
+            self.keys_pressed.clear()
         except Exception:
             pass
 
@@ -898,22 +1681,25 @@ class WxGameWindow(wx.Frame):
             pass
 
     def _on_coin_picked(self, data: dict) -> None:
-        self._play_sfx(self._sfx_coin)
+        try:
+            self._audio.play_coin()
+        except Exception:
+            pass
         try:
             if float(self.core.coins_collected) >= float(self.core.coins_required) * 0.5:
                 key = f'coins_half_{self._current_level_id}'
                 if (not self._lore_flags.get('coins_half')) and (not self._persist_seen.get(key)):
                     self._lore_flags['coins_half'] = True
                     self._persist_seen[key] = True
-                    if self._current_level_id == 'level1':
-                        self._show_lore_line('Halfway.')
-                    elif self._current_level_id == 'level2':
-                        self._show_lore_line('The maze likes it when I collect.')
+                    self._trigger_lore('COIN_HALF')
         except Exception:
             pass
 
     def _on_gate_moved(self, _data: dict) -> None:
-        self._play_sfx(self._sfx_gate)
+        try:
+            self._audio.play_gate(volume=1.0)
+        except Exception:
+            pass
 
     def _on_time_penalty(self, data: dict) -> None:
         # PySide shows a +Ns popup; we at least do the lore/sfx parity here.
@@ -925,13 +1711,14 @@ class WxGameWindow(wx.Frame):
             pass
 
     def _on_exit_unlocked(self, _data: dict) -> None:
-        return
+        self._show_lore_line('Exit unlocked.')
 
     def _on_sector_entered(self, data: dict) -> None:
         sid = str((data or {}).get('id', '') or '')
         if (self._current_level_id == 'level2') and (sid == 'F'):
             try:
-                req_met = (int(self.core.coins_collected) >= int(self.core.coins_required)) and (int(self.core.keys_collected) >= int(self.core.keys_required))
+                req_met = (int(self.core.coins_collected) >= int(self.core.coins_required)) and (
+                    int(self.core.keys_collected) >= int(self.core.keys_required))
             except Exception:
                 req_met = False
             if req_met and (not self._lore_flags.get('l2_sector_f_done')):
@@ -953,11 +1740,14 @@ class WxGameWindow(wx.Frame):
             )
             self.canvas._modal_allow_close = True
             self.canvas._modal_return_to_pause = False
+            self.canvas.hide_mouse_capture()
+            self.keys_pressed.clear()
             # Tutorial modal should not force a permanent pause; ESC will close it and gameplay can continue.
-            self._set_paused(False)
+            # Respect existing pause state instead of forcing unpaused
+            pass
 
     def _on_left_jail(self, _data: dict) -> None:
-        return
+        pass
 
     def _on_key_picked(self, data: dict) -> None:
         try:
@@ -969,26 +1759,56 @@ class WxGameWindow(wx.Frame):
             pass
 
     def _on_key_fragment_encountered(self, data: dict) -> None:
-        # Minigame port comes next; for now we mimic PySide: freeze sim + show modal prompt.
         if getattr(self.core, 'paused', False):
+            return
+        if self._key_minigame_open:
             return
         frag_id = str((data or {}).get('id', '') or '')
         if not frag_id:
             return
 
-        prev_frozen = bool(getattr(self.core, 'simulation_frozen', False))
-        self._set_paused(False)
-        self.core.simulation_frozen = True
-        self.canvas._modal_visible = True
-        self.canvas._modal_kind = 'tutorial'
-        self.canvas._modal_title = 'Key Fragment'
-        self.canvas._modal_body = 'Minigame port in progress. Press ESC to close.'
-        self.canvas._modal_allow_close = True
-        self.canvas._modal_return_to_pause = False
+        frag_kind = ''
+        try:
+            frag = getattr(self.core, 'key_fragments', {}).get(frag_id)
+            frag_kind = str(getattr(frag, 'kind', '') or '')
+        except Exception:
+            frag_kind = ''
 
-        # Remember we froze simulation so we can unfreeze on modal close.
-        self.canvas._modal_freeze_simulation = True
-        self.canvas._modal_prev_simulation_frozen = prev_frozen
+        self._key_minigame_open = True
+        self.keys_pressed.clear()
+        self._set_footsteps_playing(False)
+        self.canvas.hide_mouse_capture()
+
+        prev_frozen = bool(getattr(self.core, 'simulation_frozen', False))
+        self.core.simulation_frozen = True
+
+        if self._assembly_minigame is None:
+            self._assembly_minigame = Assembly3DMinigame(
+                self, kind=frag_kind or 'KP')
+        else:
+            self._assembly_minigame.reset(kind=frag_kind or 'KP')
+
+        ok = False
+        try:
+            ok = bool(self._assembly_minigame.ShowModal() == wx.ID_OK)
+        finally:
+            self.core.simulation_frozen = prev_frozen
+
+        if ok:
+            try:
+                self.core.mark_key_fragment_taken(frag_id)
+            except Exception:
+                pass
+        else:
+            try:
+                self.core.clear_pending_key_fragment(frag_id)
+                self.core.defer_key_fragment(frag_id)
+            except Exception:
+                pass
+
+        self.keys_pressed.clear()
+        self._key_minigame_open = False
+        return
 
     def _handle_interact(self) -> None:
         if getattr(self.core, 'paused', False):
@@ -1001,18 +1821,31 @@ class WxGameWindow(wx.Frame):
             return
 
         if action == 'jail_book':
+            self.keys_pressed.clear()
+            self._set_footsteps_playing(False)
+            self.canvas.hide_mouse_capture()
+
             prev_frozen = bool(getattr(self.core, 'simulation_frozen', False))
             self.core.simulation_frozen = True
-            self._set_paused(True)
 
-            self.canvas._modal_visible = True
-            self.canvas._modal_kind = 'tutorial'
-            self.canvas._modal_title = 'Jail'
-            self.canvas._modal_body = 'Minigame port in progress. Press ESC to close.'
-            self.canvas._modal_allow_close = True
-            self.canvas._modal_return_to_pause = False
-            self.canvas._modal_freeze_simulation = True
-            self.canvas._modal_prev_simulation_frozen = prev_frozen
+            dlg = SilhouetteMatchDialog(self)
+            ok = False
+            try:
+                ok = bool(dlg.ShowModal() == wx.ID_OK)
+            finally:
+                self.core.simulation_frozen = prev_frozen
+
+            if ok:
+                try:
+                    self.core.mark_jail_puzzle_success()
+                except Exception:
+                    pass
+                if (self._current_level_id == 'level1') and (not self._lore_flags.get('l1_jail_puzzle_success')):
+                    self._lore_flags['l1_jail_puzzle_success'] = True
+                    self._show_lore_line(
+                        'The maze resets what it cannot control.')
+
+            self.keys_pressed.clear()
             return
 
         if action == 'gate_jail':
@@ -1049,10 +1882,48 @@ class WxGameWindow(wx.Frame):
         except Exception:
             pass
 
+    def _save_game(self) -> None:
+        try:
+            self._progress['last_level'] = str(
+                getattr(self, '_current_level_id', 'level1') or 'level1')
+            self._save_progression()
+        except Exception:
+            pass
+
+        try:
+            state = self.core.get_save_state()
+            if isinstance(state, dict):
+                state['ui_seen'] = dict(self._persist_seen)
+            with open(self._save_path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2)
+        except Exception:
+            pass
+
+    def _load_save_if_present(self) -> None:
+        if not os.path.exists(self._save_path):
+            return
+        try:
+            with open(self._save_path, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+
+            if isinstance(state, dict):
+                saved_level = str(state.get('level_id') or '')
+                if saved_level and saved_level != str(getattr(self, '_current_level_id', '') or ''):
+                    return
+                seen = state.get('ui_seen')
+                if isinstance(seen, dict):
+                    self._persist_seen.update(
+                        {str(k): bool(v) for k, v in seen.items()})
+            self.core.load_save_state(state)
+        except Exception:
+            return
+
     def _set_paused(self, paused: bool) -> None:
         self.core.paused = bool(paused)
         if paused:
+            self.keys_pressed.clear()
             self.canvas.hide_mouse_capture()
+            self._set_footsteps_playing(False)
 
     def _toggle_pause(self) -> None:
         if self.core.screen_closing or self.core.game_completed or self.core.game_won:
@@ -1063,22 +1934,55 @@ class WxGameWindow(wx.Frame):
 
     def _open_level_select_modal(self, *, startup: bool) -> None:
         unlocked = set(self._progress.get('unlocked_levels') or [])
-        self._set_paused(True)
-        self.canvas.show_level_select_modal(unlocked=unlocked, allow_close=(not startup), return_to_pause=(not startup))
+        # Pause the game when showing modal (PySide parity)
+        if not startup:
+            self._set_paused(True)
+        try:
+            self.canvas.hide_mouse_capture()
+        except Exception:
+            pass
+        self.canvas.show_level_select_modal(unlocked=unlocked, allow_close=(
+            not startup), return_to_pause=(not startup))
+        # Force immediate refresh to show modal
+        self.canvas.Refresh(False)
 
     def _start_level(self, level_id: str, *, load_save: bool) -> None:
         level_id = str(level_id or 'level1')
         paused_was = bool(getattr(self.core, 'paused', False))
 
+        # Reset frozen state on old core before replacement
+        try:
+            self.core.simulation_frozen = False
+        except Exception:
+            pass
+
         self.core = GameCore(level_id=level_id)
         self._current_level_id = level_id
         self.canvas.core = self.core
 
+        # Reset level-end guard and performance monitor for the new level
+        self._level_end_triggered = False
+        self._level_complete = False  # Reset level complete flag
+        try:
+            self.performance_monitor = PerformanceMonitor(framework='wxPython')
+            self.canvas.performance_monitor = self.performance_monitor
+        except Exception:
+            pass
+
         for k in ('coins_half', 'ghost_close', 'l2_frags_done', 'l2_sector_f_done'):
             self._lore_flags.pop(k, None)
 
+        # Reset first-movement tracker so intro lore fires again on a fresh start
+        self.__dict__.pop('_player_has_moved', None)
+
+        # Reset "THE END" screen flag
+        self.canvas._show_the_end = False
+
         try:
             self.canvas.SetCurrent(self.canvas._gl_context)
+            # Clear text texture cache before replacing renderer
+            if hasattr(self.canvas, 'renderer') and self.canvas.renderer:
+                self.canvas.renderer.clear_text_texture_cache()
             self.canvas.renderer = OpenGLRenderer(self.core)
             w, h = self.canvas.GetClientSize()
             self.canvas.renderer.resize(int(w), int(h))
@@ -1091,6 +1995,15 @@ class WxGameWindow(wx.Frame):
 
         self.keys_pressed.clear()
         self._register_core_callbacks()
+
+        # Load persisted UI/tutorial state and saved core state if requested.
+        if bool(load_save):
+            try:
+                self._load_save_if_present()
+            except Exception:
+                pass
+
+        # One-time level intro lore (fresh start only) — triggered on first movement.
         if paused_was:
             self._set_paused(True)
         self._last_update_time = time.perf_counter()
@@ -1106,30 +2019,129 @@ class WxGameWindow(wx.Frame):
         self._last_update_time = current_time
         dt = min(dt, 0.1)
 
+        # Performance monitor: tick-to-tick wall time gives true FPS
+        try:
+            self.performance_monitor.tick()
+        except Exception:
+            pass
+
         paused = bool(getattr(self.core, 'paused', False))
         if not paused:
             self.core.update(dt)
+
+        # Performance monitor: update scene data (resolution + scene objects)
+        try:
+            self.performance_monitor.set_resolution(
+                *self.canvas.GetClientSize())
+            self.performance_monitor.update_scene_data(
+                walls_rendered=len(getattr(self.core, 'walls', set())),
+                coins=len(getattr(self.core, 'coins', [])),
+                ghosts=len(getattr(self.core, 'ghosts', {})),
+                spike_traps=len(getattr(self.core, 'spikes', [])),
+                moving_platforms=len(getattr(self.core, 'platforms', [])),
+            )
+        except Exception:
+            pass
+
+        # Level-end: game_won fires once per level — freeze, show stats, queue level-select
+        game_won = bool(getattr(self.core, 'game_won', False))
+        if game_won and not getattr(self, '_level_end_triggered', False):
+            self._level_end_triggered = True
+            self._handle_level_end()
+            return
+
+        # Process pending gameplay tutorial
+        if self._pending_gameplay_tutorial and (not getattr(self.canvas, '_modal_visible', False)):
+            if not self.canvas.is_lore_playing():
+                self._pending_gameplay_tutorial = False
+
+                if (self._current_level_id == 'level1') and (not self._persist_seen.get('tutorial_gameplay')):
+                    self._persist_seen['tutorial_gameplay'] = True
+                    self._show_tutorial_modal(
+                        'Gameplay',
+                        'Press WASD to move.\n'
+                        'Hold Left Mouse Button to look around.\n'
+                        'Press ESC to pause. You can also save and exit from the pause menu.\n\n'
+                        'Press M or click the camera icon to open the minimap.\n'
+                        'The minimap stays open for 10 seconds, then goes on a 20 second cooldown.\n\n'
+                        'Collect all coins and key fragments to unlock the exit.\n'
+                        'Avoid hazards. If you get caught, you will be sent to jail.'
+                    )
 
         if paused:
             # Still repaint so pause/menu overlays remain responsive.
             self.canvas.Refresh(False)
             return
 
-        move_speed = 0.18 if str(getattr(self, '_current_level_id', '')) == 'level1' else 0.30
+        # Freeze player movement and game time when modal is visible
+        modal_open = bool(getattr(self.canvas, '_modal_visible', False))
+        if modal_open:
+            self.canvas.Refresh(False)
+            return  # Don't update movement or time when modal is shown
+
+        move_speed = 0.18 if self._current_level_id == 'level1' else 0.30
         dx = 0.0
         dz = 0.0
 
-        if ord('W') in self.keys_pressed:
+        W, S, A, D = ord('W'), ord('S'), ord('A'), ord('D')
+        if W in self.keys_pressed:
             dz += move_speed
-        if ord('S') in self.keys_pressed:
+        if S in self.keys_pressed:
             dz -= move_speed
-        if ord('A') in self.keys_pressed:
+        if A in self.keys_pressed:
             dx -= move_speed
-        if ord('D') in self.keys_pressed:
+        if D in self.keys_pressed:
             dx += move_speed
 
+        moved = False
         if dx != 0.0 or dz != 0.0:
-            self.core.move_player(dx, dz)
+            try:
+                moved = bool(self.core.move_player(dx, dz))
+                if moved:
+                    _now = time.perf_counter()
+                    for kc in (W, S, A, D):
+                        if kc in self.keys_pressed:
+                            self.performance_monitor.record_input_response(
+                                kc, _now)
+                # Track first movement for intro lore + tutorial
+                if moved and not hasattr(self, '_player_has_moved'):
+                    self._player_has_moved = True
+                    if self._current_level_id == 'level1' and not self._persist_seen.get('l1_intro'):
+                        self._persist_seen['l1_intro'] = True
+                        self._trigger_lore('LEVEL1_INTRO')
+                        self._pending_gameplay_tutorial = True
+                    elif self._current_level_id == 'level2' and not self._persist_seen.get('l2_intro'):
+                        self._persist_seen['l2_intro'] = True
+                        self._trigger_lore('LEVEL2_INTRO')
+            except Exception:
+                moved = False
+
+        # Footsteps loop (match PySide: play only when actual movement succeeds)
+        modal_open = bool(getattr(self.canvas, '_modal_visible', False))
+        sim_frozen = bool(getattr(self.core, 'simulation_frozen', False))
+        key_minigame = bool(getattr(self, '_key_minigame_open', False))
+        self._set_footsteps_playing(moved and (not modal_open) and (not sim_frozen) and (
+            not key_minigame) and (not bool(getattr(self.core, 'paused', False))))
+
+        # Ghost close (distance threshold; once only)
+        try:
+            # Manual ghost distance calculation like PySide
+            nearest = None
+            if hasattr(self.core, 'ghosts') and hasattr(self.core, 'player'):
+                for g in self.core.ghosts.values():
+                    d = math.hypot(g.x - self.core.player.x,
+                                   g.z - self.core.player.z)
+                    if nearest is None or d < nearest:
+                        nearest = d
+
+            if nearest is not None and nearest <= 2.0:
+                if not self._lore_flags.get('ghost_close'):
+                    self._lore_flags['ghost_close'] = True
+                    if not self._persist_seen.get(f'ghost_close_{self._current_level_id}'):
+                        self._persist_seen[f'ghost_close_{self._current_level_id}'] = True
+                        self._trigger_lore('ON_GHOST_CLOSE')
+        except Exception:
+            pass
 
         # Drive the render loop at the same cadence as gameplay updates.
         self.canvas.Refresh(False)
@@ -1138,22 +2150,28 @@ class WxGameWindow(wx.Frame):
         code = int(evt.GetKeyCode())
         self.keys_pressed.add(code)
 
+        # Record input event time for latency measurement (only for movement keys)
+        try:
+            if code in (ord('W'), ord('S'), ord('A'), ord('D')):
+                self.performance_monitor.record_input_event(
+                    code, time.perf_counter())
+        except Exception:
+            pass
+
         if code in (ord('E'), ord('e')):
             self._handle_interact()
             return
 
         if code == wx.WXK_ESCAPE:
+            # Stats screen / end screen: ESC advances to level-select or exits
+            if getattr(self.canvas, '_stats_visible', False):
+                self._on_stats_screen_esc()
+                return
+
             if getattr(self.canvas, '_modal_visible', False):
-                return_to_pause = bool(getattr(self.canvas, '_modal_return_to_pause', False))
+                return_to_pause = bool(
+                    getattr(self.canvas, '_modal_return_to_pause', False))
                 self.canvas.hide_modal()
-                try:
-                    if bool(getattr(self.canvas, '_modal_freeze_simulation', False)):
-                        self.canvas._modal_freeze_simulation = False
-                        prev = bool(getattr(self.canvas, '_modal_prev_simulation_frozen', False))
-                        self.core.simulation_frozen = prev
-                except Exception:
-                    pass
-                # Match click-close logic: if modal was opened from pause, return to pause; else resume gameplay.
                 if return_to_pause:
                     self._set_paused(True)
                 else:
@@ -1169,6 +2187,10 @@ class WxGameWindow(wx.Frame):
         evt.Skip()
 
     def _on_click(self, evt: wx.MouseEvent) -> None:
+        # Ignore clicks while stats/end screen is up — only ESC advances it
+        if getattr(self.canvas, '_stats_visible', False):
+            return
+
         pos = evt.GetPosition()
 
         # Minimap icon click
@@ -1230,31 +2252,82 @@ class WxGameWindow(wx.Frame):
             self._start_level(self._current_level_id, load_save=False)
             return
 
-    def _save_game(self) -> None:
-        # Minimal save parity for now: persist only a subset so resume works as we expand.
+    def _handle_level_end(self) -> None:
+        """Called once when game_won becomes True. Freezes gameplay, freezes stats,
+        then shows either the stats screen (level 1) or the end screen (level 2)."""
+        self._level_end_triggered = True
+        self._level_complete = True
+        # Freeze game simulation
+        self.core.simulation_frozen = True
+        self._set_footsteps_playing(False)
+
+        # Unlock level 2 if we just finished level 1
+        if self._current_level_id == 'level1':
+            unlocked = set(self._progress.get('unlocked_levels') or ['level1'])
+            unlocked.add('level2')
+            self._progress['unlocked_levels'] = sorted(unlocked)
+            self._save_progression()
+
+        # Freeze & build the summary text
         try:
-            data = {
-                'level_id': str(self._current_level_id),
-                'player': {
-                    'x': float(self.core.player.x),
-                    'z': float(self.core.player.z),
-                    'yaw': float(self.core.player.yaw),
-                    'pitch': float(self.core.player.pitch),
-                },
-                'coins_collected': int(getattr(self.core, 'coins_collected', 0)),
-                'keys_collected': int(getattr(self.core, 'keys_collected', 0)),
-                'elapsed_s': float(getattr(self.core, 'elapsed_s', 0.0)),
+            self.performance_monitor.update_scene_data(
+                walls_rendered=len(getattr(self.core, 'walls', set())),
+                coins=len(getattr(self.core, 'coins', [])),
+                ghosts=len(getattr(self.core, 'ghosts', {})),
+                spike_traps=len(getattr(self.core, 'spikes', [])),
+                moving_platforms=len(getattr(self.core, 'platforms', [])),
+            )
+            self.performance_monitor.freeze_stats()
+            t = int(getattr(self.core, 'elapsed_s', 0.0) or 0.0)
+            mm, ss = divmod(t, 60)
+            gameplay_metrics = {
+                'Level': str(self._current_level_id).replace('level', 'Level '),
+                'Time': f'{mm:02d}:{ss:02d}',
+                'Coins collected': f"{getattr(self.core, 'coins_collected', 0)}/{getattr(self.core, 'coins_required', 0)}",
             }
-            with open(self._save_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
-        except Exception:
-            pass
+            summary_text = self.performance_monitor.format_summary_text(
+                gameplay_metrics)
+        except Exception as exc:
+            summary_text = f'Level complete!\n\nPress ESC to continue.\n\n({exc})'
+
+        # Show the appropriate screen
+        if self._current_level_id == 'level2':
+            self.canvas.show_end_screen(summary_text)
+        else:
+            self.canvas.show_stats_screen(summary_text)
+
+        self.canvas.Refresh(False)
+
+    def _on_stats_screen_esc(self) -> None:
+        """ESC pressed while stats or end screen is visible."""
+        if not getattr(self, '_level_complete', False):
+            return
+
+        if getattr(self, '_current_level_id', '') == 'level2':
+            # Level 2 complete: show "THE END" screen
+            self.canvas.hide_stats_screen()
+            self.canvas._show_the_end = True
+            self.canvas.Refresh(False)
+            return
+
+        # Level 1 complete: hide the stats overlay and show the level select modal.
+        self.canvas.hide_stats_screen()
+        self._level_complete = False
+        self._open_level_select_modal(startup=False)
+        # Force immediate refresh to show modal
+        self.canvas.Refresh(False)
 
     def _on_close(self, evt: wx.CloseEvent) -> None:
         try:
             self.canvas.hide_mouse_capture()
         except Exception:
             pass
+        try:
+            self._audio.shutdown()
+        except Exception:
+            pass
+        # Stop ghost sound timer to prevent crashes after window destruction
+        self._ghost_sound_timer_active = False
         evt.Skip()
 
 
