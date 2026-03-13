@@ -26,7 +26,7 @@ from .renderer_opengl import OpenGLRenderer
 
 from .silhouette_minigame import SilhouetteMatchDialog
 
-from .performance_monitor import PerformanceMonitor
+from core.performance_monitor import PerformanceMonitor
 
 from .assembly3d_minigame import Assembly3DMinigame
 
@@ -43,7 +43,7 @@ class GameGLWidget(QOpenGLWidget):
 
         self.renderer = OpenGLRenderer(core)
 
-        self.performance_monitor = PerformanceMonitor()
+        self.performance_monitor = PerformanceMonitor(framework='PySide6')
 
         self._pause_btn_rects: dict[str, tuple[int, int, int, int]] = {}
 
