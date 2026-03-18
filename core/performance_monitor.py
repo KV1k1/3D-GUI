@@ -1,29 +1,12 @@
 import time
 import os
+import math
 from typing import Optional, Dict, Any, Union
 from collections import deque
 import psutil
 
 
 class PerformanceMonitor:
-    """
-    Unified performance monitor compatible with both PySide6 and wxPython frontends.
-
-    Usage difference between frameworks:
-
-    PySide6:
-        - Call start_frame() before rendering, end_frame() after rendering.
-        - record_input_event(event_time: float)        — single float, no key code
-        - record_input_response(response_time: float)  — single float, no key code
-
-    wxPython:
-        - Call tick() once per wx.Timer callback instead of start_frame/end_frame.
-        - record_input_event(key_code: int, event_time: float)
-        - record_input_response(key_code: int, response_time: float)
-
-    Both frameworks share all other methods identically.
-    """
-
     def __init__(self, framework: str = 'PySide6'):
         self.framework = str(framework)
 
@@ -31,9 +14,9 @@ class PerformanceMonitor:
         self.last_frame_time: float = time.perf_counter()
         self.fps_history: deque = deque(maxlen=300)
 
-        # Input latency tracking.
-        # PySide6: stores plain float timestamps.
-        # wxPython: stores (key_code, timestamp) tuples.
+        # input latency tracking
+        # PySide6: float timestamps
+        # wxPython: tuples (key_code, timestamp)
         self.input_events: deque = deque(maxlen=100)
         self.input_latencies: deque = deque(maxlen=100)
 
@@ -56,24 +39,78 @@ class PerformanceMonitor:
         self._stable_fps_value: int = 0
         self._stable_fps_next_update_t: float = 0.0
 
+        # Gameplay metrics
+        self.distance_walked: float = 0.0
+        self.ghost_encounters: int = 0
+        self.jail_entries: int = 0
+        self.total_play_time: float = 0.0
+        self._last_position: Optional[tuple[float, float]] = None
+        self._game_start_time: float = time.perf_counter()
+
     # ------------------------------------------------------------------
-    # Frame timing — PySide6 path
+    # Advanced Performance Metrics
     # ------------------------------------------------------------------
 
+    def fps_stability(self) -> float:
+        """Calculate FPS stability as standard deviation of frame times"""
+        if len(self.frame_times) < 10:
+            return 0.0
+
+        # Convert frame times to FPS for calculation
+        fps_values = [1.0 / ft for ft in self.frame_times if ft > 0]
+        if len(fps_values) < 10:
+            return 0.0
+
+        mean_fps = sum(fps_values) / len(fps_values)
+        variance = sum((fps - mean_fps) **
+                       2 for fps in fps_values) / len(fps_values)
+        return float(math.sqrt(variance))
+
+    def frame_drop_count(self) -> int:
+        """Count frames that exceeded 33ms (sub-30 FPS)"""
+        return sum(1 for ft in self.frame_times if ft > 0.033)  # 33ms threshold
+
+    def percentile_95th_frame_time(self) -> float:
+        """Calculate 95th percentile frame time in milliseconds"""
+        if len(self.frame_times) < 10:
+            return 0.0
+
+        sorted_times = sorted(self.frame_times)
+        index = int(len(sorted_times) * 0.95)
+        return float(sorted_times[min(index, len(sorted_times) - 1)] * 1000.0)
+
+    # ------------------------------------------------------------------
+    # Gameplay Metrics
+    # ------------------------------------------------------------------
+
+    def record_movement(self, old_x: float, old_z: float, new_x: float, new_z: float) -> None:
+        """Record player movement for distance tracking"""
+        distance = math.sqrt((new_x - old_x) ** 2 + (new_z - old_z) ** 2)
+        self.distance_walked += distance
+
+    def record_ghost_encounter(self) -> None:
+        """Record a ghost encounter"""
+        self.ghost_encounters += 1
+
+    def record_jail_entry(self) -> None:
+        """Record a jail entry"""
+        self.jail_entries += 1
+
+    def update_play_time(self) -> None:
+        """Update total play time"""
+        self.total_play_time = time.perf_counter() - self._game_start_time
+
+    # frame timing — PySide6
     def start_frame(self) -> None:
-        """PySide6: call at the start of paintGL before rendering."""
         self.last_frame_time = time.perf_counter()
 
     def end_frame(self) -> None:
-        """PySide6: call at the end of paintGL after rendering."""
         now = time.perf_counter()
         self._record_interval(now - self.last_frame_time)
         if len(self.frame_times) % 60 == 0:
             self._sample_memory()
 
-    # ------------------------------------------------------------------
-    # Frame timing — wxPython path
-    # ------------------------------------------------------------------
+    # frame timing — wxPython
 
     def tick(self) -> None:
         """wxPython: call once per wx.Timer callback (game tick).
@@ -83,20 +120,14 @@ class PerformanceMonitor:
         self.last_frame_time = now
         self._sample_memory()
 
-    # ------------------------------------------------------------------
-    # Shared interval recording
-    # ------------------------------------------------------------------
+    # interval recording - shared
 
     def _record_interval(self, interval: float) -> None:
-        # Ignore the very first call (large interval since __init__)
-        # and any stalls longer than 1 s (minimised window, debugger, etc.)
         if 0.001 < interval < 1.0:
             self.frame_times.append(interval)
             self.fps_history.append(max(0.1, min(1000.0, 1.0 / interval)))
 
-    # ------------------------------------------------------------------
     # FPS helpers
-    # ------------------------------------------------------------------
 
     def avg_fps(self) -> float:
         if not self.fps_history:
@@ -109,7 +140,7 @@ class PerformanceMonitor:
         return float(self.fps_history[-1])
 
     def stable_fps(self, *, update_interval_s: float = 2.5) -> int:
-        """Returns a smoothed FPS value that only updates every update_interval_s seconds."""
+        # FPS value only updates every 2,5s
         now = time.perf_counter()
         if now < float(self._stable_fps_next_update_t):
             return int(self._stable_fps_value)
@@ -117,9 +148,7 @@ class PerformanceMonitor:
         self._stable_fps_next_update_t = now + float(update_interval_s)
         return int(self._stable_fps_value)
 
-    # ------------------------------------------------------------------
     # Input latency — overloaded for both frameworks
-    # ------------------------------------------------------------------
 
     def record_input_event(self, event_time_or_key: Union[float, int],
                            event_time: Optional[float] = None) -> None:
@@ -133,7 +162,8 @@ class PerformanceMonitor:
             self.input_events.append(float(event_time_or_key))
         else:
             # wxPython: (key_code, timestamp) tuple
-            self.input_events.append((int(event_time_or_key), float(event_time)))
+            self.input_events.append(
+                (int(event_time_or_key), float(event_time)))
 
     def record_input_response(self, response_time_or_key: Union[float, int],
                               response_time: Optional[float] = None) -> None:
@@ -229,7 +259,8 @@ class PerformanceMonitor:
             avg_fps = min_fps = max_fps = 0.0
 
         if self.frame_times:
-            avg_frame_time = sum(self.frame_times) / len(self.frame_times) * 1000.0
+            avg_frame_time = sum(self.frame_times) / \
+                len(self.frame_times) * 1000.0
             worst_frame = max(self.frame_times) * 1000.0
         else:
             avg_frame_time = worst_frame = 0.0
@@ -248,6 +279,9 @@ class PerformanceMonitor:
                 'max_fps': f"{max_fps:.1f}",
                 'avg_frame_time': f"{avg_frame_time:.1f}ms",
                 'worst_frame': f"{worst_frame:.1f}ms",
+                'fps_stability': f"{self.fps_stability():.1f}",
+                'frame_drops': str(self.frame_drop_count()),
+                '95th_percentile': f"{self.percentile_95th_frame_time():.1f}ms",
             },
             'responsiveness': {
                 'avg_input_latency': f"~{avg_input_latency:.1f}ms",
@@ -262,12 +296,18 @@ class PerformanceMonitor:
                 'spike_traps': str(self.scene_data['spike_traps']),
                 'moving_platforms': str(self.scene_data['moving_platforms']),
             },
+            'gameplay': {
+                'total_play_time': f"{int(getattr(self, '_game_core_elapsed_s', 0) // 60)}:{int(getattr(self, '_game_core_elapsed_s', 0) % 60):02d}",
+                'distance_walked': f"{self.distance_walked:.1f} units",
+                'ghost_encounters': str(self.ghost_encounters),
+                'jail_entries': str(self.jail_entries),
+            },
         }
 
     def format_summary_text(self, gameplay_metrics: Optional[Dict[str, Any]] = None) -> str:
         summary = self.frozen_stats if self.frozen_stats else self.get_performance_summary()
 
-        text  = "────────────────────────────────────\n"
+        text = "────────────────────────────────────\n"
         text += "        FRAMEWORK TEST SUMMARY\n"
         text += "────────────────────────────────────\n\n"
         text += f"Framework: {summary['framework']}\n"
@@ -279,7 +319,10 @@ class PerformanceMonitor:
         text += f"• Min FPS: {perf['min_fps']}\n"
         text += f"• Max FPS: {perf['max_fps']}\n"
         text += f"• Avg Frame Time: {perf['avg_frame_time']}\n"
-        text += f"• Worst Frame: {perf['worst_frame']}\n\n"
+        text += f"• Worst Frame: {perf['worst_frame']}\n"
+        text += f"• FPS Stability: {perf['fps_stability']}\n"
+        text += f"• Frame Drops (>33ms): {perf['frame_drops']}\n"
+        text += f"• 95th Percentile Frame Time: {perf['95th_percentile']}\n\n"
 
         text += "RESPONSIVENESS\n"
         text += f"• Avg Input Latency: {summary['responsiveness']['avg_input_latency']}\n\n"
@@ -295,8 +338,17 @@ class PerformanceMonitor:
         text += f"• Spike Traps: {scene['spike_traps']}\n"
         text += f"• Moving Platforms: {scene['moving_platforms']}\n\n"
 
+        # Add gameplay metrics from performance monitor
+        gameplay = summary.get('gameplay', {})
+        if gameplay:
+            text += "GAMEPLAY METRICS\n"
+            text += f"• Total Play Time: {gameplay['total_play_time']}\n"
+            text += f"• Distance Walked: {gameplay['distance_walked']}\n"
+            text += f"• Ghost Encounters: {gameplay['ghost_encounters']}\n"
+            text += f"• Jail Entries: {gameplay['jail_entries']}\n\n"
+
         if gameplay_metrics:
-            text += "GAMEPLAY\n"
+            text += "ADDITIONAL GAMEPLAY\n"
             for key, value in gameplay_metrics.items():
                 text += f"• {key}: {value}\n"
             text += "\n"
