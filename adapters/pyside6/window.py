@@ -88,6 +88,8 @@ class GameGLWidget(QOpenGLWidget):
         self._time_bonus_until: float = 0.0
 
         self._show_the_end: bool = False
+        self._perf_pdf_exported: bool = False
+        self._cam_icon_rect = (0, 0, 0, 0)
 
         self.setMouseTracking(True)
 
@@ -164,12 +166,6 @@ class GameGLWidget(QOpenGLWidget):
             self.performance_monitor.freeze_stats()
 
     def _draw_screen_close_animation(self) -> None:
-        """Draw black bars closing from top and bottom, then congratulations screen"""
-
-        from PySide6.QtGui import QPainter, QColor, QFont
-
-        from PySide6.QtCore import Qt
-
         painter = QPainter(self)
 
         painter.setRenderHint(QPainter.Antialiasing)
@@ -1528,6 +1524,10 @@ class PySide6GameWindow(QMainWindow):
 
         self.setFocusPolicy(Qt.StrongFocus)
 
+        # Override timer event to keep running during modals
+        self._timer_interval = 16
+        self.startTimer(self._timer_interval)
+
         # With the new level system, entering a level always starts fresh.
 
         # We keep Save Game for convenience. If a save exists and the last level is Level 1,
@@ -1569,14 +1569,15 @@ class PySide6GameWindow(QMainWindow):
         self.core.register_event_callback(
             'player_move', self._on_player_move_event)
 
+    def timerEvent(self, event) -> None:
+        """Override timer event to ensure timer keeps running during modal dialogs."""
+        self._update_game()
+
     def _safe_gl_update(self) -> None:
-
         try:
-
-            self.gl.update()
-
+            if hasattr(self, 'gl'):
+                self.gl.update()
         except Exception:
-
             pass
 
     def _load_progression(self) -> dict:
@@ -1884,7 +1885,9 @@ class PySide6GameWindow(QMainWindow):
 
         self._last_update_time = current_time
 
-        dt = min(dt, 0.1)
+        # Clamp dt tightly to prevent a burst catch-up tick after level transitions
+        # (which would cause elapsed_s to jump forward on the first frame).
+        dt = min(dt, 0.05)
 
         paused = bool(getattr(self.core, 'paused', False))
 
@@ -2187,6 +2190,7 @@ class PySide6GameWindow(QMainWindow):
                 ok = bool(dlg.exec())
             finally:
                 self.core.simulation_frozen = prev_frozen
+                self._last_update_time = time.perf_counter()
 
             if ok:
 
@@ -2267,6 +2271,7 @@ class PySide6GameWindow(QMainWindow):
             ok = bool(self._assembly_minigame.exec())
         finally:
             self.core.simulation_frozen = prev_frozen
+            self._last_update_time = time.perf_counter()
 
         if ok:
 

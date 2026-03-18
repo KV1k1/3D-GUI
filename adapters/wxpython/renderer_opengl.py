@@ -54,6 +54,12 @@ class OpenGLRenderer:
         self._chunk_vbos: dict[tuple[int, int],
                                tuple[Optional[int], int, Optional[int], int]] = {}
 
+        # Ghost VBOs
+        self._ghost_body_vbo: Optional[int] = None
+        self._ghost_body_vertex_count: int = 0
+        self._ghost_eye_vbo: Optional[int] = None
+        self._ghost_eye_vertex_count: int = 0
+
         # Initialize text texture cache with reasonable size limit
         self._text_texture_cache: dict[tuple, tuple[int, int, int]] = {}
         self._jail_map_texture: Optional[int] = None
@@ -114,10 +120,18 @@ class OpenGLRenderer:
 
         self._textures_loaded = True
 
-        # Optional: Log load time for debugging
+        # Build ghost VBOs for performance
+        self._build_ghost_vbo()
+
+        # Capture texture load time for PDF report
         load_time = time.perf_counter() - start_time
-        if load_time > 1.0:
-            print(f"Textures loaded in {load_time:.2f}s")
+        try:
+            from core.pdf_export import get_system_collector
+            collector = get_system_collector()
+            collector.record_texture_load_time(load_time)
+        except ImportError:
+            # PDF export not available, just skip texture load time capture
+            pass
 
     def _ensure_geometry_built(self) -> None:
         if self._geometry_built:
@@ -1116,113 +1130,141 @@ class OpenGLRenderer:
         }
 
         def _draw_ghost_3d(color: Tuple[float, float, float, float]) -> None:
+            """Draw ghost using VBOs for body/eyes, tail in immediate mode."""
             from OpenGL.GL import GL_TRIANGLE_STRIP
 
-            radius = 0.20
-            segments = 26 if self._fast_mode else 40
-            body_layers = 11
-            tail_layers = 8
+            # Draw body and eyes using VBOs if available
+            if self._ghost_body_vbo is not None and self._ghost_body_vertex_count > 0:
+                stride = 6 * 4
+                glEnableClientState(GL_VERTEX_ARRAY)
+                glEnableClientState(GL_NORMAL_ARRAY)
+                glColor4f(*color)
 
-            glDisable(GL_TEXTURE_2D)
-            glDisable(GL_LIGHTING)
-            glColor4f(*color)
+                # Body
+                glBindBuffer(GL_ARRAY_BUFFER, self._ghost_body_vbo)
+                glVertexPointer(3, GL_FLOAT, stride, None)
+                glNormalPointer(GL_FLOAT, stride, None)
+                glDrawArrays(GL_TRIANGLE_STRIP, 0,
+                             self._ghost_body_vertex_count)
 
-            for layer in range(1, body_layers):
-                layer_ratio = layer / (body_layers - 1)
-                prev_ratio = (layer - 1) / (body_layers - 1)
+                # Eyes
+                if self._ghost_eye_vbo is not None and self._ghost_eye_vertex_count > 0:
+                    glBindBuffer(GL_ARRAY_BUFFER, self._ghost_eye_vbo)
+                    glVertexPointer(3, GL_FLOAT, stride, None)
+                    glNormalPointer(GL_FLOAT, stride, None)
+                    glColor4f(0.06, 0.06, 0.08, 0.96)
+                    glDrawArrays(GL_TRIANGLES, 0, self._ghost_eye_vertex_count)
 
-                def y_and_r(t: float) -> Tuple[float, float]:
-                    if t < 0.5:
-                        yv = radius * 0.62 * math.cos(t * math.pi)
-                        rv = radius * 0.95 * math.sin(t * math.pi)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glDisableClientState(GL_NORMAL_ARRAY)
+                glDisableClientState(GL_VERTEX_ARRAY)
+            else:
+                # Fallback to immediate mode (original behavior)
+                radius = 0.20
+                segments = 26 if self._fast_mode else 40
+                body_layers = 11
+                tail_layers = 8
+
+                glDisable(GL_TEXTURE_2D)
+                glDisable(GL_LIGHTING)
+                glColor4f(*color)
+
+                for layer in range(1, body_layers):
+                    layer_ratio = layer / (body_layers - 1)
+                    prev_ratio = (layer - 1) / (body_layers - 1)
+
+                    def y_and_r(t: float) -> Tuple[float, float]:
+                        if t < 0.5:
+                            yv = radius * 0.62 * math.cos(t * math.pi)
+                            rv = radius * 0.95 * math.sin(t * math.pi)
+                        else:
+                            yv = -radius * 0.25 * (t - 0.5) * 2.0
+                            rv = radius * 0.95
+                        return yv, rv
+
+                    y_prev, r_prev = y_and_r(prev_ratio)
+                    y_curr, r_curr = y_and_r(layer_ratio)
+
+                    glBegin(GL_TRIANGLE_STRIP)
+                    for i in range(segments + 1):
+                        a = (i / segments) * (2.0 * math.pi)
+                        ca = math.cos(a)
+                        sa = math.sin(a)
+                        glVertex3f(ca * r_prev, y_prev, sa * r_prev)
+                        glVertex3f(ca * r_curr, y_curr, sa * r_curr)
+                    glEnd()
+
+                # Wavy tail (immediate mode)
+                for layer in range(tail_layers):
+                    layer_ratio = layer / tail_layers
+                    prev_ratio = (layer - 1) / tail_layers
+                    base_r = radius * 0.95 * (1.0 - layer_ratio * 0.35)
+                    wave_amp = radius * (0.08 + 0.14 * layer_ratio)
+                    y_curr = -radius * 0.52 - layer_ratio * radius * 0.48
+
+                    if layer == 0:
+                        glBegin(GL_TRIANGLE_STRIP)
+                        for i in range(segments + 1):
+                            a = (i / segments) * (2.0 * math.pi)
+                            ca = math.cos(a)
+                            sa = math.sin(a)
+                            skirt = (
+                                math.sin(a * 3.0 + anim_t * 2.4 +
+                                         layer * 0.55) * wave_amp
+                                + math.sin(a * 7.0 - anim_t * 1.7 +
+                                           layer * 0.35) * (wave_amp * 0.55)
+                            )
+                            r_skirt = max(radius * 0.02, base_r + skirt)
+                            glVertex3f(ca * radius * 0.95, -
+                                       radius * 0.25, sa * radius * 0.95)
+                            glVertex3f(ca * r_skirt, y_curr, sa * r_skirt)
+                        glEnd()
                     else:
-                        yv = -radius * 0.25 * (t - 0.5) * 2.0
-                        rv = radius * 0.95
-                    return yv, rv
+                        prev_base_r = radius * 0.95 * (1.0 - prev_ratio * 0.35)
+                        prev_amp = radius * (0.08 + 0.14 * prev_ratio)
+                        y_prev = -radius * 0.52 - prev_ratio * radius * 0.48
 
-                y_prev, r_prev = y_and_r(prev_ratio)
-                y_curr, r_curr = y_and_r(layer_ratio)
+                        glBegin(GL_TRIANGLE_STRIP)
+                        for i in range(segments + 1):
+                            a = (i / segments) * (2.0 * math.pi)
+                            ca = math.cos(a)
+                            sa = math.sin(a)
+                            skirt_prev = (
+                                math.sin(a * 3.0 + anim_t * 2.4 +
+                                         (layer - 1) * 0.55) * prev_amp
+                                + math.sin(a * 7.0 - anim_t * 1.7 +
+                                           (layer - 1) * 0.35) * (prev_amp * 0.55)
+                            )
+                            skirt_curr = (
+                                math.sin(a * 3.0 + anim_t * 2.4 +
+                                         layer * 0.55) * wave_amp
+                                + math.sin(a * 7.0 - anim_t * 1.7 +
+                                           layer * 0.35) * (wave_amp * 0.55)
+                            )
+                            r_prev2 = max(
+                                radius * 0.02, prev_base_r + skirt_prev)
+                            r_curr2 = max(radius * 0.02, base_r + skirt_curr)
+                            glVertex3f(ca * r_prev2, y_prev, sa * r_prev2)
+                            glVertex3f(ca * r_curr2, y_curr, sa * r_curr2)
+                        glEnd()
 
-                glBegin(GL_TRIANGLE_STRIP)
-                for i in range(segments + 1):
-                    a = (i / segments) * (2.0 * math.pi)
-                    ca = math.cos(a)
-                    sa = math.sin(a)
-                    glVertex3f(ca * r_prev, y_prev, sa * r_prev)
-                    glVertex3f(ca * r_curr, y_curr, sa * r_curr)
+                # Eyes on the "front" (local +Z)
+                glColor4f(0.06, 0.06, 0.08, 0.96)
+                eye_y = radius * 0.22
+                eye_z = radius * 1.05
+                eye_x = radius * 0.34
+                ew = radius * 0.22
+                eh = radius * 0.28
+                glBegin(GL_QUADS)
+                glVertex3f(-eye_x - ew, eye_y - eh, eye_z)
+                glVertex3f(-eye_x + ew, eye_y - eh, eye_z)
+                glVertex3f(-eye_x + ew, eye_y + eh, eye_z)
+                glVertex3f(-eye_x - ew, eye_y + eh, eye_z)
+                glVertex3f(eye_x - ew, eye_y - eh, eye_z)
+                glVertex3f(eye_x + ew, eye_y - eh, eye_z)
+                glVertex3f(eye_x + ew, eye_y + eh, eye_z)
+                glVertex3f(eye_x - ew, eye_y + eh, eye_z)
                 glEnd()
-
-            # Wavy tail
-            for layer in range(tail_layers):
-                layer_ratio = layer / tail_layers
-                prev_ratio = (layer - 1) / tail_layers
-
-                base_r = radius * 0.95 * (1.0 - layer_ratio * 0.35)
-                wave_amp = radius * (0.08 + 0.14 * layer_ratio)
-                y_curr = -radius * 0.52 - layer_ratio * radius * 0.48
-
-                if layer == 0:
-                    glBegin(GL_TRIANGLE_STRIP)
-                    for i in range(segments + 1):
-                        a = (i / segments) * (2.0 * math.pi)
-                        ca = math.cos(a)
-                        sa = math.sin(a)
-                        skirt = (
-                            math.sin(a * 3.0 + anim_t * 2.4 +
-                                     layer * 0.55) * wave_amp
-                            + math.sin(a * 7.0 - anim_t * 1.7 +
-                                       layer * 0.35) * (wave_amp * 0.55)
-                        )
-                        r_skirt = max(radius * 0.02, base_r + skirt)
-                        glVertex3f(ca * radius * 0.95, -radius *
-                                   0.25, sa * radius * 0.95)
-                        glVertex3f(ca * r_skirt, y_curr, sa * r_skirt)
-                    glEnd()
-                else:
-                    prev_base_r = radius * 0.95 * (1.0 - prev_ratio * 0.35)
-                    prev_amp = radius * (0.08 + 0.14 * prev_ratio)
-                    y_prev = -radius * 0.52 - prev_ratio * radius * 0.48
-
-                    glBegin(GL_TRIANGLE_STRIP)
-                    for i in range(segments + 1):
-                        a = (i / segments) * (2.0 * math.pi)
-                        ca = math.cos(a)
-                        sa = math.sin(a)
-                        skirt_prev = (
-                            math.sin(a * 3.0 + anim_t * 2.4 +
-                                     (layer - 1) * 0.55) * prev_amp
-                            + math.sin(a * 7.0 - anim_t * 1.7 +
-                                       (layer - 1) * 0.35) * (prev_amp * 0.55)
-                        )
-                        skirt_curr = (
-                            math.sin(a * 3.0 + anim_t * 2.4 +
-                                     layer * 0.55) * wave_amp
-                            + math.sin(a * 7.0 - anim_t * 1.7 +
-                                       layer * 0.35) * (wave_amp * 0.55)
-                        )
-                        r_prev2 = max(radius * 0.02, prev_base_r + skirt_prev)
-                        r_curr2 = max(radius * 0.02, base_r + skirt_curr)
-                        glVertex3f(ca * r_prev2, y_prev, sa * r_prev2)
-                        glVertex3f(ca * r_curr2, y_curr, sa * r_curr2)
-                    glEnd()
-
-            # Eyes on the "front" (local +Z)
-            glColor4f(0.06, 0.06, 0.08, 0.96)
-            eye_y = radius * 0.22
-            eye_z = radius * 1.05
-            eye_x = radius * 0.34
-            ew = radius * 0.22
-            eh = radius * 0.28
-            glBegin(GL_QUADS)
-            glVertex3f(-eye_x - ew, eye_y - eh, eye_z)
-            glVertex3f(-eye_x + ew, eye_y - eh, eye_z)
-            glVertex3f(-eye_x + ew, eye_y + eh, eye_z)
-            glVertex3f(-eye_x - ew, eye_y + eh, eye_z)
-            glVertex3f(eye_x - ew, eye_y - eh, eye_z)
-            glVertex3f(eye_x + ew, eye_y - eh, eye_z)
-            glVertex3f(eye_x + ew, eye_y + eh, eye_z)
-            glVertex3f(eye_x - ew, eye_y + eh, eye_z)
-            glEnd()
 
         for g in getattr(self.core, 'ghosts', {}).values():
             try:
@@ -1320,7 +1362,6 @@ class OpenGLRenderer:
         self._world_vbo_wall = None
         self._world_floor_vertex_count = 0
         self._world_wall_vertex_count = 0
-
         if self._chunk_vbos:
             for floor_vbo, _, wall_vbo, _ in self._chunk_vbos.values():
                 try:
@@ -1334,6 +1375,9 @@ class OpenGLRenderer:
                 except Exception:
                     pass
             self._chunk_vbos.clear()
+
+        # Also clean up ghost VBOs
+        self._delete_ghost_vbos()
 
     def _build_world_vbos(self) -> None:
         # Only rebuild VBOs if they don't exist or world has changed
@@ -1437,6 +1481,99 @@ class OpenGLRenderer:
         # Store hash to detect changes (moved from _draw_world)
         self._world_vbo_hash = hash(
             (tuple(sorted(self.core.floors)), tuple(sorted(self.core.walls))))
+
+    def _build_ghost_vbo(self) -> None:
+        """Build VBOs for ghost body and eyes."""
+        from array import array
+
+        # Clean up existing ghost VBOs
+        self._delete_ghost_vbos()
+
+        segments = 26 if self._fast_mode else 40
+        body_layers = 11
+        radius = 0.20
+
+        def y_and_r(t: float) -> Tuple[float, float]:
+            if t < 0.5:
+                yv = radius * 0.62 * math.cos(t * math.pi)
+                rv = radius * 0.95 * math.sin(t * math.pi)
+            else:
+                yv = -radius * 0.25 * (t - 0.5) * 2.0
+                rv = radius * 0.95
+            return yv, rv
+
+        # Body geometry
+        body: array = array('f')
+        for layer in range(1, body_layers):
+            y_prev, r_prev = y_and_r((layer - 1) / (body_layers - 1))
+            y_curr, r_curr = y_and_r(layer / (body_layers - 1))
+
+            for i in range(segments + 1):
+                a = (i / segments) * (2.0 * math.pi)
+                ca, sa = math.cos(a), math.sin(a)
+                body.extend([ca * r_prev, y_prev, sa * r_prev, ca, 0.0, sa])
+                body.extend([ca * r_curr, y_curr, sa * r_curr, ca, 0.0, sa])
+
+        self._ghost_body_vertex_count = len(body) // 6
+        if self._ghost_body_vertex_count > 0:
+            try:
+                vbo = glGenBuffers(1)
+                self._ghost_body_vbo = int(vbo) if vbo else None
+                if self._ghost_body_vbo:
+                    glBindBuffer(GL_ARRAY_BUFFER, self._ghost_body_vbo)
+                    glBufferData(GL_ARRAY_BUFFER,
+                                 body.tobytes(), GL_STATIC_DRAW)
+                    glBindBuffer(GL_ARRAY_BUFFER, 0)
+            except Exception:
+                self._ghost_body_vbo = None
+                self._ghost_body_vertex_count = 0
+
+        # Eyes geometry (two quads as triangles)
+        eye: array = array('f')
+        eye_y = radius * 0.22
+        eye_z = radius * 1.05
+        eye_x = radius * 0.34
+        ew = radius * 0.22
+        eh = radius * 0.28
+
+        def add_eye_quad(cx: float) -> None:
+            for verts in [(cx - ew, eye_y - eh, eye_z), (cx + ew, eye_y - eh, eye_z),
+                          (cx + ew, eye_y + eh, eye_z), (cx - ew, eye_y + eh, eye_z),
+                          (cx - ew, eye_y - eh, eye_z)]:
+                eye.extend(verts)
+
+        add_eye_quad(-eye_x)
+        add_eye_quad(eye_x)
+        self._ghost_eye_vertex_count = len(eye) // 3
+        if self._ghost_eye_vertex_count > 0:
+            try:
+                vbo = glGenBuffers(1)
+                self._ghost_eye_vbo = int(vbo) if vbo else None
+                if self._ghost_eye_vbo:
+                    glBindBuffer(GL_ARRAY_BUFFER, self._ghost_eye_vbo)
+                    glBufferData(GL_ARRAY_BUFFER,
+                                 eye.tobytes(), GL_STATIC_DRAW)
+                    glBindBuffer(GL_ARRAY_BUFFER, 0)
+            except Exception:
+                self._ghost_eye_vbo = None
+                self._ghost_eye_vertex_count = 0
+
+    def _delete_ghost_vbos(self) -> None:
+        """Clean up ghost VBOs."""
+        if self._ghost_body_vbo is not None:
+            try:
+                glDeleteBuffers([self._ghost_body_vbo])
+            except Exception:
+                pass
+        if self._ghost_eye_vbo is not None:
+            try:
+                glDeleteBuffers([self._ghost_eye_vbo])
+            except Exception:
+                pass
+        self._ghost_body_vbo = None
+        self._ghost_body_vertex_count = 0
+        self._ghost_eye_vbo = None
+        self._ghost_eye_vertex_count = 0
 
     def _draw_world(self) -> None:
         if self._world_vbo_floor is None or self._world_vbo_wall is None:
@@ -2127,7 +2264,7 @@ class OpenGLRenderer:
                                    (1.0, 0.90, 0.35), pulse)
 
     def _draw_ceiling_lamps(self) -> None:
-        """Draw ceiling lamps exactly like PySide version"""
+        """Draw ceiling lamps"""
         glDisable(GL_TEXTURE_2D)
         glDisable(GL_LIGHTING)
         glEnable(GL_BLEND)

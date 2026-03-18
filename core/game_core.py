@@ -1347,7 +1347,8 @@ class GameCore:
                                 # Check if player is within platform bounds (standing on it)
                                 if (abs(px - platform_center_x) < platform_radius and
                                     abs(pz - platform_center_z) < platform_radius and
-                                        abs(self.player.y - platform.y_offset) < 0.75):  # Require being near platform height
+                                        # Require being near platform height
+                                        abs(self.player.y - platform.y_offset) < 0.75):
                                     player_on_platform = True
 
                                 # Beginner-friendly: the fragment should only trigger when the platform is near its top.
@@ -1415,8 +1416,11 @@ class GameCore:
         if cell in self.exit_cells:
             gate = self.gates.get('exit')
             if gate and not gate.locked and gate.y_offset <= -self.wall_height + 0.25:
-                self.game_won = True
-                self._trigger_event('game_won', {'time_s': self.elapsed_s})
+                if not self.game_completed and not self.screen_closing:
+                    self.game_completed = True
+                    self.screen_closing = True
+                    self.screen_close_progress = 0.0
+                    self._trigger_event('game_won', {'time_s': self.elapsed_s})
 
     def interact(self) -> Optional[str]:
         # Used by adapter for E
@@ -1597,6 +1601,7 @@ class GameCore:
         world_dx = dx * right_x + dz * forward_x
         world_dz = dx * right_z + dz * forward_z
 
+        old_x, old_z = self.player.x, self.player.z
         nx = self.player.x + world_dx
         nz = self.player.z + world_dz
 
@@ -1604,6 +1609,15 @@ class GameCore:
             self.player.x = nx
             self.player.z = nz
             self._trigger_event('player_move', {'x': nx, 'z': nz})
+
+            # Track movement for performance monitor if available
+            try:
+                if hasattr(self, '_performance_monitor'):
+                    self._performance_monitor.record_movement(
+                        old_x, old_z, nx, nz)
+            except Exception:
+                pass
+
             self._check_collectibles()
             self._check_hazards()
             return True

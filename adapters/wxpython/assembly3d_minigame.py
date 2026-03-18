@@ -35,7 +35,7 @@ from OpenGL.GL import (
 )
 
 
-class _QtLikeButton(wx.Control):
+class _StyledButton(wx.Control):
     def __init__(
         self,
         parent: wx.Window,
@@ -80,7 +80,8 @@ class _QtLikeButton(wx.Control):
         self._hover_border = tuple(int(x) for x in hover_border)
         self._pressed_bg = tuple(int(x) for x in (pressed_bg or self._bg))
         self._pressed_fg = tuple(int(x) for x in (pressed_fg or self._fg))
-        self._pressed_border = tuple(int(x) for x in (pressed_border or self._border))
+        self._pressed_border = tuple(int(x)
+                                     for x in (pressed_border or self._border))
         self._padding_x = int(padding_x)
         self._padding_y = int(padding_y)
 
@@ -164,11 +165,20 @@ class _QtLikeButton(wx.Control):
 
     def _on_paint(self, _evt: wx.PaintEvent) -> None:
         dc = wx.AutoBufferedPaintDC(self)
-        dc.Clear()
-
         w, h = self.GetClientSize()
         if w <= 0 or h <= 0:
             return
+
+        dc.SetBackground(wx.Brush(self.GetParent().GetBackgroundColour()))
+        dc.Clear()
+
+        gc = wx.GraphicsContext.Create(dc)
+        if gc is None:
+            return
+        try:
+            gc.SetAntialiasMode(wx.ANTIALIAS_DEFAULT)
+        except Exception:
+            pass
 
         if not self.IsEnabled():
             bg = (58, 58, 64)
@@ -192,16 +202,19 @@ class _QtLikeButton(wx.Control):
             border = self._border
 
         rect = wx.Rect(0, 0, int(w), int(h))
-        dc.SetBrush(wx.Brush(wx.Colour(*bg)))
-        dc.SetPen(wx.Pen(wx.Colour(*border), width=2))
-        dc.DrawRoundedRectangle(rect, self._radius)
+        path = gc.CreatePath()
+        r = float(max(0, int(self._radius)))
+        path.AddRoundedRectangle(float(rect.x) + 0.5, float(rect.y) +
+                                 0.5, float(rect.width) - 1.0, float(rect.height) - 1.0, r)
+        gc.SetBrush(wx.Brush(wx.Colour(*bg)))
+        gc.SetPen(wx.Pen(wx.Colour(*border), width=2))
+        gc.DrawPath(path)
 
-        dc.SetTextForeground(wx.Colour(*fg))
-        dc.SetFont(self.GetFont())
-        tw, th = dc.GetTextExtent(self._label)
-        x = int((w - tw) // 2)
-        y = int((h - th) // 2)
-        dc.DrawText(self._label, x, y)
+        gc.SetFont(self.GetFont(), wx.Colour(*fg))
+        tw, th = gc.GetTextExtent(self._label)
+        x = float((w - tw) / 2.0)
+        y = float((h - th) / 2.0)
+        gc.DrawText(self._label, x, y)
 
 
 class _StyledFeedback(wx.Panel):
@@ -215,8 +228,8 @@ class _StyledFeedback(wx.Panel):
         self.Bind(wx.EVT_ERASE_BACKGROUND, lambda _e: None)
 
         f = self.GetFont()
-        f.SetPointSize(14)
-        f.SetWeight(wx.FONTWEIGHT_BOLD)
+        f.SetPointSize(13)
+        f.SetWeight(wx.FONTWEIGHT_NORMAL)
         self.SetFont(f)
 
     def set_text(self, text: str, *, mode: str = 'normal') -> None:
@@ -226,11 +239,20 @@ class _StyledFeedback(wx.Panel):
 
     def _on_paint(self, _evt: wx.PaintEvent) -> None:
         dc = wx.AutoBufferedPaintDC(self)
-        dc.Clear()
-
         w, h = self.GetClientSize()
         if w <= 0 or h <= 0:
             return
+
+        dc.SetBackground(wx.Brush(self.GetParent().GetBackgroundColour()))
+        dc.Clear()
+
+        gc = wx.GraphicsContext.Create(dc)
+        if gc is None:
+            return
+        try:
+            gc.SetAntialiasMode(wx.ANTIALIAS_DEFAULT)
+        except Exception:
+            pass
 
         if self._mode == 'success':
             bg = (45, 90, 45)
@@ -247,7 +269,7 @@ class _StyledFeedback(wx.Panel):
         else:
             bg = (90, 90, 96)
             border = (122, 122, 128)
-            weight = wx.FONTWEIGHT_BOLD
+            weight = wx.FONTWEIGHT_NORMAL
             pad = 6
             border_w = 1
 
@@ -256,33 +278,44 @@ class _StyledFeedback(wx.Panel):
         self.SetFont(f)
 
         rect = wx.Rect(0, 0, int(w), int(h))
-        dc.SetBrush(wx.Brush(wx.Colour(*bg)))
-        dc.SetPen(wx.Pen(wx.Colour(*border), width=int(border_w)))
-        dc.DrawRoundedRectangle(rect, 6)
+        path = gc.CreatePath()
+        path.AddRoundedRectangle(float(rect.x) + 0.5, float(rect.y) +
+                                 0.5, float(rect.width) - 1.0, float(rect.height) - 1.0, 6.0)
+        gc.SetBrush(wx.Brush(wx.Colour(*bg)))
+        gc.SetPen(wx.Pen(wx.Colour(*border), width=int(border_w)))
+        gc.DrawPath(path)
 
-        dc.SetTextForeground(wx.Colour(255, 255, 255))
-        dc.SetFont(self.GetFont())
-        text = self._text
-        tw, th = dc.GetTextExtent(text)
-        x = int((w - tw) // 2)
-        y = int((h - th) // 2)
-        y = max(int(pad), y)
-        dc.DrawText(text, x, y)
+        text = str(self._text or '')
+        max_w = max(0, int(w) - int(pad) * 2)
+        if max_w > 0:
+            try:
+                text = wx.Control.Ellipsize(text, dc, wx.ELLIPSIZE_END, max_w)
+            except Exception:
+                pass
+        gc.SetFont(self.GetFont(), wx.Colour(255, 255, 255))
+        tw, th = gc.GetTextExtent(text)
+        x = float((w - tw) / 2.0)
+        y = float((h - th) / 2.0)
+        # Keep deterministic centering; only clamp when padding would be violated.
+        x = max(float(pad), x)
+        y = max(float(pad), y)
+        gc.DrawText(text, x, y)
 
 
 class _AsmGLCanvas(glcanvas.GLCanvas):
     def __init__(self, parent: wx.Window, *, bg: tuple[int, int, int, int], orbit: bool = False):
-        super().__init__(parent, attribList=[glcanvas.WX_GL_RGBA, glcanvas.WX_GL_DOUBLEBUFFER, glcanvas.WX_GL_DEPTH_SIZE, 24, 0])
+        super().__init__(parent, attribList=[
+            glcanvas.WX_GL_RGBA, glcanvas.WX_GL_DOUBLEBUFFER, glcanvas.WX_GL_DEPTH_SIZE, 24, 0])
         self._ctx = glcanvas.GLContext(self)
         self._bg = tuple(int(x) for x in bg)
         self._initialized = False
 
         # Camera params (approximate pyqtgraph GLViewWidget defaults used in PySide).
-        self._cam_distance = 8.0
+        self._cam_distance = 5.0
         self._cam_elev_deg = 20.0
         self._cam_azim_deg = 30.0
         self._cam_target = (0.0, 0.0, 0.0)
-        self._fov = 60.0
+        self._fov = 50.0
 
         self._pieces: list[dict[str, Any]] = []
         self._target: list[dict[str, Any]] = []
@@ -362,7 +395,8 @@ class _AsmGLCanvas(glcanvas.GLCanvas):
         self._cam_elev_deg = float(elevation_deg)
         self._cam_azim_deg = float(azimuth_deg)
         if target is not None:
-            self._cam_target = (float(target[0]), float(target[1]), float(target[2]))
+            self._cam_target = (float(target[0]), float(
+                target[1]), float(target[2]))
         if fov is not None:
             self._fov = float(fov)
         self.Refresh(False)
@@ -397,13 +431,14 @@ class _AsmGLCanvas(glcanvas.GLCanvas):
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
 
-        # Z-up orbit camera similar to pyqtgraph GLViewWidget.
+        # Z-up orbit camera
         from OpenGL.GLU import gluLookAt
 
         elev = math.radians(float(self._cam_elev_deg))
         azim = math.radians(float(self._cam_azim_deg))
         dist = float(self._cam_distance)
-        tx, ty, tz = (float(self._cam_target[0]), float(self._cam_target[1]), float(self._cam_target[2]))
+        tx, ty, tz = (float(self._cam_target[0]), float(
+            self._cam_target[1]), float(self._cam_target[2]))
 
         cx = tx + dist * math.cos(elev) * math.cos(azim)
         cy = ty + dist * math.cos(elev) * math.sin(azim)
@@ -412,15 +447,14 @@ class _AsmGLCanvas(glcanvas.GLCanvas):
         gluLookAt(cx, cy, cz, tx, ty, tz, 0.0, 0.0, 1.0)
 
     def _draw_grid(self) -> None:
-        # Match PySide grid feel: light grey plane grid + subtle yellow axis highlight.
+        # Grid: light grey plane + yellow axis highlight
         from OpenGL.GL import GL_LINES, glColor4f, glLineWidth
 
         glLineWidth(1.25)
         glBegin(GL_LINES)
 
         # Grid lines (floor plane: XY at Z=0)
-        # Draw lines at half-integers so integer piece positions land centered on a grid cell
-        # (like the PySide version where moving +/-1 hops between squares).
+        # Grid lines at half-integers for centered piece positions
         for x in range(-4, 5):
             glColor4f(0.65, 0.65, 0.68, 0.55)
             xf = float(x) - 0.5
@@ -449,17 +483,23 @@ class _AsmGLCanvas(glcanvas.GLCanvas):
         # unit cube with base on Z=0 (so it sits on the floor grid)
         faces = [
             # z0
-            [(-0.5, -0.5, 0.0), (0.5, -0.5, 0.0), (0.5, 0.5, 0.0), (-0.5, 0.5, 0.0)],
+            [(-0.5, -0.5, 0.0), (0.5, -0.5, 0.0),
+             (0.5, 0.5, 0.0), (-0.5, 0.5, 0.0)],
             # z1
-            [(-0.5, -0.5, 1.0), (0.5, -0.5, 1.0), (0.5, 0.5, 1.0), (-0.5, 0.5, 1.0)],
+            [(-0.5, -0.5, 1.0), (0.5, -0.5, 1.0),
+             (0.5, 0.5, 1.0), (-0.5, 0.5, 1.0)],
             # x-
-            [(-0.5, -0.5, 0.0), (-0.5, 0.5, 0.0), (-0.5, 0.5, 1.0), (-0.5, -0.5, 1.0)],
+            [(-0.5, -0.5, 0.0), (-0.5, 0.5, 0.0),
+             (-0.5, 0.5, 1.0), (-0.5, -0.5, 1.0)],
             # x+
-            [(0.5, -0.5, 0.0), (0.5, 0.5, 0.0), (0.5, 0.5, 1.0), (0.5, -0.5, 1.0)],
+            [(0.5, -0.5, 0.0), (0.5, 0.5, 0.0),
+             (0.5, 0.5, 1.0), (0.5, -0.5, 1.0)],
             # y-
-            [(-0.5, -0.5, 0.0), (0.5, -0.5, 0.0), (0.5, -0.5, 1.0), (-0.5, -0.5, 1.0)],
+            [(-0.5, -0.5, 0.0), (0.5, -0.5, 0.0),
+             (0.5, -0.5, 1.0), (-0.5, -0.5, 1.0)],
             # y+
-            [(-0.5, 0.5, 0.0), (0.5, 0.5, 0.0), (0.5, 0.5, 1.0), (-0.5, 0.5, 1.0)],
+            [(-0.5, 0.5, 0.0), (0.5, 0.5, 0.0),
+             (0.5, 0.5, 1.0), (-0.5, 0.5, 1.0)],
         ]
         glBegin(GL_QUADS)
         for face in faces:
@@ -473,7 +513,8 @@ class _AsmGLCanvas(glcanvas.GLCanvas):
 
         glColor4f(r, g, b, a)
         apex = (0.0, 0.0, 1.0)
-        base = [(0.5, 0.5, 0.0), (0.5, -0.5, 0.0), (-0.5, -0.5, 0.0), (-0.5, 0.5, 0.0)]
+        base = [(0.5, 0.5, 0.0), (0.5, -0.5, 0.0),
+                (-0.5, -0.5, 0.0), (-0.5, 0.5, 0.0)]
 
         glBegin(GL_TRIANGLES)
         for i in range(4):
@@ -499,7 +540,8 @@ class _AsmGLCanvas(glcanvas.GLCanvas):
         if col is None:
             col = (255, 255, 255, 255)
 
-        rgba = (float(col[0]) / 255.0, float(col[1]) / 255.0, float(col[2]) / 255.0, float(col[3]) / 255.0)
+        rgba = (float(col[0]) / 255.0, float(col[1]) / 255.0,
+                float(col[2]) / 255.0, float(col[3]) / 255.0)
 
         if self._draw_mode == 'assembly' and self._selected_idx is not None:
             try:
@@ -532,7 +574,8 @@ class _AsmGLCanvas(glcanvas.GLCanvas):
 
         w, h = self.GetClientSize()
         bg = self._bg
-        glClearColor(bg[0] / 255.0, bg[1] / 255.0, bg[2] / 255.0, bg[3] / 255.0)
+        glClearColor(bg[0] / 255.0, bg[1] / 255.0,
+                     bg[2] / 255.0, bg[3] / 255.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         self._setup_3d(int(w), int(h))
@@ -562,7 +605,8 @@ class Assembly3DMinigame(wx.Dialog):
         self.SetMinSize((900, 600))
 
         self._selection_flash_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self._on_flash_timer, self._selection_flash_timer)
+        self.Bind(wx.EVT_TIMER, self._on_flash_timer,
+                  self._selection_flash_timer)
         self._selection_flash_timer.Start(33)
 
         self._game_timer = wx.Timer(self)
@@ -593,13 +637,14 @@ class Assembly3DMinigame(wx.Dialog):
         left_panel.SetBackgroundColour(wx.Colour(74, 74, 80))
         left = wx.BoxSizer(wx.VERTICAL)
         left_panel.SetSizer(left)
-        root.Add(left_panel, 2, wx.EXPAND | wx.ALL, 10)
+        root.Add(left_panel, 1, wx.EXPAND | wx.ALL, 10)
 
         ref_header = wx.Panel(left_panel)
         ref_header.SetBackgroundColour(wx.Colour(90, 90, 96))
         ref_header_s = wx.BoxSizer(wx.VERTICAL)
         ref_header.SetSizer(ref_header_s)
-        ref_label = wx.StaticText(ref_header, label='Reference', style=wx.ALIGN_CENTER)
+        ref_label = wx.StaticText(
+            ref_header, label='Reference', style=wx.ALIGN_CENTER)
         f = ref_label.GetFont()
         f.SetPointSize(16)
         f.SetWeight(wx.FONTWEIGHT_BOLD)
@@ -608,8 +653,10 @@ class Assembly3DMinigame(wx.Dialog):
         ref_header_s.Add(ref_label, 1, wx.EXPAND | wx.ALL, 8)
         left.Add(ref_header, 0, wx.EXPAND | wx.BOTTOM, 8)
 
-        self.ref_view = _AsmGLCanvas(left_panel, bg=(80, 80, 85, 255), orbit=True)
-        self.ref_view.set_camera(distance=8.0, elevation_deg=20.0, azimuth_deg=30.0, fov=60.0)
+        self.ref_view = _AsmGLCanvas(
+            left_panel, bg=(80, 80, 85, 255), orbit=True)
+        self.ref_view.set_camera(
+            distance=8.0, elevation_deg=20.0, azimuth_deg=30.0, fov=60.0)
         left.Add(self.ref_view, 1, wx.EXPAND)
 
         # Right: assembly view + controls.
@@ -617,13 +664,14 @@ class Assembly3DMinigame(wx.Dialog):
         right_panel.SetBackgroundColour(wx.Colour(74, 74, 80))
         right = wx.BoxSizer(wx.VERTICAL)
         right_panel.SetSizer(right)
-        root.Add(right_panel, 1, wx.EXPAND | wx.ALL, 10)
+        root.Add(right_panel, 2, wx.EXPAND | wx.ALL, 10)
 
         asm_header = wx.Panel(right_panel)
         asm_header.SetBackgroundColour(wx.Colour(90, 90, 96))
         asm_header_s = wx.BoxSizer(wx.VERTICAL)
         asm_header.SetSizer(asm_header_s)
-        asm_label = wx.StaticText(asm_header, label='Assembly Area', style=wx.ALIGN_CENTER)
+        asm_label = wx.StaticText(
+            asm_header, label='Assembly Area', style=wx.ALIGN_CENTER)
         f2 = asm_label.GetFont()
         f2.SetPointSize(16)
         f2.SetWeight(wx.FONTWEIGHT_BOLD)
@@ -633,7 +681,8 @@ class Assembly3DMinigame(wx.Dialog):
         right.Add(asm_header, 0, wx.EXPAND | wx.BOTTOM, 8)
 
         self.asm_view = _AsmGLCanvas(right_panel, bg=(240, 240, 245, 255))
-        self.asm_view.set_camera(distance=4.8, elevation_deg=20.0, azimuth_deg=30.0, target=(0.0, 0.0, 0.0), fov=40.0)
+        self.asm_view.set_camera(distance=5.0, elevation_deg=20.0,
+                                 azimuth_deg=30.0, target=(0.0, 0.0, 0.0), fov=50.0)
         right.Add(self.asm_view, 1, wx.EXPAND)
 
         # Feedback + action buttons in a single row.
@@ -643,12 +692,12 @@ class Assembly3DMinigame(wx.Dialog):
         self.feedback_label = _StyledFeedback(right_panel, size=(420, 38))
         ctrl_row.Add(self.feedback_label, 0, wx.EXPAND | wx.RIGHT, 8)
 
-        btn_reset = _QtLikeButton(right_panel, label='Reset')
-        btn_reset.SetMinSize((90, 38))
+        btn_reset = _StyledButton(right_panel, label='Reset')
+        btn_reset.SetMinSize((80, 38))
         btn_reset.Bind(wx.EVT_BUTTON, lambda _evt: self._reset_pieces())
         ctrl_row.Add(btn_reset, 0, wx.RIGHT, 6)
 
-        btn_check = _QtLikeButton(
+        btn_check = _StyledButton(
             right_panel,
             label='Check',
             bg=(74, 222, 128),
@@ -657,11 +706,11 @@ class Assembly3DMinigame(wx.Dialog):
             hover_bg=(34, 197, 94),
             hover_border=(22, 163, 74),
         )
-        btn_check.SetMinSize((90, 38))
+        btn_check.SetMinSize((80, 38))
         btn_check.Bind(wx.EVT_BUTTON, lambda _evt: self._check_assembly())
         ctrl_row.Add(btn_check, 0, wx.RIGHT, 6)
 
-        btn_quit = _QtLikeButton(
+        btn_quit = _StyledButton(
             right_panel,
             label='Quit',
             bg=(239, 68, 68),
@@ -670,7 +719,7 @@ class Assembly3DMinigame(wx.Dialog):
             hover_bg=(220, 38, 38),
             hover_border=(185, 28, 28),
         )
-        btn_quit.SetMinSize((90, 38))
+        btn_quit.SetMinSize((80, 38))
         btn_quit.Bind(wx.EVT_BUTTON, lambda _evt: self.EndModal(wx.ID_CANCEL))
         ctrl_row.Add(btn_quit, 0)
 
@@ -684,7 +733,7 @@ class Assembly3DMinigame(wx.Dialog):
         # Arrow pad inside a container panel (like PySide arrow_widget).
         arrow_host = wx.Panel(right_panel)
         arrow_host.SetBackgroundColour(wx.Colour(90, 90, 96))
-        arrow_s = wx.BoxSizer(wx.VERTICAL)
+        arrow_s = wx.BoxSizer(wx.HORIZONTAL)
         arrow_host.SetSizer(arrow_s)
         right.Add(arrow_host, 0, wx.EXPAND | wx.TOP, 8)
 
@@ -694,7 +743,13 @@ class Assembly3DMinigame(wx.Dialog):
         arrow_inner.SetSizer(arrow_inner_s)
         arrow_s.Add(arrow_inner, 1, wx.EXPAND | wx.ALL, 8)
 
-        arrow_grid = wx.GridSizer(3, 4, 4, 4)
+        z_col = wx.Panel(arrow_host)
+        z_col.SetBackgroundColour(wx.Colour(90, 90, 96))
+        z_col_s = wx.BoxSizer(wx.VERTICAL)
+        z_col.SetSizer(z_col_s)
+        arrow_s.Add(z_col, 0, wx.EXPAND | wx.TOP | wx.BOTTOM | wx.RIGHT, 8)
+
+        arrow_grid = wx.GridSizer(3, 3, 4, 4)
         arrow_inner_s.Add(arrow_grid, 1, wx.EXPAND)
 
         def add_btn(lbl: str, fn) -> None:
@@ -703,48 +758,64 @@ class Assembly3DMinigame(wx.Dialog):
                 p.SetBackgroundColour(wx.Colour(90, 90, 96))
                 arrow_grid.Add(p, 0, wx.EXPAND)
                 return
-            if lbl in ('Z+', 'Z-'):
-                b = _QtLikeButton(
-                    arrow_inner,
-                    label=lbl,
-                    size=(40, 40),
-                    bg=(255, 248, 220),
-                    fg=(45, 45, 48),
-                    border=(255, 215, 0),
-                    hover_bg=(255, 237, 78),
-                    hover_border=(255, 215, 0),
-                    font_point=11,
-                    padding_x=0,
-                    padding_y=0,
-                )
-            else:
-                b = _QtLikeButton(
-                    arrow_inner,
-                    label=lbl,
-                    size=(40, 40),
-                    pressed_bg=(255, 215, 0),
-                    pressed_fg=(45, 45, 48),
-                    pressed_border=(255, 237, 78),
-                    padding_x=0,
-                    padding_y=0,
-                )
+            b = _StyledButton(
+                arrow_inner,
+                label=lbl,
+                size=(40, 40),
+                pressed_bg=(255, 215, 0),
+                pressed_fg=(45, 45, 48),
+                pressed_border=(255, 237, 78),
+                padding_x=0,
+                padding_y=0,
+            )
             b.Bind(wx.EVT_BUTTON, lambda _evt: fn())
             arrow_grid.Add(b, 0, wx.EXPAND)
 
         add_btn(' ', lambda: None)
         add_btn('↑', lambda: self._move_selected_piece(0, 1, 0))
         add_btn(' ', lambda: None)
-        add_btn('Z+', lambda: self._move_selected_piece(0, 0, 1))
 
         add_btn('←', lambda: self._move_selected_piece(-1, 0, 0))
         add_btn(' ', lambda: None)
         add_btn('→', lambda: self._move_selected_piece(1, 0, 0))
-        add_btn(' ', lambda: None)
 
         add_btn(' ', lambda: None)
         add_btn('↓', lambda: self._move_selected_piece(0, -1, 0))
         add_btn(' ', lambda: None)
-        add_btn('Z-', lambda: self._move_selected_piece(0, 0, -1))
+
+        btn_zp = _StyledButton(
+            z_col,
+            label='Z+',
+            size=(40, 40),
+            bg=(255, 248, 220),
+            fg=(45, 45, 48),
+            border=(255, 215, 0),
+            hover_bg=(255, 237, 78),
+            hover_border=(255, 215, 0),
+            font_point=11,
+            padding_x=0,
+            padding_y=0,
+        )
+        btn_zp.Bind(wx.EVT_BUTTON,
+                    lambda _evt: self._move_selected_piece(0, 0, 1))
+        z_col_s.Add(btn_zp, 0, wx.ALIGN_CENTER | wx.BOTTOM, 8)
+
+        btn_zm = _StyledButton(
+            z_col,
+            label='Z-',
+            size=(40, 40),
+            bg=(255, 248, 220),
+            fg=(45, 45, 48),
+            border=(255, 215, 0),
+            hover_bg=(255, 237, 78),
+            hover_border=(255, 215, 0),
+            font_point=11,
+            padding_x=0,
+            padding_y=0,
+        )
+        btn_zm.Bind(wx.EVT_BUTTON,
+                    lambda _evt: self._move_selected_piece(0, 0, -1))
+        z_col_s.Add(btn_zm, 0, wx.ALIGN_CENTER)
 
         self.piece_btns: list[wx.ToggleButton] = []
 
@@ -758,9 +829,11 @@ class Assembly3DMinigame(wx.Dialog):
 
         parent = getattr(self, '_piece_btn_panel', None) or self
         for i, piece in enumerate(getattr(self, 'pieces', []) or []):
-            b = _QtLikeButton(parent, label=f"{str(piece.get('type', 'cube')).capitalize()} {i + 1}", toggle=True)
-            b.SetMinSize((140, 40))
-            b.Bind(wx.EVT_TOGGLEBUTTON, lambda _evt, idx=i: self._select_piece(idx))
+            b = _StyledButton(
+                parent, label=f"{str(piece.get('type', 'cube')).capitalize()} {i + 1}", toggle=True)
+            b.SetMinSize((130, 38))
+            b.Bind(wx.EVT_TOGGLEBUTTON, lambda _evt,
+                   idx=i: self._select_piece(idx))
             self._piece_btn_host.Add(b, 0, wx.RIGHT, 6)
             self.piece_btns.append(b)
         try:
@@ -775,7 +848,8 @@ class Assembly3DMinigame(wx.Dialog):
         if parent is not None and hasattr(parent, 'core'):
             try:
                 current_time = time.perf_counter()
-                dt = current_time - float(getattr(self, '_last_game_update', current_time))
+                dt = current_time - \
+                    float(getattr(self, '_last_game_update', current_time))
                 dt = min(dt, 0.1)
                 parent.core.elapsed_s += dt
                 self._last_game_update = current_time
@@ -823,8 +897,10 @@ class Assembly3DMinigame(wx.Dialog):
 
         self._ensure_piece_controls_match_scene()
 
-        self.ref_view.set_scene(pieces=self.pieces, target=self.target_structure, mode='reference')
-        self.asm_view.set_scene(pieces=self.pieces, target=self.target_structure, mode='assembly')
+        self.ref_view.set_scene(
+            pieces=self.pieces, target=self.target_structure, mode='reference')
+        self.asm_view.set_scene(
+            pieces=self.pieces, target=self.target_structure, mode='assembly')
 
         # Auto-center assembly camera target so the grid + pieces fill the canvas instead of sitting with wide margins.
         try:
@@ -838,7 +914,8 @@ class Assembly3DMinigame(wx.Dialog):
                 cx = float(sum(x for x, _, _ in pts) / len(pts))
                 cy = float(sum(y for _, y, _ in pts) / len(pts))
                 cz = float(sum(z for _, _, z in pts) / len(pts))
-                self.asm_view.set_camera(distance=4.8, elevation_deg=20.0, azimuth_deg=30.0, target=(cx, cy, cz), fov=40.0)
+                self.asm_view.set_camera(
+                    distance=5.0, elevation_deg=20.0, azimuth_deg=30.0, target=(cx, cy, cz), fov=50.0)
         except Exception:
             pass
 
@@ -851,23 +928,28 @@ class Assembly3DMinigame(wx.Dialog):
 
         if kind == 'KP':
             return [
-                {'type': 'cube', 'color': yellow, 'pos': np.array([2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
-                {'type': 'cube', 'color': blue, 'pos': np.array([-2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
-                {'type': 'pyramid', 'color': red, 'pos': np.array([0, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'cube', 'color': yellow, 'pos': np.array(
+                    [2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'cube', 'color': blue, 'pos': np.array(
+                    [-2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
+                {'type': 'pyramid', 'color': red, 'pos': np.array(
+                    [0, 0, 0], dtype=float), 'rot': [0, 0, 0]},
             ]
 
         if kind == 'K':
             colors = [blue, yellow, red, red, blue]
             pieces = []
             for i, col in enumerate(colors):
-                pieces.append({'type': 'cube', 'color': col, 'pos': np.array([-2 + i, 0, 0], dtype=float), 'rot': [0, 0, 0]})
+                pieces.append({'type': 'cube', 'color': col, 'pos': np.array(
+                    [-2 + i, 0, 0], dtype=float), 'rot': [0, 0, 0]})
             return pieces
 
         colors = [yellow, red, blue, yellow]
         types = ['cube', 'cube', 'pyramid', 'pyramid']
         pieces = []
         for i, (t, col) in enumerate(zip(types, colors)):
-            pieces.append({'type': t, 'color': col, 'pos': np.array([-2 + i, 0, 0], dtype=float), 'rot': [0, 0, 0]})
+            pieces.append({'type': t, 'color': col, 'pos': np.array(
+                [-2 + i, 0, 0], dtype=float), 'rot': [0, 0, 0]})
         return pieces
 
     def _generate_target_structure_3d(self, kind: str):
@@ -875,25 +957,37 @@ class Assembly3DMinigame(wx.Dialog):
 
         if kind == 'KP':
             return [
-                {'type': 'cube', 'pos': np.array([0, 0, 0], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[0]['color']},
-                {'type': 'cube', 'pos': np.array([0, 0, 1], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[1]['color']},
-                {'type': 'pyramid', 'pos': np.array([0, 0, 2], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[2]['color']},
+                {'type': 'cube', 'pos': np.array([0, 0, 0], dtype=float), 'rot': [
+                    0, 0, 0], 'color': self.pieces[0]['color']},
+                {'type': 'cube', 'pos': np.array([0, 0, 1], dtype=float), 'rot': [
+                    0, 0, 0], 'color': self.pieces[1]['color']},
+                {'type': 'pyramid', 'pos': np.array([0, 0, 2], dtype=float), 'rot': [
+                    0, 0, 0], 'color': self.pieces[2]['color']},
             ]
 
         if kind == 'K':
             return [
-                {'type': 'cube', 'pos': np.array([0, 0, 0], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[0]['color']},
-                {'type': 'cube', 'pos': np.array([1, 0, 0], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[1]['color']},
-                {'type': 'cube', 'pos': np.array([2, 0, 0], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[2]['color']},
-                {'type': 'cube', 'pos': np.array([0, 1, 0], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[3]['color']},
-                {'type': 'cube', 'pos': np.array([1, 1, 0], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[4]['color']},
+                {'type': 'cube', 'pos': np.array([0, 0, 0], dtype=float), 'rot': [
+                    0, 0, 0], 'color': self.pieces[0]['color']},
+                {'type': 'cube', 'pos': np.array([1, 0, 0], dtype=float), 'rot': [
+                    0, 0, 0], 'color': self.pieces[1]['color']},
+                {'type': 'cube', 'pos': np.array([2, 0, 0], dtype=float), 'rot': [
+                    0, 0, 0], 'color': self.pieces[2]['color']},
+                {'type': 'cube', 'pos': np.array([0, 1, 0], dtype=float), 'rot': [
+                    0, 0, 0], 'color': self.pieces[3]['color']},
+                {'type': 'cube', 'pos': np.array([1, 1, 0], dtype=float), 'rot': [
+                    0, 0, 0], 'color': self.pieces[4]['color']},
             ]
 
         return [
-            {'type': 'cube', 'pos': np.array([0, 0, 0], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[0]['color']},
-            {'type': 'cube', 'pos': np.array([1, 0, 0], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[1]['color']},
-            {'type': 'pyramid', 'pos': np.array([0, 1, 0], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[2]['color']},
-            {'type': 'pyramid', 'pos': np.array([1, 1, 0], dtype=float), 'rot': [0, 0, 0], 'color': self.pieces[3]['color']},
+            {'type': 'cube', 'pos': np.array([0, 0, 0], dtype=float), 'rot': [
+                0, 0, 0], 'color': self.pieces[0]['color']},
+            {'type': 'cube', 'pos': np.array([1, 0, 0], dtype=float), 'rot': [
+                0, 0, 0], 'color': self.pieces[1]['color']},
+            {'type': 'pyramid', 'pos': np.array([0, 1, 0], dtype=float), 'rot': [
+                0, 0, 0], 'color': self.pieces[2]['color']},
+            {'type': 'pyramid', 'pos': np.array([1, 1, 0], dtype=float), 'rot': [
+                0, 0, 0], 'color': self.pieces[3]['color']},
         ]
 
     GRID_MIN = -2
@@ -931,7 +1025,8 @@ class Assembly3DMinigame(wx.Dialog):
     def _reset_pieces(self) -> None:
         for i, piece in enumerate(self.pieces):
             if self.kind == 'KP':
-                piece['pos'] = np.array([2 if i == 0 else -2 if i == 1 else 0, 0, 0], dtype=float)
+                piece['pos'] = np.array(
+                    [2 if i == 0 else -2 if i == 1 else 0, 0, 0], dtype=float)
             else:
                 piece['pos'] = np.array([-2 + i, 0, 0], dtype=float)
         self.placed = [False] * len(self.pieces)
@@ -947,18 +1042,22 @@ class Assembly3DMinigame(wx.Dialog):
                 pass
 
         if all(self.placed) and self.pieces:
-            self.feedback_label.set_text('🎉 Perfect Assembly! 🎉', mode='success')
+            self.feedback_label.set_text(
+                '🎉 Perfect Assembly! 🎉', mode='success')
         else:
-            self.feedback_label.set_text('Select piece → Use arrows to move → Z+/- for height', mode='normal')
+            self.feedback_label.set_text(
+                'Select piece → Use arrows to move → Z+/- for height', mode='normal')
 
     def _check_assembly(self) -> None:
         def neighbors_from_positions(positions: list[np.ndarray]) -> dict[int, set[int]]:
-            adj: dict[int, set[int]] = {i: set() for i in range(len(positions))}
+            adj: dict[int, set[int]] = {i: set()
+                                        for i in range(len(positions))}
             ipos = [np.round(p).astype(int) for p in positions]
             for i in range(len(ipos)):
                 for j in range(i + 1, len(ipos)):
                     diff = np.abs(ipos[i] - ipos[j])
-                    touching = (np.sum(diff == 1) == 1) and (np.sum(diff == 0) == 2)
+                    touching = (np.sum(diff == 1) == 1) and (
+                        np.sum(diff == 0) == 2)
                     if touching:
                         adj[i].add(j)
                         adj[j].add(i)
@@ -973,7 +1072,8 @@ class Assembly3DMinigame(wx.Dialog):
                 color_type_ok = False
                 break
 
-        target_adj = neighbors_from_positions([t['pos'] for t in self.target_structure])
+        target_adj = neighbors_from_positions(
+            [t['pos'] for t in self.target_structure])
         placed_adj = neighbors_from_positions([p['pos'] for p in self.pieces])
 
         adjacency_ok = True
@@ -988,7 +1088,8 @@ class Assembly3DMinigame(wx.Dialog):
             self.EndModal(wx.ID_OK)
             return
 
-        self.feedback_label.set_text('❌ Incorrect - Keep Trying!', mode='error')
+        self.feedback_label.set_text(
+            '❌ Incorrect - Keep Trying!', mode='error')
 
     def _show_congratulations(self) -> None:
         dlg = wx.Dialog(self, title='Success!', style=wx.DEFAULT_DIALOG_STYLE)
@@ -1004,7 +1105,8 @@ class Assembly3DMinigame(wx.Dialog):
         t1.SetForegroundColour(wx.Colour(74, 222, 128))
         s.Add(t1, 0, wx.ALIGN_CENTER | wx.TOP | wx.LEFT | wx.RIGHT, 18)
 
-        t2 = wx.StaticText(dlg, label='You have successfully assembled the structure!')
+        t2 = wx.StaticText(
+            dlg, label='You have successfully assembled the structure!')
         f2 = t2.GetFont()
         f2.SetPointSize(16)
         f2.SetWeight(wx.FONTWEIGHT_NORMAL)
@@ -1020,7 +1122,7 @@ class Assembly3DMinigame(wx.Dialog):
         t3.SetForegroundColour(wx.Colour(255, 215, 0))
         s.Add(t3, 0, wx.ALIGN_CENTER | wx.TOP | wx.LEFT | wx.RIGHT, 8)
 
-        ok = _QtLikeButton(dlg, label='OK')
+        ok = _StyledButton(dlg, label='OK')
         ok.Bind(wx.EVT_BUTTON, lambda _evt: dlg.EndModal(wx.ID_OK))
         s.Add(ok, 0, wx.ALIGN_CENTER | wx.ALL, 16)
 

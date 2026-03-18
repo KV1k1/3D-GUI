@@ -10,6 +10,7 @@ from wx import glcanvas
 
 from .silhouette_minigame import SilhouetteMatchDialog
 from .assembly3d_minigame import Assembly3DMinigame
+from .renderer_opengl import OpenGLRenderer
 
 from OpenGL.GL import (
     GL_BLEND,
@@ -47,7 +48,7 @@ from OpenGL.GL import (
 )
 
 from core.game_core import GameCore
-from .renderer_opengl import OpenGLRenderer
+from core.game_core import GameCore
 from core.performance_monitor import PerformanceMonitor
 
 
@@ -346,9 +347,16 @@ class GameGLCanvas(glcanvas.GLCanvas):
                 vendor = glGetString(GL_VENDOR)
                 renderer = glGetString(GL_RENDERER)
                 version = glGetString(GL_VERSION)
-                print('[wxpython][opengl] vendor=', vendor)
-                print('[wxpython][opengl] renderer=', renderer)
-                print('[wxpython][opengl] version=', version)
+
+                # Capture system info instead of printing
+                try:
+                    from core.pdf_export import get_system_collector
+                    collector = get_system_collector()
+                    collector.record_opengl_info(vendor, renderer, version)
+                except ImportError:
+                    # PDF export not available, just skip system info capture
+                    pass
+
             except Exception:
                 pass
             self._printed_gl_info = True
@@ -795,7 +803,7 @@ class GameGLCanvas(glcanvas.GLCanvas):
         self._lore_current_end = now + 2.5
 
     def _draw_vignette_gl(self, w: int, h: int) -> None:
-        """Optimized vignette matching PySide6 exactly: 2 passes like QRadialGradients."""
+        """Optimized vignette: 2 passes like QRadialGradients."""
         # Note: In HUD context, depth testing is already disabled by _draw_hud_gl
         # Only manage texture state, don't restore depth testing during HUD rendering
         texture_2d_enabled = glIsEnabled(GL_TEXTURE_2D)
@@ -807,14 +815,14 @@ class GameGLCanvas(glcanvas.GLCanvas):
         cx = float(w) * 0.5
         cy = float(h) * 0.52
         min_dim = min(float(w), float(h))
-        r_inner = 0.32 * min_dim       # transparent centre — matches PySide
-        r_outer = 0.74 * min_dim       # max-dark ring — matches PySide
+        r_inner = 0.32 * min_dim       # transparent centre
+        r_outer = 0.74 * min_dim       # max-dark ring
         # Far enough to cover all four corners of any window shape
         r_corner = math.sqrt((max(cx, w - cx))**2 + (max(cy, h - cy))**2) + 4.0
         max_alpha = 255.0 / 255.0  # Full dark (completely opaque)
         steps = 64  # Reduced from 128 for performance
 
-        # Pass 1: Main vignette (matches PySide6 QRadialGradient #1)
+        # Pass 1: Main vignette
         # Single pass from transparent center to dark corners
         glBegin(GL_TRIANGLE_STRIP)
         for i in range(steps + 1):
@@ -830,11 +838,11 @@ class GameGLCanvas(glcanvas.GLCanvas):
             glVertex2f(cx + ca * r_corner, cy + sa * r_corner)
         glEnd()
 
-        # Pass 2: Animated fog layer (matches PySide6 QRadialGradient #2)
+        # Pass 2: Animated fog layer
         t = time.perf_counter()
         fog_cx = cx + 18.0 * math.sin(t * 0.35)
         fog_cy = cy + 14.0 * math.cos(t * 0.31)
-        fog_r_inner = r_outer * 0.55  # Matches PySide6 0.55 stop
+        fog_r_inner = r_outer * 0.55
         fog_r_outer = r_corner * 1.02
 
         glBegin(GL_TRIANGLE_STRIP)
@@ -846,7 +854,7 @@ class GameGLCanvas(glcanvas.GLCanvas):
             glColor4f(0.0, 0.0, 0.0, 0.0)
             glVertex2f(fog_cx + ca * fog_r_inner, fog_cy + sa * fog_r_inner)
 
-            # Outer vertex: subtle fog (matches PySide6)
+            # Outer vertex: subtle fog
             glColor4f(0.0, 0.0, 0.0, 32.0 / 255.0)
             glVertex2f(fog_cx + ca * fog_r_outer, fog_cy + sa * fog_r_outer)
         glEnd()
@@ -1228,7 +1236,7 @@ class GameGLCanvas(glcanvas.GLCanvas):
         # Draw black background
         self._gl_rect(0.0, 0.0, float(w), float(h), 0.0, 0.0, 0.0, 1.0)
 
-        # Draw stats text (same as _draw_stats_screen_gl)
+        # Draw stats text
         text = str(getattr(self, '_stats_text', '') or '')
         if text:
             lines = [ln.rstrip() for ln in text.split('\n')]
@@ -1495,12 +1503,18 @@ class WxGameWindow(wx.Frame):
         # Performance monitor — shared reference given to canvas after construction
         self.performance_monitor = PerformanceMonitor(framework='wxPython')
 
+        # Connect performance monitor to game core for tracking
+        self.core._performance_monitor = self.performance_monitor
+        self.performance_monitor._game_start_time = time.perf_counter()
+
         self.canvas = GameGLCanvas(self, self.core)
         self.canvas.performance_monitor = self.performance_monitor
 
         # Level-end flow state
         # True once we've handled game_won for this level
         self._level_end_triggered: bool = False
+        # True once PDF has been exported for this level
+        self._perf_pdf_exported: bool = False
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(self.canvas, 1, wx.EXPAND)
@@ -1740,6 +1754,12 @@ class WxGameWindow(wx.Frame):
             )
             self.canvas._modal_allow_close = True
             self.canvas._modal_return_to_pause = False
+
+        # Track jail entry for performance monitor
+        try:
+            self.canvas.performance_monitor.record_jail_entry()
+        except Exception:
+            pass
             self.canvas.hide_mouse_capture()
             self.keys_pressed.clear()
             # Tutorial modal should not force a permanent pause; ESC will close it and gameplay can continue.
@@ -1962,10 +1982,15 @@ class WxGameWindow(wx.Frame):
 
         # Reset level-end guard and performance monitor for the new level
         self._level_end_triggered = False
+        self._perf_pdf_exported = False
         self._level_complete = False  # Reset level complete flag
         try:
             self.performance_monitor = PerformanceMonitor(framework='wxPython')
             self.canvas.performance_monitor = self.performance_monitor
+
+            # Connect performance monitor to game core for tracking
+            self.core._performance_monitor = self.performance_monitor
+            self.performance_monitor._game_start_time = time.perf_counter()
         except Exception:
             pass
 
@@ -2017,7 +2042,7 @@ class WxGameWindow(wx.Frame):
         current_time = time.perf_counter()
         dt = current_time - self._last_update_time
         self._last_update_time = current_time
-        dt = min(dt, 0.1)
+        dt = min(dt, 0.05)
 
         # Performance monitor: tick-to-tick wall time gives true FPS
         try:
@@ -2140,6 +2165,12 @@ class WxGameWindow(wx.Frame):
                     if not self._persist_seen.get(f'ghost_close_{self._current_level_id}'):
                         self._persist_seen[f'ghost_close_{self._current_level_id}'] = True
                         self._trigger_lore('ON_GHOST_CLOSE')
+
+                # Track ghost encounter for performance monitor
+                try:
+                    self.canvas.performance_monitor.record_ghost_encounter()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -2277,6 +2308,7 @@ class WxGameWindow(wx.Frame):
                 spike_traps=len(getattr(self.core, 'spikes', [])),
                 moving_platforms=len(getattr(self.core, 'platforms', [])),
             )
+            self.performance_monitor._game_core_elapsed_s = self.core.elapsed_s
             self.performance_monitor.freeze_stats()
             t = int(getattr(self.core, 'elapsed_s', 0.0) or 0.0)
             mm, ss = divmod(t, 60)
@@ -2289,6 +2321,39 @@ class WxGameWindow(wx.Frame):
                 gameplay_metrics)
         except Exception as exc:
             summary_text = f'Level complete!\n\nPress ESC to continue.\n\n({exc})'
+
+        try:
+            # Export PDF only once per level completion
+            if not self._perf_pdf_exported:
+                # Get performance data from the monitor
+                performance_data = self.performance_monitor.get_performance_summary()
+
+                # Prepare gameplay metrics
+                gameplay_metrics = {
+                    'Coins Collected': f'{self.core.coins_collected}/{self.core.coins_required}',
+                    'Keys Collected': f'{self.core.keys_collected}/{self.core.keys_required}',
+                    'Jail Entries': str(self.core.jail_entries),
+                    'Avg Coin Collection Time': f'{self.core.avg_coin_time:.1f}s',
+                }
+
+                # Import PDF export here to avoid circular imports
+                from core.pdf_export import export_performance_pdf
+
+                export_performance_pdf(
+                    framework='wxpython',
+                    level_id=str(self._current_level_id),
+                    performance_data=performance_data,
+                    gameplay_metrics=gameplay_metrics,
+                    out_dir=os.path.abspath('performance_reports'),
+                )
+                self._perf_pdf_exported = True
+                print(f"[wxPython] PDF report exported to performance_reports/")
+        except ImportError as e:
+            print(f"[wxPython] PDF export not available: {e}")
+        except Exception as e:
+            print(f"[wxPython] PDF export failed: {e}")
+            import traceback
+            traceback.print_exc()
 
         # Show the appropriate screen
         if self._current_level_id == 'level2':

@@ -48,7 +48,8 @@ class _RoundedPanel(wx.Panel):
 
         rect = wx.Rect(0, 0, int(w), int(h))
         path = gc.CreatePath()
-        path.AddRoundedRectangle(float(rect.x) + 0.5, float(rect.y) + 0.5, float(rect.width) - 1.0, float(rect.height) - 1.0, float(self._radius))
+        path.AddRoundedRectangle(float(rect.x) + 0.5, float(rect.y) + 0.5, float(
+            rect.width) - 1.0, float(rect.height) - 1.0, float(self._radius))
         gc.SetBrush(wx.Brush(wx.Colour(*self._bg)))
         gc.SetPen(wx.Pen(wx.Colour(*self._border), width=int(self._border_w)))
         gc.DrawPath(path)
@@ -91,7 +92,8 @@ class _StyledButton(wx.Control):
         self._pressed_bg = tuple(int(x) for x in pressed_bg)
         self._checked_bg = tuple(int(x) for x in (checked_bg or bg))
         self._checked_fg = tuple(int(x) for x in (checked_fg or fg))
-        self._checked_border = tuple(int(x) for x in (checked_border or border))
+        self._checked_border = tuple(int(x)
+                                     for x in (checked_border or border))
 
         f = self.GetFont()
         f.SetPointSize(int(font_point))
@@ -205,7 +207,8 @@ class _StyledButton(wx.Control):
 
         rect = wx.Rect(0, 0, int(w), int(h))
         path = gc.CreatePath()
-        path.AddRoundedRectangle(float(rect.x) + 0.5, float(rect.y) + 0.5, float(rect.width) - 1.0, float(rect.height) - 1.0, float(self._radius))
+        path.AddRoundedRectangle(float(rect.x) + 0.5, float(rect.y) + 0.5, float(
+            rect.width) - 1.0, float(rect.height) - 1.0, float(self._radius))
         gc.SetBrush(wx.Brush(wx.Colour(*bg)))
         gc.SetPen(wx.Pen(wx.Colour(*border), width=2))
         gc.DrawPath(path)
@@ -230,10 +233,12 @@ class SilhouetteMatchDialog(wx.Dialog):
 
         self.SetBackgroundColour(wx.Colour(45, 45, 48))
 
-        title_host = _RoundedPanel(self, bg=(64, 64, 64), border=(85, 85, 85), radius=6, border_w=1)
+        title_host = _RoundedPanel(self, bg=(64, 64, 64), border=(
+            85, 85, 85), radius=6, border_w=1)
         title_s = wx.BoxSizer(wx.VERTICAL)
         title_host.SetSizer(title_s)
-        title = wx.StaticText(title_host, label='Match the silhouette to unlock the jail gate', style=wx.ALIGN_CENTER)
+        title = wx.StaticText(
+            title_host, label='Match the silhouette to unlock the jail gate', style=wx.ALIGN_CENTER)
         title.SetForegroundColour(wx.Colour(255, 215, 0))
         title_font = title.GetFont()
         title_font.SetPointSize(18)
@@ -248,13 +253,15 @@ class SilhouetteMatchDialog(wx.Dialog):
         left = wx.BoxSizer(wx.VERTICAL)
         mid.Add(left, 1, wx.EXPAND | wx.RIGHT, 12)
 
-        self._target_panel = _PatternPanel(self, self._target, cell_px=26, pad=10)
+        self._target_panel = _PatternPanel(
+            self, self._target, cell_px=26, pad=10)
         left.Add(self._target_panel, 1, wx.EXPAND)
 
         right = wx.BoxSizer(wx.VERTICAL)
         mid.Add(right, 2, wx.EXPAND)
 
-        grid_outer = _RoundedPanel(self, bg=(64, 64, 64), border=(85, 85, 85), radius=10, border_w=2)
+        grid_outer = _RoundedPanel(self, bg=(64, 64, 64), border=(
+            85, 85, 85), radius=10, border_w=2)
         grid_outer_s = wx.BoxSizer(wx.VERTICAL)
         grid_outer.SetSizer(grid_outer_s)
         right.Add(grid_outer, 1, wx.EXPAND | wx.ALL, 0)
@@ -290,15 +297,18 @@ class SilhouetteMatchDialog(wx.Dialog):
                     checked_fg=(45, 45, 48),
                     checked_border=(255, 237, 78),
                 )
-                b.Bind(wx.EVT_TOGGLEBUTTON, lambda evt, rr=r, cc=c: self._on_toggle(rr, cc))
+                b.Bind(wx.EVT_TOGGLEBUTTON, lambda evt,
+                       rr=r, cc=c: self._on_toggle(rr, cc))
                 grid_s.Add(b, 0, wx.ALIGN_CENTER)
                 row.append(b)
             self._cells.append(row)
 
-        status_host = _RoundedPanel(self, bg=(64, 64, 64), border=(85, 85, 85), radius=6, border_w=1)
+        status_host = _RoundedPanel(
+            self, bg=(64, 64, 64), border=(85, 85, 85), radius=6, border_w=1)
         status_s = wx.BoxSizer(wx.VERTICAL)
         status_host.SetSizer(status_s)
-        self._status = wx.StaticText(status_host, label='', style=wx.ALIGN_CENTER)
+        self._status = wx.StaticText(
+            status_host, label='', style=wx.ALIGN_CENTER)
         st_font = self._status.GetFont()
         st_font.SetPointSize(14)
         st_font.SetWeight(wx.FONTWEIGHT_BOLD)
@@ -493,8 +503,10 @@ class _PatternPanel(wx.Panel):
                 y = y0 + pad + r * cell_px
                 dc.SetBrush(wx.Brush(on if self._pattern[r][c] else off))
                 dc.SetPen(wx.Pen(wx.Colour(0, 0, 0), 0))
-                dc.DrawRectangle(int(x), int(y), int(cell_px - 2), int(cell_px - 2))
+                dc.DrawRectangle(int(x), int(y), int(
+                    cell_px - 2), int(cell_px - 2))
 
         dc.SetPen(wx.Pen(wx.Colour(255, 215, 0, 128), 1))
         dc.SetBrush(wx.TRANSPARENT_BRUSH)
-        dc.DrawRectangle(x0 + 1, y0 + 1, grid_w + pad * 2 - 2, grid_h + pad * 2 - 2)
+        dc.DrawRectangle(x0 + 1, y0 + 1, grid_w + pad *
+                         2 - 2, grid_h + pad * 2 - 2)
