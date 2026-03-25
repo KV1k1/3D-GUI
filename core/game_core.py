@@ -5,7 +5,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import random
 
-from core.map_data import CELLAR_LAYOUT, CELLAR_OVERLAY, LEVEL_DEFS
+from .map_data import CELLAR_LAYOUT, CELLAR_OVERLAY, LEVEL1_LAYOUT, LEVEL1_OVERLAY, LEVEL_DEFS
 
 
 @dataclass(frozen=True)
@@ -165,12 +165,12 @@ class GameCore:
     def __init__(self, level_id: str = 'level1'):
         self._event_callbacks: Dict[str, List[Callable[[dict], None]]] = {}
 
-        self.level_id = str(level_id or 'level2')
+        self.level_id = str(level_id or 'level1')
         level_def = LEVEL_DEFS.get(
-            self.level_id) or LEVEL_DEFS.get('level2') or {}
+            self.level_id) or LEVEL_DEFS.get('level1') or {}
 
-        self.layout = level_def.get('layout') or CELLAR_LAYOUT
-        self.overlay = level_def.get('overlay') or CELLAR_OVERLAY
+        self.layout = level_def.get('layout') or LEVEL1_LAYOUT
+        self.overlay = level_def.get('overlay') or LEVEL1_OVERLAY
         self._sector_grid_level = level_def.get('sectors')
         self.enabled_ghost_ids = list(level_def.get(
             'enabled_ghost_ids') or [1, 2, 3, 4, 5])
@@ -257,7 +257,6 @@ class GameCore:
         self.sector_signs: Dict[str, Tuple[Tuple[int, int], str]] = {}
         self.exit_sector_id: str = ''
         self._sector_grid: Optional[List[str]] = None
-        self._sector_filled: Dict[Tuple[int, int], str] = {}
         self.jail_painting: Optional[Tuple[Tuple[int, int], str]] = None
         self.current_sector_id: str = ''
         self._sector_popup_timer: float = 0.0
@@ -329,27 +328,23 @@ class GameCore:
                 c += 1
 
     def _init_runtime_entities(self) -> None:
-        self._spawn_coins()
-        self._spawn_key_fragments()
         self._init_gates()
         self._init_spikes()
+        self._init_jail_room_points()
+        self._spawn_coins()
+        self._spawn_key_fragments()
         self._init_ghosts()
 
     def sector_id_for_cell(self, cell: Tuple[int, int]) -> str:
         r, c = cell
-        sid = self._sector_filled.get(cell)
-        if sid:
-            return sid
-        if self._sector_grid is not None:
-            if 0 <= r < len(self._sector_grid) and 0 <= c < len(self._sector_grid[r]):
-                ch = self._sector_grid[r][c]
-                if 'A' <= ch <= 'H':
-                    return ch
+        if self._sector_grid is not None and 0 <= r < len(self._sector_grid) and 0 <= c < len(self._sector_grid[r]):
+            ch = self._sector_grid[r][c]
+            if 'A' <= ch <= 'H':
+                return ch
         return ''
 
     def _init_sectors(self) -> None:
         self._sector_grid = None
-        self._sector_filled = {}
         if isinstance(getattr(self, '_sector_grid_level', None), list):
             grid = getattr(self, '_sector_grid_level', None)
             if grid and all(isinstance(r, str) for r in grid):
@@ -362,49 +357,6 @@ class GameCore:
                     self._sector_grid = grid
             except Exception:
                 self._sector_grid = None
-
-        # Fill unlabeled walkable cells (e.g. jail interior spaces) from nearest labeled sector.
-        if self._sector_grid is not None:
-            from collections import deque
-
-            q = deque()
-            seen: Set[Tuple[int, int]] = set()
-            for r in range(min(self.height, len(self._sector_grid))):
-                row = self._sector_grid[r]
-                for c in range(min(self.width, len(row))):
-                    ch = row[c]
-                    if 'A' <= ch <= 'H':
-                        cell = (r, c)
-                        if cell in self.floors and cell not in self.walls:
-                            q.append(cell)
-                            seen.add(cell)
-
-            while q:
-                r, c = q.popleft()
-                src = self._sector_grid[r][c]
-                if 'A' <= src <= 'H':
-                    src_sid = src
-                else:
-                    src_sid = self._sector_filled.get((r, c), '')
-                if not src_sid:
-                    continue
-
-                for nr, nc in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
-                    cell = (nr, nc)
-                    if cell in seen:
-                        continue
-                    if cell not in self.floors or cell in self.walls:
-                        continue
-                    ch = ''
-                    if 0 <= nr < len(self._sector_grid) and 0 <= nc < len(self._sector_grid[nr]):
-                        ch = self._sector_grid[nr][nc]
-                    if 'A' <= ch <= 'H':
-                        seen.add(cell)
-                        q.append(cell)
-                        continue
-                    self._sector_filled[cell] = src_sid
-                    seen.add(cell)
-                    q.append(cell)
 
         if self.exit_cells:
             self.exit_sector_id = self.sector_id_for_cell(
@@ -520,38 +472,70 @@ class GameCore:
 
     def _spawn_coins(self) -> None:
         """Center-prioritized distribution for 3-block wide paths"""
-        # Get all valid floor cells (excluding specific gate areas)
-        valid_cells = []
-
-        # Create targeted exclusion zones for specific gate areas only
+        # Create exclusion zones: from S to nearest d, and from E to nearest d
         exclusion_zones = set()
 
-        # Add exact gate cells and immediate adjacent cells only
+        # Find all 'd' gate cells in layout
+        gate_cells = []
+        if hasattr(self, 'layout') and self.layout:
+            for r, row in enumerate(self.layout):
+                for c, char in enumerate(row):
+                    if char == 'd':
+                        gate_cells.append((r, c))
+
+        # Exclude from start cells to nearest gate
         for start_cell in self.start_cells:
-            exclusion_zones.add(start_cell)
-            # Only add immediate adjacent cells (1-cell radius)
-            for dr in range(-1, 2):
-                for dc in range(-1, 2):
-                    adjacent = (start_cell[0] + dr, start_cell[1] + dc)
-                    exclusion_zones.add(adjacent)
+            # Find nearest gate to this start
+            nearest_gate = min(gate_cells, key=lambda g: abs(
+                g[0] - start_cell[0]) + abs(g[1] - start_cell[1]))
+            # Add all cells in rectangle from start to gate
+            min_r, max_r = min(start_cell[0], nearest_gate[0]), max(
+                start_cell[0], nearest_gate[0])
+            min_c, max_c = min(start_cell[1], nearest_gate[1]), max(
+                start_cell[1], nearest_gate[1])
+            for r in range(min_r, max_r + 1):
+                for c in range(min_c, max_c + 1):
+                    exclusion_zones.add((r, c))
 
+        # Exclude from exit cells to nearest gate
         for exit_cell in self.exit_cells:
-            exclusion_zones.add(exit_cell)
-            # Level 1: exclude a larger area around the exit so coins never spawn near it.
-            # ("10 blocks from E" interpreted as a 10-cell Chebyshev radius.)
-            radius = 10 if str(getattr(self, 'level_id', '')
-                               ) == 'level1' else 1
-            for dr in range(-radius, radius + 1):
-                for dc in range(-radius, radius + 1):
-                    exclusion_zones.add((exit_cell[0] + dr, exit_cell[1] + dc))
+            # Find nearest gate to this exit
+            nearest_gate = min(gate_cells, key=lambda g: abs(
+                g[0] - exit_cell[0]) + abs(g[1] - exit_cell[1]))
+            # Add all cells in rectangle from exit to gate
+            min_r, max_r = min(exit_cell[0], nearest_gate[0]), max(
+                exit_cell[0], nearest_gate[0])
+            min_c, max_c = min(exit_cell[1], nearest_gate[1]), max(
+                exit_cell[1], nearest_gate[1])
+            for r in range(min_r, max_r + 1):
+                for c in range(min_c, max_c + 1):
+                    exclusion_zones.add((r, c))
 
-        # Add all gate cells to exclusion
-        for gate_cell in self.gate_cells:
-            exclusion_zones.add(gate_cell)
+        # Also exclude actual gate cells for safety
+        exclusion_zones.update(gate_cells)
+
+        # Force 1 coin in jail if jail exists
+        selected_coins: List[Tuple[int, int]] = []
+        jail_coin_forced = False
+        jail_coin_pos = None
+
+        jail_gate = self.gates.get('jail')
+        if jail_gate and self.jail_spawn_cell:
+            jail_coin_pos = self.jail_spawn_cell
+            jail_coin_forced = True
+        else:
+            jail_cell = self._find_jail_cell()
+            if jail_cell:
+                jail_coin_pos = jail_cell
+                jail_coin_forced = True
+
+        # Adjust total coins needed (subtract 1 if we forced jail coin)
+        total_coins = self.coins_required - (1 if jail_coin_forced else 0)
 
         # Collect valid cells and categorize by path width
         center_cells = []  # Block 2 (middle) in 3-block wide paths
         edge_cells = []    # Blocks 1 and 3 (edges) in paths
+        isolated_cells = []  # Cells not in 3-block paths
 
         for cell in self.floors:
             if cell in exclusion_zones:
@@ -559,8 +543,19 @@ class GameCore:
 
             r, c = cell
 
+            # Check if this cell has any wall neighbors (adjacent cells)
+            # Only exclude if it has 2+ wall neighbors (less restrictive)
+            wall_neighbors = 0
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                neighbor = (r + dr, c + dc)
+                if neighbor in self.walls:
+                    wall_neighbors += 1
+
+            # Skip cells with many wall neighbors, but allow cells with 0-1 wall neighbors
+            if wall_neighbors >= 2:
+                continue
+
             # Check if this is a center block in a 3-block wide path
-            # A cell is in the center if it has floor cells on both sides in at least one direction
             is_center_horizontal = False
             is_center_vertical = False
 
@@ -569,42 +564,50 @@ class GameCore:
             right_cell = (r, c + 1)
             if left_cell in self.floors and right_cell in self.floors:
                 if left_cell not in self.walls and right_cell not in self.walls:
-                    # Check if this forms a 3-block wide path
-                    left_left = (r, c - 2)
-                    right_right = (r, c + 2)
-                    if ((left_left in self.floors and left_left not in self.walls) or
-                            (right_right in self.floors and right_right not in self.walls)):
-                        is_center_horizontal = True
+                    # More lenient: just need left and right to be floor (not requiring 2-block extension)
+                    is_center_horizontal = True
 
             # Check vertical center (up and down are both floor)
             up_cell = (r - 1, c)
             down_cell = (r + 1, c)
             if up_cell in self.floors and down_cell in self.floors:
                 if up_cell not in self.walls and down_cell not in self.walls:
-                    # Check if this forms a 3-block wide path
-                    up_up = (r - 2, c)
-                    down_down = (r + 2, c)
-                    if ((up_up in self.floors and up_up not in self.walls) or
-                            (down_down in self.floors and down_down not in self.walls)):
-                        is_center_vertical = True
+                    # More lenient: just need up and down to be floor (not requiring 2-block extension)
+                    is_center_vertical = True
 
             # Categorize cell
             if is_center_horizontal or is_center_vertical:
                 center_cells.append(cell)
             else:
-                edge_cells.append(cell)
+                # Check if this is part of any 3-block path (even if not center)
+                horizontal_path = (left_cell in self.floors and left_cell not in self.walls and
+                                   right_cell in self.floors and right_cell not in self.walls)
+                vertical_path = (up_cell in self.floors and up_cell not in self.walls and
+                                 down_cell in self.floors and down_cell not in self.walls)
+
+                if horizontal_path or vertical_path:
+                    edge_cells.append(cell)
+                else:
+                    isolated_cells.append(cell)
 
         # Sort cells for systematic distribution
         center_cells.sort()
         edge_cells.sort()
+        isolated_cells.sort()
 
-        # Calculate coin allocation - prioritize center cells
+        # Calculate coin allocation - prioritize center and isolated cells
         total_coins = self.coins_required
-        center_coins = min(total_coins * 2 // 3,
-                           len(center_cells))  # ~2/3 in center
-        edge_coins = total_coins - center_coins
 
-        # Select coins from center cells first
+        # Prioritize center cells first, then isolated (good middle positions), then edges
+        center_coins = min(
+            total_coins // 2, len(center_cells))  # 50% in center
+        remaining_coins = total_coins - center_coins
+
+        isolated_coins = min(remaining_coins // 2,
+                             len(isolated_cells))  # 25% in isolated
+        edge_coins = remaining_coins - isolated_coins  # 25% in edges
+
+        # Select coins from different categories
         selected_coins: List[Tuple[int, int]] = []
 
         def pick_spaced(candidates: List[Tuple[int, int]], count: int, min_sep: float, rng: random.Random) -> List[Tuple[int, int]]:
@@ -625,48 +628,23 @@ class GameCore:
             return picked
 
         rng = random.Random(1337)
-        if center_cells and center_coins > 0:
+
+        # Try a different approach: select all coins from all categories at once
+        all_candidates = center_cells + isolated_cells + edge_cells
+
+        # Calculate coins needed AFTER accounting for jail coin
+        coins_to_spawn = total_coins - (1 if jail_coin_forced else 0)
+
+        if all_candidates and coins_to_spawn > 0:
             selected_coins.extend(pick_spaced(
-                center_cells, center_coins, min_sep=6.0, rng=rng))
-        if edge_cells and edge_coins > 0:
-            selected_coins.extend(pick_spaced(
-                edge_cells, edge_coins, min_sep=5.0, rng=rng))
-
-        # Special handling for jail room - ensure 1-2 coins there
-        jail_coins_added = 0
-        jail_gate = self.gates.get('jail')
-        if jail_gate and self.jail_spawn_cell:
-            # Check if jail spawn area already has coins
-            jail_area = set()
-            for gate_cell in jail_gate.cells:
-                for dr in range(-2, 3):  # 5x5 area around jail gate
-                    for dc in range(-2, 3):
-                        nearby = (gate_cell[0] + dr, gate_cell[1] + dc)
-                        if nearby in self.floors and nearby not in exclusion_zones:
-                            jail_area.add(nearby)
-
-            # Count existing coins in jail area
-            existing_jail_coins = [
-                cell for cell in selected_coins if cell in jail_area]
-
-            # If no coins in jail, add 1-2
-            if len(existing_jail_coins) == 0 and jail_area:
-                # Add jail spawn cell if available
-                if self.jail_spawn_cell in jail_area:
-                    # Replace a random coin with jail spawn coin
-                    if selected_coins:
-                        replace_index = rng.randint(0, len(selected_coins) - 1)
-                        selected_coins[replace_index] = self.jail_spawn_cell
-                        jail_coins_added = 1
-                # Add second coin if space allows
-                if len(jail_area) > 1 and len(selected_coins) < total_coins:
-                    other_jail_cells = list(jail_area - {self.jail_spawn_cell})
-                    if other_jail_cells:
-                        selected_coins.append(other_jail_cells[0])
-                        jail_coins_added = 2
+                all_candidates, coins_to_spawn, min_sep=4.0, rng=rng))
 
         # Ensure we have exactly the required number of coins
         selected_coins = selected_coins[:total_coins]
+
+        # Add jail coin at the beginning of the list (highest priority)
+        if jail_coin_forced and jail_coin_pos:
+            selected_coins.insert(0, jail_coin_pos)
 
         # Create coin objects
         self.coins = {cell: Coin(cell=cell, taken=False)
@@ -1541,12 +1519,12 @@ class GameCore:
         self._trigger_event('sent_to_jail', {'reason': reason})
 
     def _find_jail_cell(self) -> Optional[Tuple[int, int]]:
-        # Heuristic: find a large open pocket near center rows.
-        for r in range(self.height // 3, self.height * 2 // 3):
-            for c in range(self.width // 3, self.width * 2 // 3):
-                if (r, c) in self.floors and (r, c) not in self.gate_cells:
-                    # Ensure surrounded by walls-ish
-                    return (r, c)
+        # Direct search for 'J' character in the layout
+        if hasattr(self, 'layout') and self.layout:
+            for r, row in enumerate(self.layout):
+                for c, char in enumerate(row):
+                    if char == 'J':
+                        return (r, c)
         return None
 
     def _distance_xz(self, ax: float, az: float, bx: float, bz: float) -> float:

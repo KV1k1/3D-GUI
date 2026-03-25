@@ -1,100 +1,676 @@
+"""
+renderer_opengl.py  –  PySide6 OpenGL renderer using modern core profile.
+
+Identical rendering pipeline to kivy_renderer.py:
+  - GLSL shaders (version 330 core)
+  - VAO / VBO geometry
+  - Same _GeoBuilder helper
+  - Same fog / camera math
+  - No legacy fixed-function (no glBegin/glEnd, no GL_LIGHTING, no gluLookAt)
+
+Texture loading uses QImage (PySide6) instead of Kivy CoreImage.
+Text textures use QPainter (PySide6) instead of Kivy CoreLabel.
+"""
+
+from __future__ import annotations
+
 import ctypes
 import math
 import os
 import time
-from typing import List, Optional, Tuple
+from array import array as _array
+from typing import Dict, List, Optional, Tuple
+
+from OpenGL.GL import *
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter
-from OpenGL.GL import *
-from OpenGL.GLU import gluLookAt, gluPerspective
 
 from core.game_core import GameCore
 
 
+# ---------------------------------------------------------------------------
+# Constants — identical to kivy_renderer.py
+# ---------------------------------------------------------------------------
+_FOG_START = 22.0
+_FOG_END = 40.0
+_SKY_COLOR = (0.05, 0.05, 0.08, 1.0)
+_CAMERA_H = 1.6
+_FOV_DEG = 60.0
+_NEAR = 0.15
+_FAR = 80.0
+_ENTITY_R2 = 18.0 ** 2
+_GLOW_R2 = 12.0 ** 2
+
+
+# ---------------------------------------------------------------------------
+# GLSL shaders — byte-for-byte identical to kivy_renderer.py
+# ---------------------------------------------------------------------------
+_TEXTURED_VERT = b"""
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec2 aUV;
+out vec2 vUV;
+out float vFogFactor;
+uniform mat4 uMVP;
+uniform float uFogStart;
+uniform float uFogEnd;
+void main(){
+    vec4 world = uMVP * vec4(aPos, 1.0);
+    gl_Position = world;
+    float dist = abs(world.z);
+    vFogFactor = clamp((uFogEnd - dist) / (uFogEnd - uFogStart), 0.0, 1.0);
+    vUV = aUV;
+}
+"""
+
+_TEXTURED_FRAG = b"""
+#version 330 core
+in vec2 vUV;
+in float vFogFactor;
+out vec4 FragColor;
+uniform sampler2D uTex;
+uniform vec4 uFogColor;
+void main(){
+    vec4 texColor = texture(uTex, vUV);
+    FragColor = mix(uFogColor, texColor, vFogFactor);
+}
+"""
+
+_COLORED_VERT = b"""
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec4 aColor;
+out vec4 vColor;
+out float vFogFactor;
+uniform mat4 uMVP;
+uniform float uFogStart;
+uniform float uFogEnd;
+void main(){
+    vec4 world = uMVP * vec4(aPos, 1.0);
+    gl_Position = world;
+    float dist = abs(world.z);
+    vFogFactor = clamp((uFogEnd - dist) / (uFogEnd - uFogStart), 0.0, 1.0);
+    vColor = aColor;
+}
+"""
+
+_COLORED_FRAG = b"""
+#version 330 core
+in vec4 vColor;
+in float vFogFactor;
+out vec4 FragColor;
+uniform vec4 uFogColor;
+void main(){
+    FragColor = mix(uFogColor, vColor, vFogFactor);
+}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Matrix helpers (column-major) — identical to kivy_renderer.py
+# ---------------------------------------------------------------------------
+def _mat_identity() -> List[float]:
+    return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+
+
+def _mat_mul(a: List[float], b: List[float]) -> List[float]:
+    out = [0.0]*16
+    for col in range(4):
+        for row in range(4):
+            s = 0.0
+            for k in range(4):
+                s += a[row + k*4] * b[k + col*4]
+            out[row + col*4] = s
+    return out
+
+
+def _perspective(fov_deg: float, aspect: float, near: float, far: float) -> List[float]:
+    f = 1.0 / math.tan(math.radians(fov_deg) / 2.0)
+    nf = 1.0 / (near - far)
+    return [
+        f/aspect, 0,  0,              0,
+        0,        f,  0,              0,
+        0,        0,  (far+near)*nf, -1,
+        0,        0,  2*far*near*nf,  0,
+    ]
+
+
+def _look_at(ex, ey, ez, cx, cy, cz, ux, uy, uz) -> List[float]:
+    fx, fy, fz = cx-ex, cy-ey, cz-ez
+    fl = math.sqrt(fx*fx+fy*fy+fz*fz) or 1e-9
+    fx /= fl
+    fy /= fl
+    fz /= fl
+    rx = fy*uz - fz*uy
+    ry = fz*ux - fx*uz
+    rz = fx*uy - fy*ux
+    rl = math.sqrt(rx*rx+ry*ry+rz*rz) or 1e-9
+    rx /= rl
+    ry /= rl
+    rz /= rl
+    upx = ry*fz - rz*fy
+    upy = rz*fx - rx*fz
+    upz = rx*fy - ry*fx
+    return [
+        rx,  upx, -fx, 0,
+        ry,  upy, -fy, 0,
+        rz,  upz, -fz, 0,
+        -(rx*ex+ry*ey+rz*ez), -(upx*ex+upy*ey+upz*ez), (fx*ex+fy*ey+fz*ez), 1,
+    ]
+
+
+def _rot_pt_x(x, y, z, a):
+    c = math.cos(a)
+    s = math.sin(a)
+    return (x, y*c - z*s, y*s + z*c)
+
+
+def _rot_pt_y(x, y, z, a):
+    c = math.cos(a)
+    s = math.sin(a)
+    return (x*c + z*s, y, -x*s + z*c)
+
+
+def _rot_pt_z(x, y, z, a):
+    c = math.cos(a)
+    s = math.sin(a)
+    return (x*c - y*s, x*s + y*c, z)
+
+
+# ---------------------------------------------------------------------------
+# Low-level GL helpers
+# ---------------------------------------------------------------------------
+def _compile_shader(src: bytes, kind: int) -> int:
+    sh = glCreateShader(kind)
+    glShaderSource(sh, src)
+    glCompileShader(sh)
+    if not glGetShaderiv(sh, GL_COMPILE_STATUS):
+        raise RuntimeError(glGetShaderInfoLog(sh).decode())
+    return sh
+
+
+def _build_program(vert: bytes, frag: bytes) -> int:
+    vs = _compile_shader(vert, GL_VERTEX_SHADER)
+    fs = _compile_shader(frag, GL_FRAGMENT_SHADER)
+    prog = glCreateProgram()
+    glAttachShader(prog, vs)
+    glAttachShader(prog, fs)
+    glLinkProgram(prog)
+    if not glGetProgramiv(prog, GL_LINK_STATUS):
+        raise RuntimeError(glGetProgramInfoLog(prog).decode())
+    return prog
+
+
+def _upload_vao_textured(raw: _array) -> Tuple[int, int]:
+    """Upload (x,y,z,u,v) float array → (vao, vtx_count)."""
+    if not raw:
+        return 0, 0
+    vtx = len(raw) // 5
+    data = (ctypes.c_float * len(raw))(*raw)
+    stride = 5 * 4
+    vao = glGenVertexArrays(1)
+    glBindVertexArray(vao)
+    vbo = glGenBuffers(1)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(data), data, GL_STATIC_DRAW)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+    glEnableVertexAttribArray(0)
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
+                          stride, ctypes.c_void_p(12))
+    glEnableVertexAttribArray(1)
+    glBindVertexArray(0)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    return int(vao), vtx
+
+
+def _update_dynamic_vao_textured(vao: int, vbo: int, raw: _array) -> Tuple[int, int]:
+    if not raw:
+        return vao, 0
+    vtx = len(raw) // 5
+    data = (ctypes.c_float * len(raw))(*raw)
+    stride = 5 * 4
+    if vao == 0:
+        vao = glGenVertexArrays(1)
+    glBindVertexArray(vao)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(data), data, GL_DYNAMIC_DRAW)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+    glEnableVertexAttribArray(0)
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
+                          stride, ctypes.c_void_p(12))
+    glEnableVertexAttribArray(1)
+    glBindVertexArray(0)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    return int(vao), int(vtx)
+
+
+def _upload_vao_colored(raw: _array) -> Tuple[int, int]:
+    """Upload (x,y,z,r,g,b,a) float array → (vao, vtx_count)."""
+    if not raw:
+        return 0, 0
+    vtx = len(raw) // 7
+    data = (ctypes.c_float * len(raw))(*raw)
+    stride = 7 * 4
+    vao = glGenVertexArrays(1)
+    glBindVertexArray(vao)
+    vbo = glGenBuffers(1)
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(data), data, GL_STATIC_DRAW)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+    glEnableVertexAttribArray(0)
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE,
+                          stride, ctypes.c_void_p(12))
+    glEnableVertexAttribArray(1)
+    glBindVertexArray(0)
+    glBindBuffer(GL_ARRAY_BUFFER, 0)
+    return int(vao), vtx
+
+
+def _delete_vao(vao: int) -> None:
+    if vao:
+        try:
+            glDeleteVertexArrays(1, [vao])
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Geometry builder — identical to kivy_renderer.py _GeoBuilder
+# ---------------------------------------------------------------------------
+class _GeoBuilder:
+    def __init__(self, textured: bool):
+        self._tex = textured
+        self.data: _array = _array('f')
+
+    def quad_tex(self, p0, p1, p2, p3, uv0, uv1, uv2, uv3):
+        for p, uv in [(p0, uv0), (p1, uv1), (p2, uv2), (p0, uv0), (p2, uv2), (p3, uv3)]:
+            self.data.extend([p[0], p[1], p[2], uv[0], uv[1]])
+
+    def quad_col(self, p0, p1, p2, p3, c):
+        for p in [p0, p1, p2, p0, p2, p3]:
+            self.data.extend([p[0], p[1], p[2], c[0], c[1], c[2], c[3]])
+
+    def tri_col(self, p0, p1, p2, c):
+        x0, y0, z0 = p0
+        x1, y1, z1 = p1
+        x2, y2, z2 = p2
+        r, g, b, a = c
+        self.data.extend([x0, y0, z0, r, g, b, a, x1, y1, z1,
+                         r, g, b, a, x2, y2, z2, r, g, b, a])
+
+    def tri_col_vc(self, p0, c0, p1, c1, p2, c2):
+        x0, y0, z0 = p0
+        x1, y1, z1 = p1
+        x2, y2, z2 = p2
+        r0, g0, b0, a0 = c0
+        r1, g1, b1, a1 = c1
+        r2, g2, b2, a2 = c2
+        self.data.extend([x0, y0, z0, r0, g0, b0, a0, x1, y1,
+                         z1, r1, g1, b1, a1, x2, y2, z2, r2, g2, b2, a2])
+
+    def cube_col(self, cx, cy, cz, sx, sy, sz, c):
+        x0, x1 = cx-sx, cx+sx
+        y0, y1 = cy-sy, cy+sy
+        z0, z1 = cz-sz, cz+sz
+        self.quad_col((x0, y0, z1), (x1, y0, z1),
+                      (x1, y1, z1), (x0, y1, z1), c)
+        self.quad_col((x1, y0, z0), (x0, y0, z0),
+                      (x0, y1, z0), (x1, y1, z0), c)
+        self.quad_col((x0, y0, z0), (x0, y0, z1),
+                      (x0, y1, z1), (x0, y1, z0), c)
+        self.quad_col((x1, y0, z1), (x1, y0, z0),
+                      (x1, y1, z0), (x1, y1, z1), c)
+        self.quad_col((x0, y1, z1), (x1, y1, z1),
+                      (x1, y1, z0), (x0, y1, z0), c)
+        self.quad_col((x0, y0, z0), (x1, y0, z0),
+                      (x1, y0, z1), (x0, y0, z1), c)
+
+    def disc_fan_col(self, cx, cy, cz, radius, segments, c, normal_up=True):
+        TWO_PI = math.pi * 2.0
+        for i in range(segments):
+            a0 = (i/segments)*TWO_PI
+            a1 = ((i+1)/segments)*TWO_PI
+            x0 = cx+math.cos(a0)*radius
+            z0 = cz+math.sin(a0)*radius
+            x1 = cx+math.cos(a1)*radius
+            z1 = cz+math.sin(a1)*radius
+            if normal_up:
+                self.tri_col((cx, cy, cz), (x0, cy, z0), (x1, cy, z1), c)
+            else:
+                self.tri_col((cx, cy, cz), (x1, cy, z1), (x0, cy, z0), c)
+
+    def disc_fan_tex(self, cx, cy, cz, radius, segments, uv_center=(0.5, 0.5), uv_radius=0.5, normal_up=True):
+        TWO_PI = math.pi * 2.0
+        uc, vc = uv_center
+        for i in range(segments):
+            a0 = (i/segments)*TWO_PI
+            a1 = ((i+1)/segments)*TWO_PI
+            x0 = cx+math.cos(a0)*radius
+            z0 = cz+math.sin(a0)*radius
+            x1 = cx+math.cos(a1)*radius
+            z1 = cz+math.sin(a1)*radius
+            u0 = uc+math.cos(a0)*uv_radius
+            v0 = vc+math.sin(a0)*uv_radius
+            u1 = uc+math.cos(a1)*uv_radius
+            v1 = vc+math.sin(a1)*uv_radius
+            if normal_up:
+                self.data.extend([cx, cy, cz, uc, vc, x0, cy,
+                                 z0, u0, v0, x1, cy, z1, u1, v1])
+            else:
+                self.data.extend([cx, cy, cz, uc, vc, x1, cy,
+                                 z1, u1, v1, x0, cy, z0, u0, v0])
+
+    def cylinder_side_col(self, cx, cy0, cz, cy1, radius, segments, c):
+        TWO_PI = math.pi * 2.0
+        for i in range(segments):
+            a0 = (i/segments)*TWO_PI
+            a1 = ((i+1)/segments)*TWO_PI
+            x0 = cx+math.cos(a0)*radius
+            z0 = cz+math.sin(a0)*radius
+            x1 = cx+math.cos(a1)*radius
+            z1 = cz+math.sin(a1)*radius
+            self.quad_col((x0, cy0, z0), (x1, cy0, z1),
+                          (x1, cy1, z1), (x0, cy1, z0), c)
+
+    def coin_col(self, cx, cy, cz, radius=0.14, thickness=0.04, segments=16):
+        y0, y1 = cy-thickness/2.0, cy+thickness/2.0
+        TWO_PI = math.pi * 2.0
+        g1 = (1.0, 0.84, 0.18, 0.98)
+        g2 = (240/255, 168/255, 48/255, 0.98)
+        for i in range(segments):
+            a0 = (i/segments)*TWO_PI
+            a1 = ((i+1)/segments)*TWO_PI
+            x0 = cx+math.cos(a0)*radius
+            z0 = cz+math.sin(a0)*radius
+            x1 = cx+math.cos(a1)*radius
+            z1 = cz+math.sin(a1)*radius
+            self.quad_col((x0, y0, z0), (x1, y0, z1), (x1, y1, z1),
+                          (x0, y1, z0), g1 if i % 2 == 0 else g2)
+        self.disc_fan_col(cx, y1, cz, radius, segments, g1)
+        self.disc_fan_col(cx, y0, cz, radius, segments, g1, normal_up=False)
+
+    def ring_col(self, cx, cy, cz, outer_r, inner_r, thickness, segments, color):
+        TWO_PI = math.pi * 2
+        for i in range(segments):
+            a0, a1 = TWO_PI*(i/segments), TWO_PI*((i+1)/segments)
+            c0, s0, c1, s1 = math.cos(a0), math.sin(
+                a0), math.cos(a1), math.sin(a1)
+            self.quad_col(
+                (cx+outer_r*c0, cy-thickness, cz+outer_r*s0),
+                (cx+outer_r*c1, cy-thickness, cz+outer_r*s1),
+                (cx+outer_r*c1, cy+thickness, cz+outer_r*s1),
+                (cx+outer_r*c0, cy+thickness, cz+outer_r*s0), color)
+            self.quad_col(
+                (cx+inner_r*c1, cy-thickness, cz+inner_r*s1),
+                (cx+inner_r*c0, cy-thickness, cz+inner_r*s0),
+                (cx+inner_r*c0, cy+thickness, cz+inner_r*s0),
+                (cx+inner_r*c1, cy+thickness, cz+inner_r*s1), color)
+            self.quad_col(
+                (cx+inner_r*c0, cy+thickness, cz+inner_r*s0),
+                (cx+inner_r*c1, cy+thickness, cz+inner_r*s1),
+                (cx+outer_r*c1, cy+thickness, cz+outer_r*s1),
+                (cx+outer_r*c0, cy+thickness, cz+outer_r*s0), color)
+            self.quad_col(
+                (cx+outer_r*c0, cy-thickness, cz+outer_r*s0),
+                (cx+outer_r*c1, cy-thickness, cz+outer_r*s1),
+                (cx+inner_r*c1, cy-thickness, cz+inner_r*s1),
+                (cx+inner_r*c0, cy-thickness, cz+inner_r*s0), color)
+
+    def key_col_custom(self, cx, cy, cz, scale=1.0, color=(0.72, 0.72, 0.82, 0.95)):
+        s = scale
+        self.ring_col(cx+0.23*s, cy+0.06*s, cz, 0.16 *
+                      s, 0.11*s, 0.035*s, 24, color)
+        self.cube_col(cx-0.12*s, cy+0.06*s, cz, 0.26*s, 0.03*s, 0.04*s, color)
+        for tx, th in ((-0.34*s, 0.12*s), (-0.25*s, 0.09*s), (-0.18*s, 0.07*s)):
+            self.cube_col(cx+tx, cy+0.02*s, cz, 0.03*s, th*0.5, 0.04*s, color)
+
+    def ghost_col(self, cx, cy, cz, scale, color, anim_t, segments: int = 26):
+        r = 0.20 * scale
+        seg = segments
+        body_layers = 11
+        tail_layers = 8
+        TWO_PI = math.pi * 2.0
+
+        def y_and_r(t):
+            if t < 0.5:
+                return r*0.62*math.cos(t*math.pi), r*0.95*math.sin(t*math.pi)
+            return -r*0.25*(t-0.5)*2.0, r*0.95
+
+        for layer in range(1, body_layers):
+            y_prev, r_prev = y_and_r((layer-1)/(body_layers-1))
+            y_curr, r_curr = y_and_r(layer/(body_layers-1))
+            for i in range(seg):
+                a0 = (i/seg)*TWO_PI
+                a1 = ((i+1)/seg)*TWO_PI
+                ca0, sa0 = math.cos(a0), math.sin(a0)
+                ca1, sa1 = math.cos(a1), math.sin(a1)
+                self.quad_col(
+                    (cx+ca0*r_prev, cy+y_prev, cz+sa0*r_prev),
+                    (cx+ca1*r_prev, cy+y_prev, cz+sa1*r_prev),
+                    (cx+ca1*r_curr, cy+y_curr, cz+sa1*r_curr),
+                    (cx+ca0*r_curr, cy+y_curr, cz+sa0*r_curr), color)
+
+        for layer in range(tail_layers):
+            lr = layer/tail_layers
+            pr = (layer-1)/tail_layers
+            base_r = r*0.95*(1.0-lr*0.35)
+            wave_amp = r*(0.08+0.14*lr)
+            y_curr_abs = cy - r*0.52 - lr*r*0.48
+            if layer == 0:
+                y_prev_abs = cy - r*0.25
+                pr_prev = r*0.95
+            else:
+                y_prev_abs = cy - r*0.52 - pr*r*0.48
+                pr_prev = r*0.95*(1.0-pr*0.35)
+            prev_amp = r*(0.08+0.14*pr)
+            for i in range(seg):
+                a = (i/seg)*TWO_PI
+                a1 = ((i+1)/seg)*TWO_PI
+                sk_c0 = (math.sin(a*3.0+anim_t*2.4+layer*0.55)*wave_amp
+                         + math.sin(a*7.0-anim_t*1.7+layer*0.35)*(wave_amp*0.55))
+                sk_c1 = (math.sin(a1*3.0+anim_t*2.4+layer*0.55)*wave_amp
+                         + math.sin(a1*7.0-anim_t*1.7+layer*0.35)*(wave_amp*0.55))
+                if layer == 0:
+                    sk_p0 = sk_p1 = 0.0
+                else:
+                    sk_p0 = (math.sin(a*3.0+anim_t*2.4+(layer-1)*0.55)*prev_amp
+                             + math.sin(a*7.0-anim_t*1.7+(layer-1)*0.35)*(prev_amp*0.55))
+                    sk_p1 = (math.sin(a1*3.0+anim_t*2.4+(layer-1)*0.55)*prev_amp
+                             + math.sin(a1*7.0-anim_t*1.7+(layer-1)*0.35)*(prev_amp*0.55))
+                rc0 = max(r*0.02, base_r+sk_c0)
+                rc1 = max(r*0.02, base_r+sk_c1)
+                rp0 = max(r*0.02, pr_prev+sk_p0)
+                rp1 = max(r*0.02, pr_prev+sk_p1)
+                ca0, sa0 = math.cos(a), math.sin(a)
+                ca1, sa1 = math.cos(a1), math.sin(a1)
+                self.quad_col(
+                    (cx+ca0*rp0, y_prev_abs, cz+sa0*rp0),
+                    (cx+ca1*rp1, y_prev_abs, cz+sa1*rp1),
+                    (cx+ca1*rc1, y_curr_abs, cz+sa1*rc1),
+                    (cx+ca0*rc0, y_curr_abs, cz+sa0*rc0), color)
+
+        BLACK = (0.06, 0.06, 0.08, 0.96)
+        eye_y = cy+r*0.22
+        eye_z_f = r*1.05
+        eye_x_o = r*0.34
+        ew = r*0.22
+        eh = r*0.28
+        for ex in (-eye_x_o, eye_x_o):
+            x0, x1 = cx+ex-ew, cx+ex+ew
+            y0, y1 = eye_y-eh, eye_y+eh
+            ez = cz+eye_z_f
+            self.quad_col((x0, y0, ez), (x1, y0, ez),
+                          (x1, y1, ez), (x0, y1, ez), BLACK)
+
+    def spike_col(self, cx, cz, height):
+        if height <= 0.02:
+            return
+        base = 0.18
+        RED = (0.85, 0.15, 0.15, 1.0)
+        y_base = 0.01
+        y_tip = height
+        self.disc_fan_col(cx, y_base, cz, base, 8, RED)
+        TWO_PI = math.pi * 2.0
+        for i in range(8):
+            a0 = (i/8)*TWO_PI
+            a1 = ((i+1)/8)*TWO_PI
+            x0 = cx+math.cos(a0)*base
+            z0 = cz+math.sin(a0)*base
+            x1 = cx+math.cos(a1)*base
+            z1 = cz+math.sin(a1)*base
+            self.tri_col((x0, y_base, z0), (x1, y_base, z1),
+                         (cx, y_tip, cz), RED)
+
+    def gate_bars_col(self, gx, gy_center, gz, wall_h, y_offset, is_jail):
+        GRAY = (0.70, 0.70, 0.75, 1.0)
+        bar_h = wall_h
+        bar_yc = gy_center + y_offset
+        for i in range(-2, 3):
+            bx = gx+i*0.18 if is_jail else gx
+            bz = gz if is_jail else gz+i*0.18
+            self.cube_col(bx, bar_yc, bz, 0.035, bar_h*0.5, 0.06, GRAY)
+        cb = (0.65, 0.65, 0.70, 1.0)
+        if is_jail:
+            self.cube_col(gx, bar_yc+bar_h*0.42, gz, 0.47, 0.06, 0.08, cb)
+        else:
+            self.cube_col(gx, bar_yc+bar_h*0.42, gz, 0.08, 0.06, 0.47, cb)
+
+    def platform_col(self, cx, cy, cz):
+        BROWN = (0.6, 0.4, 0.2, 1.0)
+        DARK = (0.4, 0.3, 0.15, 1.0)
+        self.cube_col(cx, cy+0.05, cz, 0.4, 0.05, 0.4, BROWN)
+        self.cube_col(cx, cy+0.15, cz+0.35, 0.41, 0.10, 0.025, DARK)
+        self.cube_col(cx, cy+0.15, cz-0.35, 0.41, 0.10, 0.025, DARK)
+        self.cube_col(cx+0.35, cy+0.15, cz, 0.025, 0.10, 0.41, DARK)
+        self.cube_col(cx-0.35, cy+0.15, cz, 0.025, 0.10, 0.41, DARK)
+
+    def table_book_col(self, cx, cy, cz, glow_pulse):
+        BROWN = (0.35, 0.22, 0.10, 1.0)
+        BOOK = (0.12, 0.12, 0.14, 1.0)
+        self.cube_col(cx, cy+0.40, cz, 0.425, 0.04, 0.30, BROWN)
+        for lx in (-0.35, 0.35):
+            for lz in (-0.22, 0.22):
+                self.cube_col(cx+lx, cy+0.20, cz+lz, 0.04, 0.20, 0.04, BROWN)
+        self.cube_col(cx, cy+0.48, cz, 0.14, 0.02, 0.10, BOOK)
+        GLOW = (0.95, 0.85, 0.35, min(0.6, glow_pulse))
+        self.disc_fan_col(cx, cy+0.01, cz, 0.55, 16, GLOW)
+
+    def lamp_col(self, cx, cz, ceil_h):
+        DARK = (0.10, 0.10, 0.12, 1.0)
+        METAL = (0.18, 0.18, 0.22, 1.0)
+        WARM = (0.98, 0.95, 0.82, 1.0)
+        self.cube_col(cx, ceil_h-0.15+0.18, cz, 0.015, 0.18, 0.015, DARK)
+        self.cube_col(cx, ceil_h-0.15+0.02, cz, 0.13, 0.05, 0.13, METAL)
+        self.cube_col(cx, ceil_h-0.15-0.02, cz, 0.05, 0.035, 0.05, WARM)
+
+    def arrow3d_col(self, cx, cy, cz, *, col, shaft_r=0.12, shaft_h=0.60, head_r=0.30, head_h=0.42, seg=32):
+        r, g, b, a = col
+        shaft_top = shaft_h*0.5
+        shaft_bot = -shaft_h*0.5
+        tip_y = shaft_bot-head_h
+        TWO_PI = math.pi*2.0
+        for i in range(seg):
+            a0 = (i/seg)*TWO_PI
+            a1 = ((i+1)/seg)*TWO_PI
+            ca0, sa0 = math.cos(a0), math.sin(a0)
+            ca1, sa1 = math.cos(a1), math.sin(a1)
+            self.quad_col(
+                (cx+ca0*shaft_r, cy+shaft_top, cz+sa0*shaft_r),
+                (cx+ca1*shaft_r, cy+shaft_top, cz+sa1*shaft_r),
+                (cx+ca1*shaft_r, cy+shaft_bot, cz+sa1*shaft_r),
+                (cx+ca0*shaft_r, cy+shaft_bot, cz+sa0*shaft_r), (r, g, b, a))
+        apex = (cx, cy+tip_y, cz)
+        for i in range(seg):
+            a0 = (i/seg)*TWO_PI
+            a1 = ((i+1)/seg)*TWO_PI
+            ca0, sa0 = math.cos(a0), math.sin(a0)
+            ca1, sa1 = math.cos(a1), math.sin(a1)
+            self.tri_col(
+                (cx+ca0*head_r, cy+shaft_bot, cz+sa0*head_r),
+                (cx+ca1*head_r, cy+shaft_bot, cz+sa1*head_r),
+                apex, (r, g, b, a))
+
+    def sign_col(self, cx, cy, cz, facing, w, h):
+        DARK = (0.10, 0.10, 0.12, 0.92)
+        off = 0.482
+        if facing == 'N':
+            z = cz-off
+            self.quad_col((cx-w, cy-h, z), (cx+w, cy-h, z),
+                          (cx+w, cy+h, z), (cx-w, cy+h, z), DARK)
+        elif facing == 'S':
+            z = cz+off
+            self.quad_col((cx+w, cy-h, z), (cx-w, cy-h, z),
+                          (cx-w, cy+h, z), (cx+w, cy+h, z), DARK)
+        elif facing == 'W':
+            x = cx-off
+            self.quad_col((x, cy-h, cz+w), (x, cy-h, cz-w),
+                          (x, cy+h, cz-w), (x, cy+h, cz+w), DARK)
+        else:
+            x = cx+off
+            self.quad_col((x, cy-h, cz-w), (x, cy-h, cz+w),
+                          (x, cy+h, cz+w), (x, cy+h, cz-w), DARK)
+
+
+# ---------------------------------------------------------------------------
+# Main renderer class
+# ---------------------------------------------------------------------------
 class OpenGLRenderer:
     def __init__(self, core: GameCore):
         self.core = core
         self.width = 800
         self.height = 600
-        self.camera_height = 1.6
-        self.fov = 60.0
-        self.near_plane = 0.15
-        self.far_plane = 42.0
 
-        self._anim_clock_s = 0.0
-        self._last_anim_elapsed_s: Optional[float] = None
+        self._fast_mode: bool = True
+        self._anim_t: float = 0.0
+        self._last_anim_t: Optional[float] = None
 
-        self._fog_enabled = True
-        self._fog_start = 22.0
-        self._fog_end = 40.0
+        # Shader programs
+        self._tex_prog: int = 0
+        self._col_prog: int = 0
 
-        self._fast_mode = True
-
-        self.sky_color = (0.05, 0.05, 0.08, 1.0)
-
-        self._tex_wall: Optional[int] = None
+        # Textures
+        self._tex_wall:  Optional[int] = None
         self._tex_floor: Optional[int] = None
-        self._tex_coin: Optional[int] = None
-
-        self._static_quads: List[Tuple[float, float, Optional[int],
-                                       Tuple[Tuple[float, float, float, float, float], ...]]] = []
-
-        self._world_vbo_floor: Optional[int] = None
-        self._world_vbo_wall: Optional[int] = None
-        self._world_floor_vertex_count: int = 0
-        self._world_wall_vertex_count: int = 0
-
-        self._chunk_size = 12
-        self._chunk_vbos: dict[tuple[int, int],
-                               tuple[Optional[int], int, Optional[int], int]] = {}
-
-        self._ghost_body_vbo: Optional[int] = None
-        self._ghost_body_vertex_count: int = 0
-        self._ghost_eye_vbo: Optional[int] = None
-        self._ghost_eye_vertex_count: int = 0
-        self._ghost_tail_vbos: list[Optional[int]] = []
-        self._ghost_tail_vertex_counts: list[int] = []
-        self._ghost_tail_pose_count: int = 0
-
-        self._anim_t = 0.0
-
-        self._text_texture_cache: dict[str, int] = {}
+        self._tex_coin:  Optional[int] = None
         self._jail_map_texture: Optional[int] = None
 
-    # ------------------------------------------------------------------ setup
+        # Static world VAOs
+        self._wall_vao: int = 0
+        self._wall_vtx: int = 0
+        self._floor_vao: int = 0
+        self._floor_vtx: int = 0
+
+        # Dynamic colored VAO (rebuilt every frame for entities)
+        self._dyn_vao: int = 0
+        self._dyn_vbo: int = 0
+
+        # Dynamic textured VAO (coin decals, sector signs, jail painting)
+        self._dyn_tex_vao: int = 0
+        self._dyn_tex_vtx: int = 0
+        self._dyn_tex_vbo: int = 0
+
+        # Text texture cache — same 200-entry LRU as kivy_renderer
+        self._text_tex_cache: Dict[str, Tuple[int, int, int]] = {}
+
+        # Lamp VAO (static per level)
+        self._lamp_vao: int = 0
+        self._lamp_vtx: int = 0
+        self._lamps: List[Tuple[int, int]] = []
+
+        self._gl_ready = False
+
+    # ------------------------------------------------------------------
+    # Initialise
+    # ------------------------------------------------------------------
 
     def initialize(self) -> None:
-        """Initialize OpenGL resources and load textures."""
-        start_time = time.perf_counter()
-
-        # Always reset animation state so a reused renderer doesn't carry over
-        # elapsed time from a previous level, which would cause entities to
-        # snap to the wrong animation phase on the first frame.
-        self._anim_clock_s = 0.0
-        self._last_anim_elapsed_s = None
         self._anim_t = 0.0
+        self._last_anim_t = None
 
-        glEnable(GL_DEPTH_TEST)
-        glDepthFunc(GL_LEQUAL)
-        glClearDepth(1.0)
-        glDisable(GL_CULL_FACE)
-        glEnable(GL_LIGHTING)
-        glEnable(GL_LIGHT0)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glLightfv(GL_LIGHT0, 0x1203, [10.0, 12.0, 10.0, 1.0])
+        self._tex_prog = _build_program(_TEXTURED_VERT, _TEXTURED_FRAG)
+        self._col_prog = _build_program(_COLORED_VERT,  _COLORED_FRAG)
 
-        if self._fog_enabled:
-            glEnable(GL_FOG)
-            glFogi(GL_FOG_MODE, GL_LINEAR)
-            glFogf(GL_FOG_START, float(self._fog_start))
-            glFogf(GL_FOG_END, float(self._fog_end))
-            glFogfv(GL_FOG_COLOR, [*self.sky_color[:3], 1.0])
-        else:
-            glDisable(GL_FOG)
-
-        glEnable(GL_TEXTURE_2D)
         self._tex_wall = self._load_texture(
             os.path.join('assets', 'image.png'))
         self._tex_floor = self._load_texture(
@@ -102,22 +678,35 @@ class OpenGLRenderer:
         self._tex_coin = self._load_texture(
             os.path.join('assets', 'JEMA GER 1640-11.png'))
 
-        if self._tex_coin is not None:
+        if self._tex_coin:
             glBindTexture(GL_TEXTURE_2D, self._tex_coin)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
             glBindTexture(GL_TEXTURE_2D, 0)
 
-        self._build_static_geometry()
-        self._build_world_vbos()
-        self._build_ghost_vbo()
+        if not self._tex_wall:
+            self._tex_wall = self._make_fallback_texture((180, 90, 60, 255))
+        if not self._tex_floor:
+            self._tex_floor = self._make_fallback_texture((80, 80, 100, 255))
 
-        # Capture texture load time for PDF report
-        load_time = time.perf_counter() - start_time
+        self._build_world_vao()
+        self._build_lamp_vao()
+
+        self._dyn_vbo = glGenBuffers(1)
+        self._dyn_tex_vbo = glGenBuffers(1)
+
+        glEnable(GL_DEPTH_TEST)
+        glDepthFunc(GL_LEQUAL)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDisable(GL_CULL_FACE)
+
+        self._gl_ready = True
+
+        # Record OpenGL info for PDF report
         try:
             from core.pdf_export import get_system_collector
             collector = get_system_collector()
-            collector.record_texture_load_time(load_time)
             try:
                 vendor = glGetString(GL_VENDOR).decode('utf-8')
                 renderer = glGetString(GL_RENDERER).decode('utf-8')
@@ -129,1377 +718,14 @@ class OpenGLRenderer:
         except ImportError:
             pass
 
-    def resize(self, width: int, height: int) -> None:
-        self.width = max(1, width)
-        self.height = max(1, height)
+    def resize(self, w: int, h: int) -> None:
+        self.width = max(1, w)
+        self.height = max(1, h)
         glViewport(0, 0, self.width, self.height)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluPerspective(self.fov, self.width / self.height,
-                       self.near_plane, self.far_plane)
 
-        if self._fog_enabled:
-            glFogf(GL_FOG_START, float(self._fog_start))
-            glFogf(GL_FOG_END, float(self._fog_end))
-            glFogfv(GL_FOG_COLOR, [*self.sky_color[:3], 1.0])
-
-    # ------------------------------------------------------------------ VBO management
-
-    def _safe_delete_buffer(self, vbo: Optional[int]) -> None:
-        if vbo is not None:
-            try:
-                glDeleteBuffers(1, [int(vbo)])
-            except Exception:
-                pass
-
-    def _delete_world_vbos(self) -> None:
-        self._safe_delete_buffer(self._world_vbo_floor)
-        self._safe_delete_buffer(self._world_vbo_wall)
-        self._world_vbo_floor = None
-        self._world_vbo_wall = None
-        self._world_floor_vertex_count = 0
-        self._world_wall_vertex_count = 0
-
-        self._safe_delete_buffer(self._ghost_body_vbo)
-        self._safe_delete_buffer(self._ghost_eye_vbo)
-        for vbo in self._ghost_tail_vbos:
-            self._safe_delete_buffer(vbo)
-
-        self._ghost_body_vbo = None
-        self._ghost_body_vertex_count = 0
-        self._ghost_eye_vbo = None
-        self._ghost_eye_vertex_count = 0
-        self._ghost_tail_vbos = []
-        self._ghost_tail_vertex_counts = []
-        self._ghost_tail_pose_count = 0
-
-        for floor_vbo, _, wall_vbo, _ in self._chunk_vbos.values():
-            self._safe_delete_buffer(floor_vbo)
-            self._safe_delete_buffer(wall_vbo)
-        self._chunk_vbos.clear()
-
-    def _upload_vbo(self, data_bytes: bytes) -> Optional[int]:
-        """Create and upload a GL buffer. Returns the VBO id, or None on failure."""
-        try:
-            vbo = glGenBuffers(1)
-            vid = int(vbo) if vbo else None
-            if vid:
-                glBindBuffer(GL_ARRAY_BUFFER, vid)
-                glBufferData(GL_ARRAY_BUFFER, data_bytes, GL_STATIC_DRAW)
-                glBindBuffer(GL_ARRAY_BUFFER, 0)
-            return vid
-        except Exception:
-            return None
-
-    def _build_world_vbos(self) -> None:
-        from array import array
-
-        self._delete_world_vbos()
-
-        floor_data: array = array('f')
-        wall_data: array = array('f')
-        chunk_floor: dict[tuple[int, int], array] = {}
-        chunk_wall: dict[tuple[int, int], array] = {}
-
-        # Vertex layout per vertex: x, y, z, u, v
-        for cr, cc, tex_id, quad in self._static_quads:
-            if tex_id not in (self._tex_floor, self._tex_wall):
-                continue
-
-            is_floor_tex = tex_id == self._tex_floor
-            target = floor_data if is_floor_tex else wall_data
-
-            ch_key = (int(cr) // self._chunk_size, int(cc) // self._chunk_size)
-            chunk_dict = chunk_floor if is_floor_tex else chunk_wall
-            ch_target = chunk_dict.setdefault(ch_key, array('f'))
-
-            for (u, v, x, y, z) in quad:
-                vals = [float(x), float(y), float(z), float(u), float(v)]
-                target.extend(vals)
-                ch_target.extend(vals)
-
-        self._world_floor_vertex_count = len(floor_data) // 5
-        self._world_wall_vertex_count = len(wall_data) // 5
-
-        try:
-            if self._world_floor_vertex_count > 0:
-                self._world_vbo_floor = self._upload_vbo(floor_data.tobytes())
-            if self._world_wall_vertex_count > 0:
-                self._world_vbo_wall = self._upload_vbo(wall_data.tobytes())
-
-            for ch_key in sorted(set(chunk_floor) | set(chunk_wall)):
-                fd = chunk_floor.get(ch_key)
-                wd = chunk_wall.get(ch_key)
-                floor_count = len(fd) // 5 if fd else 0
-                wall_count = len(wd) // 5 if wd else 0
-                floor_vbo = self._upload_vbo(
-                    fd.tobytes()) if floor_count > 0 else None
-                wall_vbo = self._upload_vbo(
-                    wd.tobytes()) if wall_count > 0 else None
-                self._chunk_vbos[ch_key] = (
-                    floor_vbo, floor_count, wall_vbo, wall_count)
-        except Exception:
-            self._delete_world_vbos()
-
-    def _build_ghost_vbo(self) -> None:
-        from array import array
-
-        # Clean up any existing ghost VBOs before rebuilding
-        self._safe_delete_buffer(self._ghost_body_vbo)
-        self._safe_delete_buffer(self._ghost_eye_vbo)
-        for vbo in self._ghost_tail_vbos:
-            self._safe_delete_buffer(vbo)
-
-        self._ghost_body_vbo = None
-        self._ghost_body_vertex_count = 0
-        self._ghost_eye_vbo = None
-        self._ghost_eye_vertex_count = 0
-        self._ghost_tail_vbos = []
-        self._ghost_tail_vertex_counts = []
-        self._ghost_tail_pose_count = 0
-
-        segments = 26 if self._fast_mode else 40
-        body_layers = 11
-        radius = 0.20
-
-        def y_and_r(t: float) -> tuple[float, float]:
-            if t < 0.5:
-                return radius * 0.62 * math.cos(t * math.pi), radius * 0.95 * math.sin(t * math.pi)
-            return -radius * 0.25 * (t - 0.5) * 2.0, radius * 0.95
-
-        def add_strip(data: array, y0: float, r0: float, y1: float, r1: float) -> None:
-            for i in range(segments + 1):
-                a = (i / segments) * (2.0 * math.pi)
-                ca, sa = math.cos(a), math.sin(a)
-                data.extend([ca * r0, y0, sa * r0, ca, 0.0, sa])
-                data.extend([ca * r1, y1, sa * r1, ca, 0.0, sa])
-
-        # Body
-        body: array = array('f')
-        for layer in range(1, body_layers):
-            y_prev, r_prev = y_and_r((layer - 1) / (body_layers - 1))
-            y_curr, r_curr = y_and_r(layer / (body_layers - 1))
-            add_strip(body, y_prev, r_prev, y_curr, r_curr)
-        self._ghost_body_vertex_count = len(body) // 6
-
-        # Eyes (two quads as triangles)
-        eye: array = array('f')
-        eye_y = radius * 0.22
-        eye_z = radius * 1.05
-        eye_x = radius * 0.34
-        ew = radius * 0.22
-        eh = radius * 0.28
-
-        def add_eye_quad(cx: float) -> None:
-            x0, x1 = cx - ew, cx + ew
-            y0, y1 = eye_y - eh, eye_y + eh
-            for verts in [(x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)]:
-                eye.extend([verts[0], verts[1], eye_z, 0.0, 0.0, 1.0])
-
-        add_eye_quad(-eye_x)
-        add_eye_quad(eye_x)
-        self._ghost_eye_vertex_count = len(eye) // 6
-
-        # Tail rendered in immediate mode for smooth animation
-        self._ghost_tail_vbos = []
-        self._ghost_tail_vertex_counts = []
-        self._ghost_tail_pose_count = 0
-
-        # Upload body + eye VBOs
-        if self._ghost_body_vertex_count > 0:
-            self._ghost_body_vbo = self._upload_vbo(body.tobytes())
-        if self._ghost_eye_vertex_count > 0:
-            self._ghost_eye_vbo = self._upload_vbo(eye.tobytes())
-
-    # ------------------------------------------------------------------ render
-
-    def render(self) -> None:
-        glEnable(GL_DEPTH_TEST)
-
-        frozen = bool(getattr(self.core, 'simulation_frozen', False))
-
-        # Drive animations from wall-clock time
-        now = time.perf_counter()
-        if self._last_anim_elapsed_s is None:
-            self._last_anim_elapsed_s = now
-        else:
-            dt_anim = max(0.0, min(0.1, now - self._last_anim_elapsed_s))
-            self._last_anim_elapsed_s = now
-            if not frozen:
-                self._anim_clock_s += dt_anim
-
-        self._anim_t = self._anim_clock_s
-
-        glClearColor(*self.sky_color)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-
-        px, py, pz = self.core.player.x, self.core.player.y + \
-            self.camera_height, self.core.player.z
-        yaw, pitch = self.core.player.yaw, self.core.player.pitch
-
-        lx = px + math.sin(yaw) * math.cos(pitch)
-        ly = py + math.sin(pitch)
-        lz = pz + math.cos(yaw) * math.cos(pitch)
-
-        # Dynamic up-vector for camera stability
-        fx = lx - px
-        fy = ly - py
-        fz = lz - pz
-        f_len = math.sqrt(fx * fx + fy * fy + fz * fz)
-        if f_len > 0.0:
-            fy /= f_len
-
-        upx, upy, upz = (1.0, 0.0, 0.0) if abs(fy) > 0.97 else (0.0, 1.0, 0.0)
-        gluLookAt(px, py, pz, lx, ly, lz, upx, upy, upz)
-
-        glDisable(GL_BLEND)
-        glDepthMask(True)
-        self._draw_world()
-        glEnable(GL_BLEND)
-        self._draw_entities()
-
-    # ------------------------------------------------------------------ world geometry
-
-    def _build_static_geometry(self) -> None:
-        self._static_quads.clear()
-        wall_h = float(self.core.wall_height)
-        ceil_h = float(self.core.ceiling_height)
-        h = int(getattr(self.core, 'height', 0))
-        w = int(getattr(self.core, 'width', 0))
-        walls = self.core.walls
-
-        def add_quad(cr, cc, tex, vtx):
-            self._static_quads.append((cr, cc, tex, vtx))
-
-        def is_solid(rr: int, cc: int) -> bool:
-            if rr < 0 or cc < 0 or rr >= h or cc >= w:
-                return False
-            return (rr, cc) in walls
-
-        def is_inside(rr: int, cc: int) -> bool:
-            return 0 <= rr < h and 0 <= cc < w
-
-        for (r, c) in self.core.floors:
-            cx, cz = c + 0.5, r + 0.5
-            add_quad(cz, cx, self._tex_floor, (
-                (0.0, 0.0, cx - 0.5, 0.0, cz - 0.5), (1.0,
-                                                      0.0, cx + 0.5, 0.0, cz - 0.5),
-                (1.0, 1.0, cx + 0.5, 0.0, cz + 0.5), (0.0,
-                                                      1.0, cx - 0.5, 0.0, cz + 0.5),
-            ))
-            add_quad(cz, cx, self._tex_floor, (
-                (0.0, 0.0, cx - 0.5, ceil_h, cz + 0.5), (1.0,
-                                                         0.0, cx + 0.5, ceil_h, cz + 0.5),
-                (1.0, 1.0, cx + 0.5, ceil_h, cz - 0.5), (0.0,
-                                                         1.0, cx - 0.5, ceil_h, cz - 0.5),
-            ))
-            if not is_inside(r - 1, c):
-                add_quad(cz, cx, self._tex_wall, (
-                    (0.0, 0.0, cx - 0.5, 0.0, cz - 0.5), (1.0,
-                                                          0.0, cx + 0.5, 0.0, cz - 0.5),
-                    (1.0, 1.0, cx + 0.5, wall_h, cz - 0.5), (0.0,
-                                                             1.0, cx - 0.5, wall_h, cz - 0.5),
-                ))
-            if not is_inside(r + 1, c):
-                add_quad(cz, cx, self._tex_wall, (
-                    (0.0, 0.0, cx + 0.5, 0.0, cz + 0.5), (1.0,
-                                                          0.0, cx - 0.5, 0.0, cz + 0.5),
-                    (1.0, 1.0, cx - 0.5, wall_h, cz + 0.5), (0.0,
-                                                             1.0, cx + 0.5, wall_h, cz + 0.5),
-                ))
-            if not is_inside(r, c - 1):
-                add_quad(cz, cx, self._tex_wall, (
-                    (0.0, 0.0, cx - 0.5, 0.0, cz + 0.5), (1.0,
-                                                          0.0, cx - 0.5, 0.0, cz - 0.5),
-                    (1.0, 1.0, cx - 0.5, wall_h, cz - 0.5), (0.0,
-                                                             1.0, cx - 0.5, wall_h, cz + 0.5),
-                ))
-            if not is_inside(r, c + 1):
-                add_quad(cz, cx, self._tex_wall, (
-                    (0.0, 0.0, cx + 0.5, 0.0, cz - 0.5), (1.0,
-                                                          0.0, cx + 0.5, 0.0, cz + 0.5),
-                    (1.0, 1.0, cx + 0.5, wall_h, cz + 0.5), (0.0,
-                                                             1.0, cx + 0.5, wall_h, cz - 0.5),
-                ))
-
-        for (r, c) in walls:
-            cx, cz = c + 0.5, r + 0.5
-            y0, y1 = 0.0, wall_h
-            if not is_solid(r - 1, c):
-                add_quad(cz, cx, self._tex_wall, (
-                    (0.0, 0.0, cx - 0.5, y0, cz - 0.5), (1.0,
-                                                         0.0, cx + 0.5, y0, cz - 0.5),
-                    (1.0, 1.0, cx + 0.5, y1, cz - 0.5), (0.0,
-                                                         1.0, cx - 0.5, y1, cz - 0.5),
-                ))
-            if not is_solid(r + 1, c):
-                add_quad(cz, cx, self._tex_wall, (
-                    (0.0, 0.0, cx + 0.5, y0, cz + 0.5), (1.0,
-                                                         0.0, cx - 0.5, y0, cz + 0.5),
-                    (1.0, 1.0, cx - 0.5, y1, cz + 0.5), (0.0,
-                                                         1.0, cx + 0.5, y1, cz + 0.5),
-                ))
-            if not is_solid(r, c - 1):
-                add_quad(cz, cx, self._tex_wall, (
-                    (0.0, 0.0, cx - 0.5, y0, cz + 0.5), (1.0,
-                                                         0.0, cx - 0.5, y0, cz - 0.5),
-                    (1.0, 1.0, cx - 0.5, y1, cz - 0.5), (0.0,
-                                                         1.0, cx - 0.5, y1, cz + 0.5),
-                ))
-            if not is_solid(r, c + 1):
-                add_quad(cz, cx, self._tex_wall, (
-                    (0.0, 0.0, cx + 0.5, y0, cz - 0.5), (1.0,
-                                                         0.0, cx + 0.5, y0, cz + 0.5),
-                    (1.0, 1.0, cx + 0.5, y1, cz + 0.5), (0.0,
-                                                         1.0, cx + 0.5, y1, cz - 0.5),
-                ))
-            if y1 < ceil_h and (not is_solid(r - 1, c) or not is_solid(r + 1, c)
-                                or not is_solid(r, c - 1) or not is_solid(r, c + 1)):
-                add_quad(cz, cx, self._tex_wall, (
-                    (0.0, 0.0, cx - 0.5, y1, cz + 0.5), (1.0,
-                                                         0.0, cx + 0.5, y1, cz + 0.5),
-                    (1.0, 1.0, cx + 0.5, y1, cz - 0.5), (0.0,
-                                                         1.0, cx - 0.5, y1, cz - 0.5),
-                ))
-
-    def _draw_world_immediate(self) -> None:
-        """Fallback immediate-mode draw when VBOs are unavailable."""
-        pr = self.core.player.z
-        pc = self.core.player.x
-        view_r2 = 25.0 ** 2
-
-        bound_tex: Optional[int] = None
-        texture_enabled = False
-
-        for cr, cc, tex_id, quad in self._static_quads:
-            dx, dz = cc - pc, cr - pr
-            if dx * dx + dz * dz > view_r2:
-                continue
-
-            if tex_id != bound_tex:
-                if tex_id is None:
-                    if texture_enabled:
-                        glDisable(GL_TEXTURE_2D)
-                        texture_enabled = False
-                    glBindTexture(GL_TEXTURE_2D, 0)
-                    glColor4f(0.75, 0.75, 0.80, 1.0)
-                else:
-                    if not texture_enabled:
-                        glEnable(GL_TEXTURE_2D)
-                        texture_enabled = True
-                    glBindTexture(GL_TEXTURE_2D, tex_id)
-                    glColor4f(1.0, 1.0, 1.0, 1.0)
-                bound_tex = tex_id
-
-            glBegin(GL_QUADS)
-            for (u, v, x, y, z) in quad:
-                if texture_enabled:
-                    glTexCoord2f(u, v)
-                glVertex3f(x, y, z)
-            glEnd()
-
-        glBindTexture(GL_TEXTURE_2D, 0)
-        if texture_enabled:
-            glDisable(GL_TEXTURE_2D)
-        glEnable(GL_LIGHTING)
-
-    def _draw_world(self) -> None:
-        if self._world_vbo_floor is None or self._world_vbo_wall is None:
-            self._draw_world_immediate()
-            return
-
-        glDisable(GL_LIGHTING)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-
-        try:
-            glEnableClientState(GL_VERTEX_ARRAY)
-            glEnableClientState(GL_TEXTURE_COORD_ARRAY)
-            stride = 5 * 4
-            glEnable(GL_TEXTURE_2D)
-
-            px, pz = float(self.core.player.x), float(self.core.player.z)
-            ch_r0 = int(pz // self._chunk_size)
-            ch_c0 = int(px // self._chunk_size)
-            chunk_radius = max(
-                2, int(math.ceil(self._fog_end / self._chunk_size)) + 1)
-
-            for dr in range(-chunk_radius, chunk_radius + 1):
-                for dc in range(-chunk_radius, chunk_radius + 1):
-                    entry = self._chunk_vbos.get((ch_r0 + dr, ch_c0 + dc))
-                    if not entry:
-                        continue
-
-                    floor_vbo, floor_count, wall_vbo, wall_count = entry
-
-                    if floor_vbo is not None and floor_count > 0:
-                        glBindTexture(GL_TEXTURE_2D, self._tex_floor or 0)
-                        glBindBuffer(GL_ARRAY_BUFFER, floor_vbo)
-                        glVertexPointer(3, GL_FLOAT, stride,
-                                        ctypes.c_void_p(0))
-                        glTexCoordPointer(2, GL_FLOAT, stride,
-                                          ctypes.c_void_p(12))
-                        glDrawArrays(GL_QUADS, 0, floor_count)
-
-                    if wall_vbo is not None and wall_count > 0:
-                        glBindTexture(GL_TEXTURE_2D, self._tex_wall or 0)
-                        glBindBuffer(GL_ARRAY_BUFFER, wall_vbo)
-                        glVertexPointer(3, GL_FLOAT, stride,
-                                        ctypes.c_void_p(0))
-                        glTexCoordPointer(2, GL_FLOAT, stride,
-                                          ctypes.c_void_p(12))
-                        glDrawArrays(GL_QUADS, 0, wall_count)
-
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
-            glBindTexture(GL_TEXTURE_2D, 0)
-            glDisable(GL_TEXTURE_2D)
-        except Exception:
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
-            try:
-                glDisableClientState(GL_TEXTURE_COORD_ARRAY)
-                glDisableClientState(GL_VERTEX_ARRAY)
-            except Exception:
-                pass
-            glEnable(GL_LIGHTING)
-            self._draw_world_immediate()
-            return
-
-        glDisableClientState(GL_TEXTURE_COORD_ARRAY)
-        glDisableClientState(GL_VERTEX_ARRAY)
-        glEnable(GL_LIGHTING)
-
-    # ------------------------------------------------------------------ entity rendering
-
-    def _draw_ghost_vbo(self, color: Tuple[float, float, float, float]) -> None:
-        """Draw ghost: body+eyes via VBO (static), tail via immediate mode (smooth continuous animation)."""
-        if self._ghost_body_vbo is None or self._ghost_body_vertex_count <= 0:
-            return
-
-        stride = 6 * 4
-
-        # --- Body (static VBO) ---
-        glEnableClientState(GL_VERTEX_ARRAY)
-        glEnableClientState(GL_NORMAL_ARRAY)
-        glColor4f(*color)
-        glBindBuffer(GL_ARRAY_BUFFER, self._ghost_body_vbo)
-        glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
-        glNormalPointer(GL_FLOAT, stride, ctypes.c_void_p(12))
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, self._ghost_body_vertex_count)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        glDisableClientState(GL_NORMAL_ARRAY)
-        glDisableClientState(GL_VERTEX_ARRAY)
-
-        # --- Tail (immediate mode — continuous sin() for smooth animation, no pose snapping) ---
-        radius = 0.20
-        segments = 26 if self._fast_mode else 40
-        tail_layers = 8
-        TWO_PI = math.pi * 2.0
-        t = self._anim_t
-        glColor4f(*color)
-        for layer in range(tail_layers):
-            layer_ratio = layer / tail_layers
-            prev_ratio = (layer - 1) / tail_layers
-            base_r = radius * 0.95 * (1.0 - layer_ratio * 0.35)
-            wave_amp = radius * (0.08 + 0.14 * layer_ratio)
-            y_curr = -radius * 0.52 - layer_ratio * radius * 0.48
-            glBegin(GL_TRIANGLE_STRIP)
-            if layer == 0:
-                for i in range(segments + 1):
-                    a = (i / segments) * TWO_PI
-                    ca, sa = math.cos(a), math.sin(a)
-                    skirt = (math.sin(a * 3.0 + t * 2.4 + layer * 0.55) * wave_amp
-                             + math.sin(a * 7.0 - t * 1.7 + layer * 0.35) * (wave_amp * 0.55))
-                    r_curr = max(radius * 0.02, base_r + skirt)
-                    glVertex3f(ca * radius * 0.95, -radius *
-                               0.25, sa * radius * 0.95)
-                    glVertex3f(ca * r_curr, y_curr, sa * r_curr)
-            else:
-                prev_base_r = radius * 0.95 * (1.0 - prev_ratio * 0.35)
-                prev_amp = radius * (0.08 + 0.14 * prev_ratio)
-                y_prev = -radius * 0.52 - prev_ratio * radius * 0.48
-                for i in range(segments + 1):
-                    a = (i / segments) * TWO_PI
-                    ca, sa = math.cos(a), math.sin(a)
-                    skirt_p = (math.sin(a * 3.0 + t * 2.4 + (layer - 1) * 0.55) * prev_amp
-                               + math.sin(a * 7.0 - t * 1.7 + (layer - 1) * 0.35) * (prev_amp * 0.55))
-                    skirt_c = (math.sin(a * 3.0 + t * 2.4 + layer * 0.55) * wave_amp
-                               + math.sin(a * 7.0 - t * 1.7 + layer * 0.35) * (wave_amp * 0.55))
-                    r_prev = max(radius * 0.02, prev_base_r + skirt_p)
-                    r_curr = max(radius * 0.02, base_r + skirt_c)
-                    glVertex3f(ca * r_prev, y_prev, sa * r_prev)
-                    glVertex3f(ca * r_curr, y_curr, sa * r_curr)
-            glEnd()
-
-        # --- Eyes (static VBO) ---
-        if self._ghost_eye_vbo is not None and self._ghost_eye_vertex_count > 0:
-            glEnableClientState(GL_VERTEX_ARRAY)
-            glEnableClientState(GL_NORMAL_ARRAY)
-            glColor4f(0.06, 0.06, 0.08, 0.96)
-            glBindBuffer(GL_ARRAY_BUFFER, self._ghost_eye_vbo)
-            glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
-            glNormalPointer(GL_FLOAT, stride, ctypes.c_void_p(12))
-            glDrawArrays(GL_TRIANGLES, 0, self._ghost_eye_vertex_count)
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
-            glDisableClientState(GL_NORMAL_ARRAY)
-            glDisableClientState(GL_VERTEX_ARRAY)
-
-    def _draw_entities(self) -> None:
-        glDisable(GL_LIGHTING)
-        glDisable(GL_TEXTURE_2D)
-
-        cam_yaw = self.core.player.yaw
-        right_x = math.cos(cam_yaw)
-        right_z = -math.sin(cam_yaw)
-
-        TWO_PI = math.pi * 2.0
-
-        def billboard_quad(cx, cy, cz, w, h, color):
-            glColor4f(*color)
-            hx = (w / 2.0) * right_x
-            hz = (w / 2.0) * right_z
-            hy = h / 2.0
-            glBegin(GL_QUADS)
-            glVertex3f(cx - hx, cy - hy, cz - hz)
-            glVertex3f(cx + hx, cy - hy, cz + hz)
-            glVertex3f(cx + hx, cy + hy, cz + hz)
-            glVertex3f(cx - hx, cy + hy, cz - hz)
-            glEnd()
-
-        def soft_aura(cx, cy, cz, base_size, color, alpha):
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-            glDepthMask(False)
-            for s, a in zip(
-                (base_size * 0.9, base_size * 1.25, base_size * 1.65),
-                (alpha * 0.55, alpha * 0.28, alpha * 0.14),
-            ):
-                billboard_quad(cx, cy, cz, s, s,
-                               (color[0], color[1], color[2], a))
-            glDepthMask(True)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-        def radial_sprite_glow(cx, cy, cz, radius, color, alpha):
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-            glDepthMask(False)
-            glBegin(GL_TRIANGLE_FAN)
-            glColor4f(*color, alpha)
-            glVertex3f(cx, cy, cz)
-            glColor4f(*color, 0.0)
-            for i in range(29):
-                a = (i / 28) * TWO_PI
-                x = math.cos(a) * radius
-                y = math.sin(a) * radius
-                glVertex3f(cx + x * right_x, cy + y, cz + x * right_z)
-            glEnd()
-            glDepthMask(True)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-        def floor_glow(cx, cz, y, radius, color, alpha):
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-            glDepthMask(False)
-            glBegin(GL_TRIANGLE_FAN)
-            glColor4f(*color, alpha)
-            glVertex3f(cx, y, cz)
-            glColor4f(*color, 0.0)
-            for i in range(23):
-                a = (i / 22) * TWO_PI
-                glVertex3f(cx + math.cos(a) * radius,
-                           y, cz + math.sin(a) * radius)
-            glEnd()
-            glDepthMask(True)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-        def draw_coin_3d(radius=0.13, thickness=0.045, segments=18, textured=False):
-            y0, y1 = -thickness / 2.0, thickness / 2.0
-
-            glBegin(GL_QUADS)
-            for i in range(segments):
-                a0 = (i / segments) * TWO_PI
-                a1 = ((i + 1) / segments) * TWO_PI
-                x0, z0 = math.cos(a0) * radius, math.sin(a0) * radius
-                x1, z1 = math.cos(a1) * radius, math.sin(a1) * radius
-                glColor4f(1.0, 0.84, 0.18, 0.98) if i % 2 == 0 else glColor4f(
-                    240/255, 168/255, 48/255, 0.98)
-                glVertex3f(x0, y0, z0)
-                glVertex3f(x1, y0, z1)
-                glVertex3f(x1, y1, z1)
-                glVertex3f(x0, y1, z0)
-            glEnd()
-
-            def disc_fan(y_offset):
-                glBegin(GL_TRIANGLE_FAN)
-                glVertex3f(0.0, y_offset, 0.0)
-                for i in range(segments + 1):
-                    a = (i / segments) * TWO_PI
-                    glVertex3f(math.cos(a) * radius,
-                               y_offset, math.sin(a) * radius)
-                glEnd()
-
-            def tex_fan(y_offset, inner_r):
-                glBegin(GL_TRIANGLE_FAN)
-                glTexCoord2f(0.5, 0.5)
-                glVertex3f(0.0, y_offset, 0.0)
-                for i in range(segments + 1):
-                    a = (i / segments) * TWO_PI
-                    glTexCoord2f(0.5 + 0.48 * math.cos(a),
-                                 0.5 + 0.48 * math.sin(a))
-                    glVertex3f(math.cos(a) * inner_r,
-                               y_offset, math.sin(a) * inner_r)
-                glEnd()
-
-            if textured and self._tex_coin:
-                inner_r = radius * 0.92
-                glColor4f(1.0, 0.84, 0.18, 0.98)
-                disc_fan(y1)
-                disc_fan(y0)
-                glEnable(GL_TEXTURE_2D)
-                glBindTexture(GL_TEXTURE_2D, self._tex_coin)
-                glColor4f(1.0, 1.0, 1.0, 0.98)
-                tex_fan(y1 + 0.001, inner_r)
-                tex_fan(y0 - 0.001, inner_r)
-                glBindTexture(GL_TEXTURE_2D, 0)
-                glDisable(GL_TEXTURE_2D)
-            else:
-                glColor4f(1.0, 0.84, 0.18, 0.98)
-                disc_fan(y1)
-                disc_fan(y0)
-
-        def draw_ghost_3d(color):
-            radius = 0.20
-            segments = 26 if self._fast_mode else 40
-            body_layers = 11
-            tail_layers = 8
-
-            glColor4f(*color)
-
-            def y_and_r(t):
-                if t < 0.5:
-                    return radius * 0.62 * math.cos(t * math.pi), radius * 0.95 * math.sin(t * math.pi)
-                return -radius * 0.25 * (t - 0.5) * 2.0, radius * 0.95
-
-            for layer in range(1, body_layers):
-                y_prev, r_prev = y_and_r((layer - 1) / (body_layers - 1))
-                y_curr, r_curr = y_and_r(layer / (body_layers - 1))
-                glBegin(GL_TRIANGLE_STRIP)
-                for i in range(segments + 1):
-                    a = (i / segments) * TWO_PI
-                    ca, sa = math.cos(a), math.sin(a)
-                    glVertex3f(ca * r_prev, y_prev, sa * r_prev)
-                    glVertex3f(ca * r_curr, y_curr, sa * r_curr)
-                glEnd()
-
-            for layer in range(tail_layers):
-                layer_ratio = layer / tail_layers
-                prev_ratio = (layer - 1) / tail_layers
-                base_r = radius * 0.95 * (1.0 - layer_ratio * 0.35)
-                wave_amp = radius * (0.08 + 0.14 * layer_ratio)
-                y_curr = -radius * 0.52 - layer_ratio * radius * 0.48
-
-                glBegin(GL_TRIANGLE_STRIP)
-                if layer == 0:
-                    for i in range(segments + 1):
-                        a = (i / segments) * TWO_PI
-                        ca, sa = math.cos(a), math.sin(a)
-                        skirt = (math.sin(a * 3.0 + self._anim_t * 2.4 + layer * 0.55) * wave_amp
-                                 + math.sin(a * 7.0 - self._anim_t * 1.7 + layer * 0.35) * (wave_amp * 0.55))
-                        r_curr = max(radius * 0.02, base_r + skirt)
-                        glVertex3f(ca * radius * 0.95, -radius *
-                                   0.25, sa * radius * 0.95)
-                        glVertex3f(ca * r_curr, y_curr, sa * r_curr)
-                else:
-                    prev_base_r = radius * 0.95 * (1.0 - prev_ratio * 0.35)
-                    prev_amp = radius * (0.08 + 0.14 * prev_ratio)
-                    y_prev = -radius * 0.52 - prev_ratio * radius * 0.48
-                    for i in range(segments + 1):
-                        a = (i / segments) * TWO_PI
-                        ca, sa = math.cos(a), math.sin(a)
-                        skirt_prev = (math.sin(a * 3.0 + self._anim_t * 2.4 + (layer - 1) * 0.55) * prev_amp
-                                      + math.sin(a * 7.0 - self._anim_t * 1.7 + (layer - 1) * 0.35) * (prev_amp * 0.55))
-                        skirt_curr = (math.sin(a * 3.0 + self._anim_t * 2.4 + layer * 0.55) * wave_amp
-                                      + math.sin(a * 7.0 - self._anim_t * 1.7 + layer * 0.35) * (wave_amp * 0.55))
-                        r_prev2 = max(radius * 0.02, prev_base_r + skirt_prev)
-                        r_curr2 = max(radius * 0.02, base_r + skirt_curr)
-                        glVertex3f(ca * r_prev2, y_prev, sa * r_prev2)
-                        glVertex3f(ca * r_curr2, y_curr, sa * r_curr2)
-                glEnd()
-
-            glColor4f(0.06, 0.06, 0.08, 0.96)
-            eye_y, eye_z = radius * 0.22, radius * 1.05
-            eye_x, ew, eh = radius * 0.34, radius * 0.22, radius * 0.28
-            glBegin(GL_QUADS)
-            for ex in (-eye_x, eye_x):
-                glVertex3f(ex - ew, eye_y - eh, eye_z)
-                glVertex3f(ex + ew, eye_y - eh, eye_z)
-                glVertex3f(ex + ew, eye_y + eh, eye_z)
-                glVertex3f(ex - ew, eye_y + eh, eye_z)
-            glEnd()
-
-        def draw_key_3d():
-            glPushMatrix()
-            glTranslatef(0.23, 0.06, 0.0)
-            outer_r, inner_r, thickness, seg = 0.16, 0.11, 0.035, 24
-            glBegin(GL_QUADS)
-            for i in range(seg):
-                a0, a1 = TWO_PI * (i / seg), TWO_PI * ((i + 1) / seg)
-                c0, s0, c1, s1 = math.cos(a0), math.sin(
-                    a0), math.cos(a1), math.sin(a1)
-                glVertex3f(outer_r*c0, -thickness, outer_r*s0)
-                glVertex3f(outer_r*c1, -thickness, outer_r*s1)
-                glVertex3f(outer_r*c1, +thickness, outer_r*s1)
-                glVertex3f(outer_r*c0, +thickness, outer_r*s0)
-                glVertex3f(inner_r*c1, -thickness, inner_r*s1)
-                glVertex3f(inner_r*c0, -thickness, inner_r*s0)
-                glVertex3f(inner_r*c0, +thickness, inner_r*s0)
-                glVertex3f(inner_r*c1, +thickness, inner_r*s1)
-                glVertex3f(inner_r*c0, +thickness, inner_r*s0)
-                glVertex3f(inner_r*c1, +thickness, inner_r*s1)
-                glVertex3f(outer_r*c1, +thickness, outer_r*s1)
-                glVertex3f(outer_r*c0, +thickness, outer_r*s0)
-                glVertex3f(outer_r*c0, -thickness, outer_r*s0)
-                glVertex3f(outer_r*c1, -thickness, outer_r*s1)
-                glVertex3f(inner_r*c1, -thickness, inner_r*s1)
-                glVertex3f(inner_r*c0, -thickness, inner_r*s0)
-            glEnd()
-            glPopMatrix()
-            glPushMatrix()
-            glTranslatef(-0.12, 0.06, 0.0)
-            glScalef(0.52, 0.06, 0.08)
-            self._draw_untextured_cube()
-            glPopMatrix()
-            for tx, th in ((-0.34, 0.12), (-0.25, 0.09), (-0.18, 0.07)):
-                glPushMatrix()
-                glTranslatef(tx, 0.02, 0.0)
-                glScalef(0.06, th, 0.08)
-                self._draw_untextured_cube()
-                glPopMatrix()
-
-        def wall_quad(cx, cy, cz, w, h, facing):
-            if facing == 'N':
-                z = cz - 0.49
-                glVertex3f(cx - w, cy + h, z)
-                glVertex3f(cx + w, cy + h, z)
-                glVertex3f(cx + w, cy - h, z)
-                glVertex3f(cx - w, cy - h, z)
-            elif facing == 'S':
-                z = cz + 0.49
-                glVertex3f(cx + w, cy + h, z)
-                glVertex3f(cx - w, cy + h, z)
-                glVertex3f(cx - w, cy - h, z)
-                glVertex3f(cx + w, cy - h, z)
-            elif facing == 'W':
-                x = cx - 0.49
-                glVertex3f(x, cy + h, cz + w)
-                glVertex3f(x, cy + h, cz - w)
-                glVertex3f(x, cy - h, cz - w)
-                glVertex3f(x, cy - h, cz + w)
-            else:
-                x = cx + 0.49
-                glVertex3f(x, cy + h, cz - w)
-                glVertex3f(x, cy + h, cz + w)
-                glVertex3f(x, cy - h, cz + w)
-                glVertex3f(x, cy - h, cz - w)
-
-        px = float(self.core.player.x)
-        pz = float(self.core.player.z)
-        entity_r2 = max(18.0, self._fog_end - 2.0) ** 2
-        glow_r2 = max(12.0, (self._fog_end - 2.0) * 0.70) ** 2
-
-        # Coins
-        for coin in self.core.coins.values():
-            if coin.taken:
-                continue
-            r, c = coin.cell
-            cx, cz = c + 0.5, r + 0.5
-            dx, dz = float(cx) - px, float(cz) - pz
-            d2 = dx * dx + dz * dz
-            if d2 > entity_r2:
-                continue
-            spin_deg = ((self._anim_t * 3.0) % TWO_PI) * (180.0 / math.pi)
-            bob = 0.06 * math.sin(self._anim_t * 1.6 + r * 0.37 + c * 0.51)
-            glPushMatrix()
-            glTranslatef(cx, 1.22 + bob, cz)
-            glRotatef(spin_deg, 0.0, 1.0, 0.0)
-            glRotatef(90.0, 1.0, 0.0, 0.0)
-            glDisable(GL_LIGHTING)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-            glColor4f(1.0, 0.84, 0.18, 0.98)
-            draw_coin_3d(radius=0.14, thickness=0.04, segments=(
-                24 if d2 <= glow_r2 else 16), textured=True)
-            glPopMatrix()
-            if d2 <= glow_r2:
-                pulse = 0.16 + 0.06 * \
-                    math.sin(self._anim_t * 2.2 + r * 0.17 + c * 0.23)
-                radial_sprite_glow(cx, 1.22 + bob, cz, 0.34,
-                                   (1.0, 0.90, 0.35), pulse)
-
-        # Sector signs
-        sector_signs = getattr(self.core, 'sector_signs', None) or {}
-        if sector_signs:
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-            for sid, (cell, facing) in sector_signs.items():
-                r, c = cell
-                cx, cz, cy = c + 0.5, r + 0.5, 1.65
-                glColor4f(0.10, 0.10, 0.12, 0.92)
-                glBegin(GL_QUADS)
-                wall_quad(cx, cy, cz, 0.48, 0.18, facing)
-                glEnd()
-
-                label = f"SECTOR {str(sid)[:1]}"
-                tex = self._get_text_texture(label)
-                if tex:
-                    glEnable(GL_TEXTURE_2D)
-                    glBindTexture(GL_TEXTURE_2D, tex)
-                    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
-                    glColor4f(1.0, 1.0, 1.0, 0.98)
-                    tw, th = 0.42, 0.11
-                    glBegin(GL_QUADS)
-                    if facing == 'N':
-                        z = cz - 0.481
-                        glTexCoord2f(0.0, 1.0)
-                        glVertex3f(cx - tw, cy + th, z)
-                        glTexCoord2f(1.0, 1.0)
-                        glVertex3f(cx + tw, cy + th, z)
-                        glTexCoord2f(1.0, 0.0)
-                        glVertex3f(cx + tw, cy - th, z)
-                        glTexCoord2f(0.0, 0.0)
-                        glVertex3f(cx - tw, cy - th, z)
-                    elif facing == 'S':
-                        z = cz + 0.481
-                        glTexCoord2f(0.0, 1.0)
-                        glVertex3f(cx + tw, cy + th, z)
-                        glTexCoord2f(1.0, 1.0)
-                        glVertex3f(cx - tw, cy + th, z)
-                        glTexCoord2f(1.0, 0.0)
-                        glVertex3f(cx - tw, cy - th, z)
-                        glTexCoord2f(0.0, 0.0)
-                        glVertex3f(cx + tw, cy - th, z)
-                    elif facing == 'W':
-                        x = cx - 0.481
-                        glTexCoord2f(0.0, 1.0)
-                        glVertex3f(x, cy + th, cz + tw)
-                        glTexCoord2f(1.0, 1.0)
-                        glVertex3f(x, cy + th, cz - tw)
-                        glTexCoord2f(1.0, 0.0)
-                        glVertex3f(x, cy - th, cz - tw)
-                        glTexCoord2f(0.0, 0.0)
-                        glVertex3f(x, cy - th, cz + tw)
-                    else:
-                        x = cx + 0.481
-                        glTexCoord2f(0.0, 1.0)
-                        glVertex3f(x, cy + th, cz - tw)
-                        glTexCoord2f(1.0, 1.0)
-                        glVertex3f(x, cy + th, cz + tw)
-                        glTexCoord2f(1.0, 0.0)
-                        glVertex3f(x, cy - th, cz + tw)
-                        glTexCoord2f(0.0, 0.0)
-                        glVertex3f(x, cy - th, cz - tw)
-                    glEnd()
-                    glBindTexture(GL_TEXTURE_2D, 0)
-
-        # Jail painting
-        painting = getattr(self.core, 'jail_painting', None)
-        if painting:
-            (pr_cell, pc_cell), facing = painting
-            cx, cz, cy = pc_cell + 0.5, pr_cell + 0.5, 1.55
-
-            dr, dc = {'N': (-1, 0), 'S': (1, 0), 'W': (0, -1)
-                      }.get(facing, (0, 1))
-            wr, wc = pr_cell + dr, pc_cell + dc
-            if (wr, wc) in getattr(self.core, 'walls', set()):
-                neg, pos = 0, 0
-                if facing in ('N', 'S'):
-                    cc2 = wc - 1
-                    while (wr, cc2) in self.core.walls:
-                        neg += 1
-                        cc2 -= 1
-                    cc2 = wc + 1
-                    while (wr, cc2) in self.core.walls:
-                        pos += 1
-                        cc2 += 1
-                    cx += max(-0.28, min(0.28, (pos - neg) * 0.12))
-                else:
-                    rr2 = wr - 1
-                    while (rr2, wc) in self.core.walls:
-                        neg += 1
-                        rr2 -= 1
-                    rr2 = wr + 1
-                    while (rr2, wc) in self.core.walls:
-                        pos += 1
-                        rr2 += 1
-                    cz += max(-0.28, min(0.28, (pos - neg) * 0.12))
-
-            glColor4f(0.30, 0.20, 0.10, 1.0)
-            glBegin(GL_QUADS)
-            wall_quad(cx, cy, cz, 0.78, 0.50, facing)
-            glEnd()
-            glColor4f(0.08, 0.08, 0.10, 0.98)
-            glBegin(GL_QUADS)
-            wall_quad(cx, cy, cz, 0.72, 0.44, facing)
-            glEnd()
-
-            tex = self._get_jail_map_texture()
-            if tex:
-                glEnable(GL_TEXTURE_2D)
-                glBindTexture(GL_TEXTURE_2D, tex)
-                glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
-                glColor4f(1.0, 1.0, 1.0, 0.98)
-                tw, th = 0.70, 0.41
-                glBegin(GL_QUADS)
-                if facing == 'N':
-                    z = cz - 0.473
-                    glTexCoord2f(0.0, 1.0)
-                    glVertex3f(cx - tw, cy + th, z)
-                    glTexCoord2f(1.0, 1.0)
-                    glVertex3f(cx + tw, cy + th, z)
-                    glTexCoord2f(1.0, 0.0)
-                    glVertex3f(cx + tw, cy - th, z)
-                    glTexCoord2f(0.0, 0.0)
-                    glVertex3f(cx - tw, cy - th, z)
-                elif facing == 'S':
-                    z = cz + 0.473
-                    glTexCoord2f(0.0, 1.0)
-                    glVertex3f(cx + tw, cy + th, z)
-                    glTexCoord2f(1.0, 1.0)
-                    glVertex3f(cx - tw, cy + th, z)
-                    glTexCoord2f(1.0, 0.0)
-                    glVertex3f(cx - tw, cy - th, z)
-                    glTexCoord2f(0.0, 0.0)
-                    glVertex3f(cx + tw, cy - th, z)
-                elif facing == 'W':
-                    x = cx - 0.473
-                    glTexCoord2f(0.0, 1.0)
-                    glVertex3f(x, cy + th, cz + tw)
-                    glTexCoord2f(1.0, 1.0)
-                    glVertex3f(x, cy + th, cz - tw)
-                    glTexCoord2f(1.0, 0.0)
-                    glVertex3f(x, cy - th, cz - tw)
-                    glTexCoord2f(0.0, 0.0)
-                    glVertex3f(x, cy - th, cz + tw)
-                else:
-                    x = cx + 0.473
-                    glTexCoord2f(0.0, 1.0)
-                    glVertex3f(x, cy + th, cz - tw)
-                    glTexCoord2f(1.0, 1.0)
-                    glVertex3f(x, cy + th, cz + tw)
-                    glTexCoord2f(1.0, 0.0)
-                    glVertex3f(x, cy - th, cz + tw)
-                    glTexCoord2f(0.0, 0.0)
-                    glVertex3f(x, cy - th, cz - tw)
-                glEnd()
-                glBindTexture(GL_TEXTURE_2D, 0)
-
-        # Key fragments
-        for frag in self.core.key_fragments.values():
-            if frag.taken:
-                continue
-            r, c = frag.cell
-            cx, cz = c + 0.5, r + 0.5
-            dx, dz = float(cx) - px, float(cz) - pz
-            d2 = dx * dx + dz * dz
-            if d2 > entity_r2:
-                continue
-            kind = getattr(frag, 'kind', '')
-            if kind == 'KH':
-                base, glow_rgb = (0.55, 0.95, 1.0, 0.95), (0.65, 1.0, 1.0)
-            elif kind == 'KP':
-                base, glow_rgb = (0.9, 0.65, 1.0, 0.95), (0.95, 0.75, 1.0)
-            else:
-                base, glow_rgb = (0.75, 1.0, 0.65, 0.95), (0.85, 1.0, 0.75)
-            base_y = (float(self.core.ceiling_height) -
-                      0.85) if kind == 'KP' else 1.18
-            seed = float(sum((i + 1) * ord(ch)
-                         for i, ch in enumerate(str(getattr(frag, 'id', '')))) % 997)
-            bob = 0.08 * math.sin(self._anim_t * 2.4 + seed)
-            spin = (self._anim_t * 140.0 + seed * 37.0) % 360.0
-            glPushMatrix()
-            glTranslatef(cx, base_y + bob, cz)
-            glRotatef(spin, 0.0, 1.0, 0.0)
-            glRotatef(90.0, 0.0, 0.0, 1.0)
-            glScalef(1.05, 1.05, 1.05)
-            glDisable(GL_LIGHTING)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-            glColor4f(*base)
-            draw_key_3d()
-            if d2 <= glow_r2:
-                soft_aura(cx, base_y + bob + 0.05, cz, 0.55, glow_rgb, 0.12)
-            glPopMatrix()
-
-        # Checkpoint arrow
-        arrow = getattr(self.core, 'checkpoint_arrow', None)
-        if arrow and arrow.visible:
-            ar, ac = arrow.cell
-            cx = float(ac) + 0.5
-            cz = float(ar) + 0.5
-
-            bounce = 0.08 * math.sin(self._anim_t * 2.5)
-            cy = float(getattr(self.core, 'wall_height', 3.0)) * 0.45 + bounce
-
-            glDisable(GL_TEXTURE_2D)
-            glEnable(GL_BLEND)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-            pulse = 0.75 + 0.25 * math.sin(self._anim_t * 3.0)
-
-            glDisable(GL_DEPTH_TEST)
-            glDisable(GL_LIGHTING)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-            glDepthMask(False)
-
-            yaw = float(getattr(self.core.player, 'yaw', 0.0) or 0.0)
-            rx = math.cos(yaw)
-            rz = -math.sin(yaw)
-
-            glow_radius = 1.5
-            glow_alpha = 0.25 * pulse
-            glColor4f(0.15, 1.0, 0.4, glow_alpha)
-            glBegin(GL_TRIANGLE_FAN)
-            glVertex3f(cx, cy, cz)
-            glColor4f(0.15, 1.0, 0.4, 0.0)
-            steps = 48
-            for i in range(steps + 1):
-                a = (i / steps) * 2.0 * math.pi
-                x = math.cos(a) * glow_radius
-                y = math.sin(a) * glow_radius
-                glVertex3f(cx + x * rx, cy + y, cz + x * rz)
-            glEnd()
-
-            glDepthMask(True)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-            # Solid 3D arrow — use glPushAttrib to save/restore ALL lighting+material state.
-            # This prevents green emission from leaking into ceiling lamps drawn below.
-            glDisable(GL_DEPTH_TEST)
-            glPushAttrib(GL_LIGHTING_BIT | GL_COLOR_BUFFER_BIT)
-
-            glEnable(GL_LIGHTING)
-            glEnable(GL_LIGHT0)
-            glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT,
-                         [0.0, 0.65, 0.20, 1.0])
-            glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE,
-                         [0.0, 0.98, 0.35, 1.0])
-            glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR,
-                         [0.6, 1.0,  0.7,  1.0])
-            glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION,
-                         [0.0, 0.45, 0.15, 1.0])
-            glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 64.0)
-
-            glPushMatrix()
-            glTranslatef(cx, cy, cz)
-
-            shaft_r = 0.12
-            shaft_h = 0.60
-            head_r = 0.30
-            head_h = 0.42
-            seg = 32
-            shaft_top = shaft_h * 0.5
-            shaft_bot = -shaft_h * 0.5
-            tip_y = shaft_bot - head_h
-
-            glBegin(GL_TRIANGLE_STRIP)
-            for i in range(seg + 1):
-                a = (i / seg) * 2.0 * math.pi
-                ca, sa = math.cos(a), math.sin(a)
-                glNormal3f(ca, 0.0, sa)
-                glVertex3f(ca * shaft_r, shaft_top, sa * shaft_r)
-                glVertex3f(ca * shaft_r, shaft_bot, sa * shaft_r)
-            glEnd()
-
-            glBegin(GL_TRIANGLE_FAN)
-            glNormal3f(0.0, 1.0, 0.0)
-            glVertex3f(0.0, shaft_top, 0.0)
-            for i in range(seg + 1):
-                a = (i / seg) * 2.0 * math.pi
-                glVertex3f(math.cos(a) * shaft_r,
-                           shaft_top, math.sin(a) * shaft_r)
-            glEnd()
-
-            glBegin(GL_TRIANGLE_FAN)
-            glNormal3f(0.0, 1.0, 0.0)
-            glVertex3f(0.0, shaft_bot, 0.0)
-            for i in range(seg + 1):
-                a = (i / seg) * 2.0 * math.pi
-                glVertex3f(math.cos(a) * head_r,
-                           shaft_bot, math.sin(a) * head_r)
-            glEnd()
-
-            slant = math.atan2(head_r, head_h)
-            ny = math.sin(slant)
-            nr = math.cos(slant)
-            glBegin(GL_TRIANGLE_FAN)
-            glNormal3f(0.0, -1.0, 0.0)
-            glVertex3f(0.0, tip_y, 0.0)
-            for i in range(seg + 1):
-                a = (i / seg) * 2.0 * math.pi
-                ca, sa = math.cos(a), math.sin(a)
-                glNormal3f(ca * nr, ny, sa * nr)
-                glVertex3f(ca * head_r, shaft_bot, sa * head_r)
-            glEnd()
-
-            glPopMatrix()
-
-            # Restore ALL lighting+material state saved by glPushAttrib — no manual resets needed.
-            glPopAttrib()
-
-            glEnable(GL_DEPTH_TEST)
-            glEnable(GL_TEXTURE_2D)
-            # Ensure we're back to the expected state for subsequent draws
-            glDisable(GL_LIGHTING)
-
-        # Spikes
-        spikes = getattr(self.core, 'spikes', None)
-        if spikes:
-            h_factor = float(self.core.spike_height_factor()) if hasattr(
-                self.core, 'spike_height_factor') else 0.0
-            for s in spikes:
-                r, c = s.cell
-                glPushMatrix()
-                glTranslatef(c + 0.5, 0.0, r + 0.5)
-                glColor4f(0.85, 0.15, 0.15, 1.0) if s.active else glColor4f(
-                    0.45, 0.12, 0.12, 1.0)
-                self._draw_spike(height=0.85 * h_factor)
-                glPopMatrix()
-
-        # Gates
-        for gate in self.core.gates.values():
-            self._draw_gate(gate)
-
-        # Moving platforms
-        for platform in getattr(self.core, 'platforms', []):
-            self._draw_platform(platform)
-
-        # Jail table + book
-        if getattr(self.core, 'jail_book_cell', None):
-            jr, jc = self.core.jail_book_cell
-            glPushMatrix()
-            glTranslatef(jc + 0.5, 0.0, jr + 0.5)
-            glColor4f(0.35, 0.22, 0.10, 1.0)
-            glPushMatrix()
-            glTranslatef(0.0, 0.40, 0.0)
-            glScalef(0.85, 0.08, 0.60)
-            self._draw_untextured_cube()
-            glPopMatrix()
-            for lx in (-0.35, 0.35):
-                for lz in (-0.22, 0.22):
-                    glPushMatrix()
-                    glTranslatef(lx, 0.20, lz)
-                    glScalef(0.08, 0.40, 0.08)
-                    self._draw_untextured_cube()
-                    glPopMatrix()
-            glColor4f(0.12, 0.12, 0.14, 1.0)
-            glPushMatrix()
-            glTranslatef(0.0, 0.48, 0.0)
-            glScalef(0.28, 0.04, 0.20)
-            self._draw_untextured_cube()
-            glPopMatrix()
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-            glDepthMask(False)
-            radial_sprite_glow(0.0, 0.70, 0.0, 0.55, (0.95, 0.85, 0.35), 0.16)
-            radial_sprite_glow(0.0, 0.70, 0.0, 0.95, (0.95, 0.85, 0.35), 0.06)
-            glDepthMask(True)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-            glPopMatrix()
-
-        # Ghosts
-        ghost_colors = {
-            1: (1.0, 0.35, 0.20, 0.82), 2: (0.30, 1.0, 0.55, 0.82),
-            3: (0.45, 0.65, 1.0, 0.82), 4: (1.0, 0.85, 0.25, 0.82),
-            5: (0.95, 0.35, 1.0, 0.82),
-        }
-        for g in self.core.ghosts.values():
-            dx = float(getattr(g, 'x', 0.0) or 0.0) - px
-            dz = float(getattr(g, 'z', 0.0) or 0.0) - pz
-            if dx * dx + dz * dz > entity_r2:
-                continue
-            bob = 0.05 * math.sin(self._anim_t * 2.0 + g.id)
-            wobble = 0.06 * math.sin(self._anim_t * 4.6 + g.id * 0.7)
-            s = float(getattr(g, 'size_scale', 1.0) or 1.0)
-            y_raise = 0.18 + 0.22 * max(0.0, s - 1.0)
-            glPushMatrix()
-            glTranslatef(g.x, 1.15 + y_raise + bob + wobble, g.z)
-            glRotatef(math.degrees(g.yaw), 0.0, 1.0, 0.0)
-            glScalef(2.10 * s, 2.75 * s, 2.10 * s)
-            glDepthMask(False)
-            col = ghost_colors.get(g.id, (1.0, 0.55, 0.15, 0.92))
-            if self._ghost_body_vbo is not None:
-                self._draw_ghost_vbo(col)
-            else:
-                draw_ghost_3d(col)
-            glDepthMask(True)
-            glPopMatrix()
-            col = ghost_colors.get(g.id, (1.0, 0.55, 0.15, 0.92))
-            radial_sprite_glow(g.x, 1.15 + y_raise + bob +
-                               0.08, g.z, 0.55 * s, col[:3], 0.12)
-            radial_sprite_glow(g.x, 1.15 + y_raise + bob +
-                               0.08, g.z, 0.95 * s, col[:3], 0.05)
-
-        # Ceiling lamps
-        ceil_h = float(self.core.ceiling_height)
-
-        def is_floor_tile(rr, cc):
-            return (rr, cc) in self.core.floors and (rr, cc) not in self.core.walls
-
-        lamp_candidates = []
-        for (r, c) in self.core.floors:
-            if (r, c) in self.core.walls:
-                continue
-            if is_floor_tile(r, c - 1) and is_floor_tile(r, c + 1) and not is_floor_tile(r, c - 2) and not is_floor_tile(r, c + 2):
-                lamp_candidates.append((r, c))
-                continue
-            if is_floor_tile(r - 1, c) and is_floor_tile(r + 1, c) and not is_floor_tile(r - 2, c) and not is_floor_tile(r + 2, c):
-                lamp_candidates.append((r, c))
-
-        lamp_candidates.sort()
-        lamps = []
-        min_sep2 = 8.0 ** 2
-        for rc in lamp_candidates:
-            if all(((rc[0] - lr) ** 2 + (rc[1] - lc) ** 2) >= min_sep2 for lr, lc in lamps):
-                lamps.append(rc)
-            if len(lamps) >= 140:
-                break
-
-        for r, c in lamps:
-            cx, cz = c + 0.5, r + 0.5
-            glPushMatrix()
-            glTranslatef(cx, ceil_h - 0.15, cz)
-            glColor4f(0.10, 0.10, 0.12, 1.0)
-            glPushMatrix()
-            glTranslatef(0.0, 0.18, 0.0)
-            glScalef(0.03, 0.36, 0.03)
-            self._draw_untextured_cube()
-            glPopMatrix()
-            glColor4f(0.18, 0.18, 0.22, 1.0)
-            glPushMatrix()
-            glTranslatef(0.0, 0.02, 0.0)
-            glScalef(0.26, 0.10, 0.26)
-            self._draw_untextured_cube()
-            glPopMatrix()
-            glColor4f(0.98, 0.95, 0.82, 1.0)
-            glPushMatrix()
-            glTranslatef(0.0, -0.02, 0.0)
-            glScalef(0.10, 0.07, 0.10)
-            self._draw_untextured_cube()
-            glPopMatrix()
-            glPopMatrix()
-            floor_glow(cx, cz, 0.015, 1.75, (0.98, 0.95, 0.82), 0.20)
-            floor_glow(cx, cz, 0.016, 0.85, (0.98, 0.95, 0.82), 0.22)
-            soft_aura(cx, ceil_h - 0.45, cz, 1.10, (0.98, 0.95, 0.82), 0.08)
-
-        glEnable(GL_TEXTURE_2D)
-        glEnable(GL_LIGHTING)
-
-    # ------------------------------------------------------------------ prop drawing
-
-    def _draw_gate(self, gate) -> None:
-        wall_h = float(self.core.wall_height)
-        for (r, c) in gate.cells:
-            glPushMatrix()
-            glTranslatef(c + 0.5, wall_h / 2.0 + gate.y_offset, r + 0.5)
-            glScalef(1.0, wall_h, 1.0)
-            glColor4f(0.7, 0.7, 0.75, 1.0)
-            self._draw_gate_bars(gate.id)
-            glPopMatrix()
-
-    def _draw_gate_bars(self, gate_id: str) -> None:
-        is_jail = gate_id == 'jail'
-        for i in range(-2, 3):
-            glPushMatrix()
-            if is_jail:
-                glTranslatef(i * 0.18, 0.0, 0.0)
-            else:
-                glTranslatef(0.0, 0.0, i * 0.18)
-                glRotatef(90, 0.0, 1.0, 0.0)
-            glScalef(0.07, 1.0, 0.12)
-            self._draw_untextured_cube()
-            glPopMatrix()
-        glPushMatrix()
-        glTranslatef(0.0, 0.42, 0.0)
-        glColor4f(0.65, 0.65, 0.7, 1.0)
-        if not is_jail:
-            glRotatef(90, 0.0, 1.0, 0.0)
-        glScalef(0.95, 0.12, 0.16)
-        self._draw_untextured_cube()
-        glPopMatrix()
-
-    def _draw_platform(self, platform) -> None:
-        r, c = platform.cell
-        glPushMatrix()
-        glTranslatef(c + 0.5, platform.y_offset + 0.05, r + 0.5)
-        glColor4f(0.6, 0.4, 0.2, 1.0)
-        glPushMatrix()
-        glScalef(0.8, 0.1, 0.8)
-        self._draw_untextured_cube()
-        glPopMatrix()
-        glColor4f(0.4, 0.3, 0.15, 1.0)
-        for tx, ty, tz, sx, sy, sz in [
-            (0.0, 0.15,  0.35, 0.82, 0.2, 0.05),
-            (0.0, 0.15, -0.35, 0.82, 0.2, 0.05),
-            (-0.35, 0.15, 0.0, 0.05, 0.2, 0.82),
-            (0.35, 0.15, 0.0, 0.05, 0.2, 0.82),
-        ]:
-            glPushMatrix()
-            glTranslatef(tx, ty, tz)
-            glScalef(sx, sy, sz)
-            self._draw_untextured_cube()
-            glPopMatrix()
-        glPopMatrix()
-
-    def _draw_spike(self, height: float) -> None:
-        if height <= 0.02:
-            return
-        base = 0.18
-        glBegin(GL_QUADS)
-        glVertex3f(-base, 0.01, -base)
-        glVertex3f(base, 0.01, -base)
-        glVertex3f(base, 0.01, base)
-        glVertex3f(-base, 0.01, base)
-        glEnd()
-        glBegin(GL_TRIANGLES)
-        glVertex3f(-base, 0.01, -base)
-        glVertex3f(base, 0.01, -base)
-        glVertex3f(0.0, height, 0.0)
-        glVertex3f(base, 0.01, -base)
-        glVertex3f(base, 0.01, base)
-        glVertex3f(0.0, height, 0.0)
-        glVertex3f(base, 0.01, base)
-        glVertex3f(-base, 0.01, base)
-        glVertex3f(0.0, height, 0.0)
-        glVertex3f(-base, 0.01, base)
-        glVertex3f(-base, 0.01, -base)
-        glVertex3f(0.0, height, 0.0)
-        glEnd()
-
-    def _draw_untextured_cube(self) -> None:
-        glDisable(GL_TEXTURE_2D)
-        glBegin(GL_QUADS)
-        glVertex3f(-0.5, -0.5, 0.5)
-        glVertex3f(0.5, -0.5, 0.5)
-        glVertex3f(0.5, 0.5, 0.5)
-        glVertex3f(-0.5, 0.5, 0.5)
-        glVertex3f(-0.5, -0.5, -0.5)
-        glVertex3f(-0.5, 0.5, -0.5)
-        glVertex3f(0.5, 0.5, -0.5)
-        glVertex3f(0.5, -0.5, -0.5)
-        glVertex3f(-0.5, 0.5, -0.5)
-        glVertex3f(-0.5, 0.5, 0.5)
-        glVertex3f(0.5, 0.5, 0.5)
-        glVertex3f(0.5, 0.5, -0.5)
-        glVertex3f(-0.5, -0.5, -0.5)
-        glVertex3f(0.5, -0.5, -0.5)
-        glVertex3f(0.5, -0.5, 0.5)
-        glVertex3f(-0.5, -0.5, 0.5)
-        glVertex3f(0.5, -0.5, -0.5)
-        glVertex3f(0.5, 0.5, -0.5)
-        glVertex3f(0.5, 0.5, 0.5)
-        glVertex3f(0.5, -0.5, 0.5)
-        glVertex3f(-0.5, -0.5, -0.5)
-        glVertex3f(-0.5, -0.5, 0.5)
-        glVertex3f(-0.5, 0.5, 0.5)
-        glVertex3f(-0.5, 0.5, -0.5)
-        glEnd()
-        glEnable(GL_TEXTURE_2D)
-
-    # ------------------------------------------------------------------ textures
+    # ------------------------------------------------------------------
+    # Texture loading — PySide6 version using QImage
+    # ------------------------------------------------------------------
 
     def _load_texture(self, path: str) -> Optional[int]:
         if not os.path.exists(path):
@@ -1512,8 +738,8 @@ class OpenGLRenderer:
         ptr = img.bits()
         data = bytes(ptr[:w * h * 4])
 
-        tex_id = glGenTextures(1)
-        glBindTexture(GL_TEXTURE_2D, tex_id)
+        tex = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tex)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
@@ -1521,64 +747,64 @@ class OpenGLRenderer:
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h,
                      0, GL_RGBA, GL_UNSIGNED_BYTE, data)
         glBindTexture(GL_TEXTURE_2D, 0)
-        return int(tex_id)
+        return int(tex)
 
-    def _get_text_texture(self, text: str) -> int:
-        # Limit cache size to prevent memory bloat
-        if len(self._text_texture_cache) >= 200:
-            # Remove oldest 50 entries
-            keys_to_remove = list(self._text_texture_cache.keys())[:50]
-            for key in keys_to_remove:
-                tex_id = self._text_texture_cache.pop(key)
-                try:
-                    if tex_id > 0:
-                        glDeleteTextures([tex_id])
-                except Exception:
-                    pass
+    def _make_fallback_texture(self, color_rgba: Tuple[int, int, int, int]) -> int:
+        data = bytes(color_rgba) * (64 * 64)
+        tex = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tex)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 64, 64,
+                     0, GL_RGBA, GL_UNSIGNED_BYTE, data)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        return int(tex)
 
-        cached = self._text_texture_cache.get(text)
+    def _get_text_texture(self, text: str) -> Optional[Tuple[int, int, int]]:
+        """Return (tex_id, w_px, h_px). Uses QPainter — same interface as kivy_renderer."""
+        t = str(text or '')
+        if not t:
+            return None
+        cached = self._text_tex_cache.get(t)
         if cached:
             return cached
 
-        text = str(text)
-        if not text:
-            return 0
+        if len(self._text_tex_cache) >= 200:
+            keys = list(self._text_tex_cache.keys())[:50]
+            for k in keys:
+                tid, _, _ = self._text_tex_cache.pop(k)
+                try:
+                    if tid > 0:
+                        glDeleteTextures(1, [tid])
+                except Exception:
+                    pass
 
-        # Measure actual text extent
         font = QFont('Arial', 28)
         font.setBold(True)
         fm = QFontMetrics(font)
-        text_width = fm.horizontalAdvance(text)
-        text_height = fm.height()
-
-        # Add padding
+        tw = fm.horizontalAdvance(t)
+        th = fm.height()
         pad = 10
-        w = text_width + pad * 2
-        h = text_height + pad * 2
+        w = max(tw + pad*2, 64)
+        h = max(th + pad*2, 32)
 
-        # Use minimum size to avoid tiny textures
-        w, h = max(w, 64), max(h, 32)
-
-        img = QImage(w, h, QImage.Format.Format_RGBA8888)
+        img = QImage(w, h, QImage.Format_RGBA8888)
         img.fill(0)
         p = QPainter(img)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
         p.setFont(font)
         p.setPen(QColor(255, 235, 120, 255))
-        p.drawText(pad, pad, text_width, text_height,
-                   Qt.AlignLeft | Qt.AlignTop, text)
+        p.drawText(pad, pad, tw, th, Qt.AlignLeft | Qt.AlignTop, t)
         p.end()
+        # Flip vertically for OpenGL texture coordinate system
         img = img.mirrored(False, True)
-
         ptr = img.constBits()
         size = int(img.sizeInBytes())
         data = ptr.tobytes()[:size] if hasattr(
             ptr, 'tobytes') else bytes(ptr)[:size]
 
-        tex_id = glGenTextures(1)
-        if tex_id == 0:
-            return 0
-        glBindTexture(GL_TEXTURE_2D, int(tex_id))
+        gl_tex = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, int(gl_tex))
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
@@ -1587,15 +813,16 @@ class OpenGLRenderer:
                      0, GL_RGBA, GL_UNSIGNED_BYTE, data)
         glBindTexture(GL_TEXTURE_2D, 0)
 
-        self._text_texture_cache[text] = int(tex_id)
-        return int(tex_id)
+        out = (int(gl_tex), int(w), int(h))
+        self._text_tex_cache[t] = out
+        return out
 
     def _get_jail_map_texture(self) -> int:
         if self._jail_map_texture is not None:
-            return self._jail_map_texture
+            return int(self._jail_map_texture)
 
         grid_h = int(getattr(self.core, 'height', 0) or 0)
-        grid_w = int(getattr(self.core, 'width', 0) or 0)
+        grid_w = int(getattr(self.core, 'width',  0) or 0)
         if grid_h <= 0 or grid_w <= 0:
             return 0
 
@@ -1605,21 +832,18 @@ class OpenGLRenderer:
             'E': QColor(180, 100, 140), 'F': QColor(180, 180, 90),
             'G': QColor(160, 100, 190), 'H': QColor(150, 150, 150),
         }
-
         iw, ih = 640, 420
-        img = QImage(iw, ih, QImage.Format.Format_RGBA8888)
-        img.fill(QColor(50, 42, 36, 255))
-
         margin = 28
-        cell = min((iw - margin * 2) / grid_w, (ih - margin * 2) / grid_h)
-        ox = (iw - cell * grid_w) * 0.5
-        oy = (ih - cell * grid_h) * 0.5
+        cell = min((iw-margin*2)/grid_w, (ih-margin*2)/grid_h)
+        ox = (iw - cell*grid_w)*0.5
+        oy = (ih - cell*grid_h)*0.5
 
+        img = QImage(iw, ih, QImage.Format_RGBA8888)
+        img.fill(QColor(50, 42, 36, 255))
         p = QPainter(img)
-        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
 
         sid_for = getattr(self.core, 'sector_id_for_cell', None)
-
         for rr in range(grid_h):
             for cc in range(grid_w):
                 if (rr, cc) in self.core.walls:
@@ -1627,10 +851,10 @@ class OpenGLRenderer:
                 sid = sid_for((rr, cc)) if callable(sid_for) else ''
                 col = palette.get(sid)
                 if col:
-                    p.fillRect(int(ox + cc * cell), int(oy + rr * cell),
-                               int(cell + 1), int(cell + 1), col)
+                    p.fillRect(int(ox+cc*cell), int(oy+rr*cell),
+                               int(cell+1), int(cell+1), col)
 
-        acc: dict[str, list] = {}
+        acc: Dict[str, list] = {}
         if callable(sid_for):
             for rr in range(grid_h):
                 for cc in range(grid_w):
@@ -1649,33 +873,31 @@ class OpenGLRenderer:
         p.setPen(QColor(10, 10, 12, 255))
         for sid, (sx, sy, n) in acc.items():
             if n > 0:
-                p.drawText(int(ox + (sy / n + 0.5) * cell - 22),
-                           int(oy + (sx / n + 0.5) * cell + 22), sid[:1])
+                p.drawText(int(ox+(sy/n+0.5)*cell-22),
+                           int(oy+(sx/n+0.5)*cell+22), sid[:1])
 
         if getattr(self.core, 'exit_cells', None):
             er, ec = self.core.exit_cells[0]
-            ex = ox + (ec + 0.5) * cell + 5
-            ey = oy + (er + 0.5) * cell
+            ex = ox+(ec+0.5)*cell+5
+            ey = oy+(er+0.5)*cell
             font_small = QFont('Arial', 22)
             font_small.setBold(True)
             p.setFont(font_small)
-            p.fillRect(int(ex - 32), int(ey - 13), 64,
+            p.fillRect(int(ex-32), int(ey-13), 64,
                        26, QColor(210, 190, 175, 200))
             p.setPen(QColor(15, 15, 16, 255))
-            p.drawText(int(ex - 22), int(ey + 9), 'exit')
-
+            p.drawText(int(ex-22), int(ey+9), 'exit')
         p.end()
-        img = img.mirrored(False, True)
-
+        # No mirroring needed for jail map - OpenGL textures expect bottom-left origin
         ptr = img.constBits()
         size = int(img.sizeInBytes())
         data = ptr.tobytes()[:size] if hasattr(
             ptr, 'tobytes') else bytes(ptr)[:size]
 
-        tex_id = glGenTextures(1)
-        if tex_id == 0:
+        tex = glGenTextures(1)
+        if not tex:
             return 0
-        glBindTexture(GL_TEXTURE_2D, int(tex_id))
+        glBindTexture(GL_TEXTURE_2D, int(tex))
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
@@ -1683,6 +905,745 @@ class OpenGLRenderer:
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, iw, ih,
                      0, GL_RGBA, GL_UNSIGNED_BYTE, data)
         glBindTexture(GL_TEXTURE_2D, 0)
+        self._jail_map_texture = int(tex)
+        return int(tex)
 
-        self._jail_map_texture = int(tex_id)
-        return self._jail_map_texture
+    # ------------------------------------------------------------------
+    # World VAO (identical logic to kivy_renderer._build_world_vao)
+    # ------------------------------------------------------------------
+
+    def _build_world_vao(self) -> None:
+        _delete_vao(self._wall_vao)
+        _delete_vao(self._floor_vao)
+
+        wall_h = float(self.core.wall_height)
+        ceil_h = float(self.core.ceiling_height)
+        walls = self.core.walls
+        floors = self.core.floors
+        H = self.core.height
+        W = self.core.width
+
+        def solid(r, c): return (r, c) in walls
+        def inside(r, c): return 0 <= r < H and 0 <= c < W
+
+        wb = _GeoBuilder(textured=True)
+        for (r, c) in walls:
+            cx, cz = c+0.5, r+0.5
+            for dr, dc, face in [(-1, 0, 'N'), (1, 0, 'S'), (0, -1, 'W'), (0, 1, 'E')]:
+                if not solid(r+dr, c+dc):
+                    if face == 'N':
+                        wb.quad_tex((cx-0.5, 0, cz-0.5), (cx+0.5, 0, cz-0.5), (cx+0.5, wall_h,
+                                    cz-0.5), (cx-0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                    elif face == 'S':
+                        wb.quad_tex((cx+0.5, 0, cz+0.5), (cx-0.5, 0, cz+0.5), (cx-0.5, wall_h,
+                                    cz+0.5), (cx+0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                    elif face == 'W':
+                        wb.quad_tex((cx-0.5, 0, cz+0.5), (cx-0.5, 0, cz-0.5), (cx-0.5, wall_h,
+                                    cz-0.5), (cx-0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                    else:
+                        wb.quad_tex((cx+0.5, 0, cz-0.5), (cx+0.5, 0, cz+0.5), (cx+0.5, wall_h,
+                                    cz+0.5), (cx+0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+            exposed = any(not solid(r+dr, c+dc)
+                          for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)))
+            if exposed and wall_h < ceil_h:
+                wb.quad_tex((cx-0.5, wall_h, cz+0.5), (cx+0.5, wall_h, cz+0.5), (cx+0.5,
+                            wall_h, cz-0.5), (cx-0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+
+        for (r, c) in floors:
+            cx, cz = c+0.5, r+0.5
+            for dr, dc, face in [(-1, 0, 'N'), (1, 0, 'S'), (0, -1, 'W'), (0, 1, 'E')]:
+                if not inside(r+dr, c+dc):
+                    if face == 'N':
+                        wb.quad_tex((cx-0.5, 0, cz-0.5), (cx+0.5, 0, cz-0.5), (cx+0.5, wall_h,
+                                    cz-0.5), (cx-0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                    elif face == 'S':
+                        wb.quad_tex((cx+0.5, 0, cz+0.5), (cx-0.5, 0, cz+0.5), (cx-0.5, wall_h,
+                                    cz+0.5), (cx+0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                    elif face == 'W':
+                        wb.quad_tex((cx-0.5, 0, cz+0.5), (cx-0.5, 0, cz-0.5), (cx-0.5, wall_h,
+                                    cz-0.5), (cx-0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                    else:
+                        wb.quad_tex((cx+0.5, 0, cz-0.5), (cx+0.5, 0, cz+0.5), (cx+0.5, wall_h,
+                                    cz+0.5), (cx+0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+        self._wall_vao, self._wall_vtx = _upload_vao_textured(wb.data)
+
+        fb = _GeoBuilder(textured=True)
+        for (r, c) in floors:
+            cx, cz = c+0.5, r+0.5
+            fb.quad_tex((cx-0.5, 0, cz-0.5), (cx+0.5, 0, cz-0.5), (cx+0.5, 0,
+                        cz+0.5), (cx-0.5, 0, cz+0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+            fb.quad_tex((cx-0.5, ceil_h, cz+0.5), (cx+0.5, ceil_h, cz+0.5), (cx+0.5,
+                        ceil_h, cz-0.5), (cx-0.5, ceil_h, cz-0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+        self._floor_vao, self._floor_vtx = _upload_vao_textured(fb.data)
+
+    def _build_lamp_vao(self) -> None:
+        _delete_vao(self._lamp_vao)
+        ceil_h = float(self.core.ceiling_height)
+        floors = self.core.floors
+        walls = self.core.walls
+
+        def is_floor(r, c): return (r, c) in floors and (r, c) not in walls
+
+        # Create exclusion zones for lamp placement (same as coins)
+        exclusion_zones = set()
+
+        # Add all gate cells
+        exclusion_zones.update(self.core.gate_cells)
+
+        # Find all 'd' gate cells in layout
+        gate_cells = []
+        if hasattr(self.core, 'layout') and self.core.layout:
+            for r, row in enumerate(self.core.layout):
+                for c, char in enumerate(row):
+                    if char == 'd':
+                        gate_cells.append((r, c))
+
+        # Exclude from start cells to nearest gate
+        for start_cell in self.core.start_cells:
+            if gate_cells:
+                nearest_gate = min(gate_cells, key=lambda g: abs(
+                    g[0] - start_cell[0]) + abs(g[1] - start_cell[1]))
+                min_r, max_r = min(start_cell[0], nearest_gate[0]), max(
+                    start_cell[0], nearest_gate[0])
+                min_c, max_c = min(start_cell[1], nearest_gate[1]), max(
+                    start_cell[1], nearest_gate[1])
+                for r in range(min_r, max_r + 1):
+                    for c in range(min_c, max_c + 1):
+                        exclusion_zones.add((r, c))
+
+        # Exclude from exit cells to nearest gate
+        for exit_cell in self.core.exit_cells:
+            if gate_cells:
+                nearest_gate = min(gate_cells, key=lambda g: abs(
+                    g[0] - exit_cell[0]) + abs(g[1] - exit_cell[1]))
+                min_r, max_r = min(exit_cell[0], nearest_gate[0]), max(
+                    exit_cell[0], nearest_gate[0])
+                min_c, max_c = min(exit_cell[1], nearest_gate[1]), max(
+                    exit_cell[1], nearest_gate[1])
+                for r in range(min_r, max_r + 1):
+                    for c in range(min_c, max_c + 1):
+                        exclusion_zones.add((r, c))
+
+        candidates = []
+        for (r, c) in floors:
+            if (r, c) in walls or (r, c) in exclusion_zones:
+                continue
+            if is_floor(r, c-1) and is_floor(r, c+1) and not is_floor(r, c-2) and not is_floor(r, c+2):
+                candidates.append((r, c))
+                continue
+            if is_floor(r-1, c) and is_floor(r+1, c) and not is_floor(r-2, c) and not is_floor(r+2, c):
+                candidates.append((r, c))
+        candidates.sort()
+        lamps: List[Tuple[int, int]] = []
+        min_sep2 = 8.0**2
+        for rc in candidates:
+            if all(((rc[0]-lr)**2+(rc[1]-lc)**2) >= min_sep2 for lr, lc in lamps):
+                lamps.append(rc)
+            if len(lamps) >= 140:
+                break
+        self._lamps = list(lamps)
+
+        gb = _GeoBuilder(textured=False)
+        for r, c in lamps:
+            gb.lamp_col(c+0.5, r+0.5, ceil_h)
+        self._lamp_vao, self._lamp_vtx = _upload_vao_colored(gb.data)
+
+    # ------------------------------------------------------------------
+    # Shader / draw helpers
+    # ------------------------------------------------------------------
+
+    def _set_fog_uniforms(self, prog: int) -> None:
+        glUniform1f(glGetUniformLocation(prog, b"uFogStart"), _FOG_START)
+        glUniform1f(glGetUniformLocation(prog, b"uFogEnd"),   _FOG_END)
+        glUniform4f(glGetUniformLocation(prog, b"uFogColor"),
+                    _SKY_COLOR[0], _SKY_COLOR[1], _SKY_COLOR[2], _SKY_COLOR[3])
+
+    def _set_no_fog_uniforms(self, prog: int) -> None:
+        try:
+            glUniform1f(glGetUniformLocation(prog, b"uFogStart"), 0.0)
+            glUniform1f(glGetUniformLocation(prog, b"uFogEnd"),   1e9)
+            glUniform4f(glGetUniformLocation(prog, b"uFogColor"),
+                        _SKY_COLOR[0], _SKY_COLOR[1], _SKY_COLOR[2], _SKY_COLOR[3])
+        except Exception:
+            pass
+
+    def _set_mvp(self, prog: int, mvp: List[float]) -> None:
+        glUniformMatrix4fv(glGetUniformLocation(prog, b"uMVP"), 1, GL_FALSE,
+                           (ctypes.c_float*16)(*mvp))
+
+    def _draw_vao(self, vao: int, vtx: int) -> None:
+        if not vao or vtx <= 0:
+            return
+        glBindVertexArray(vao)
+        glDrawArrays(GL_TRIANGLES, 0, vtx)
+        glBindVertexArray(0)
+
+    def _draw_dynamic_col(self, raw: _array, mvp: List[float]) -> None:
+        if not raw:
+            return
+        vtx = len(raw) // 7
+        data = raw.tobytes()
+        stride = 7 * 4
+        glUseProgram(self._col_prog)
+        self._set_mvp(self._col_prog, mvp)
+        self._set_fog_uniforms(self._col_prog)
+        if self._dyn_vao == 0:
+            self._dyn_vao = glGenVertexArrays(1)
+        glBindVertexArray(self._dyn_vao)
+        glBindBuffer(GL_ARRAY_BUFFER, self._dyn_vbo)
+        glBufferData(GL_ARRAY_BUFFER, len(data), data, GL_STREAM_DRAW)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                              stride, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE,
+                              stride, ctypes.c_void_p(12))
+        glEnableVertexAttribArray(1)
+        glDrawArrays(GL_TRIANGLES, 0, vtx)
+        glBindVertexArray(0)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
+    def _draw_dynamic_tex(self, raw: _array, mvp: List[float], tex_id: int) -> None:
+        if not raw or not tex_id:
+            return
+        self._set_mvp(self._tex_prog, mvp)
+        self._set_fog_uniforms(self._tex_prog)
+        self._dyn_tex_vao, self._dyn_tex_vtx = _update_dynamic_vao_textured(
+            self._dyn_tex_vao, self._dyn_tex_vbo, raw)
+        if self._dyn_tex_vtx <= 0:
+            return
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glUniform1i(glGetUniformLocation(self._tex_prog, b"uTex"), 0)
+        self._draw_vao(self._dyn_tex_vao, self._dyn_tex_vtx)
+        glBindTexture(GL_TEXTURE_2D, 0)
+
+    # ------------------------------------------------------------------
+    # Main render — identical structure to kivy_renderer.render()
+    # ------------------------------------------------------------------
+
+    def render(self) -> None:
+        if not self._gl_ready:
+            try:
+                self.initialize()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                return
+
+        now = time.perf_counter()
+        if self._last_anim_t is None:
+            self._last_anim_t = now
+        else:
+            dt = max(0.0, min(0.1, now - self._last_anim_t))
+            self._last_anim_t = now
+            if not bool(getattr(self.core, 'simulation_frozen', False)):
+                self._anim_t += dt
+
+        w = max(1, self.width)
+        h = max(1, self.height)
+        glViewport(0, 0, w, h)
+        glClearColor(*_SKY_COLOR)
+        glEnable(GL_DEPTH_TEST)
+        glDepthMask(True)
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
+        player = self.core.player
+        px = float(player.x)
+        py = float(player.y)+_CAMERA_H
+        pz = float(player.z)
+        yaw = float(player.yaw)
+        pitch = float(player.pitch)
+
+        lx = px + math.sin(yaw)*math.cos(pitch)
+        ly = py + math.sin(pitch)
+        lz = pz + math.cos(yaw)*math.cos(pitch)
+
+        fy = (ly-py)
+        f_len = math.sqrt((lx-px)**2+fy**2+(lz-pz)**2)
+        fy_norm = fy/(f_len or 1.0)
+        upx, upy, upz = (1.0, 0.0, 0.0) if abs(
+            fy_norm) > 0.97 else (0.0, 1.0, 0.0)
+
+        proj = _perspective(_FOV_DEG, w/h, _NEAR, _FAR)
+        view = _look_at(px, py, pz, lx, ly, lz, upx, upy, upz)
+        vp = _mat_mul(proj, view)
+
+        # Draw world (textured)
+        glUseProgram(self._tex_prog)
+        self._set_fog_uniforms(self._tex_prog)
+        self._set_mvp(self._tex_prog, vp)
+        if self._tex_wall:
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, self._tex_wall)
+            glUniform1i(glGetUniformLocation(self._tex_prog, b"uTex"), 0)
+            self._draw_vao(self._wall_vao, self._wall_vtx)
+        if self._tex_floor:
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, self._tex_floor)
+            glUniform1i(glGetUniformLocation(self._tex_prog, b"uTex"), 0)
+            self._draw_vao(self._floor_vao, self._floor_vtx)
+        glBindTexture(GL_TEXTURE_2D, 0)
+
+        # Draw lamps (colored, static)
+        glUseProgram(self._col_prog)
+        self._set_fog_uniforms(self._col_prog)
+        self._set_mvp(self._col_prog, vp)
+        self._draw_vao(self._lamp_vao, self._lamp_vtx)
+
+        # Draw all dynamic entities
+        self._draw_entities(vp)
+
+        glUseProgram(0)
+        glDisable(GL_DEPTH_TEST)
+        glBindTexture(GL_TEXTURE_2D, 0)
+
+    # ------------------------------------------------------------------
+    # Entity rendering — identical to kivy_renderer._draw_entities
+    # ------------------------------------------------------------------
+
+    def _draw_entities(self, vp: List[float]) -> None:
+        ghost_segments = 26 if self._fast_mode else 40
+
+        gb = _GeoBuilder(textured=False)
+        gb_coin_tex = _GeoBuilder(textured=True)
+        gb_sign_tex: Dict[int, _array] = {}
+        gb_glow = _GeoBuilder(textured=False)
+        gb_ghost = _GeoBuilder(textured=False)
+        gb_arrow = _GeoBuilder(textured=False)
+
+        anim = self._anim_t
+        TWO_PI = math.pi * 2.0
+        px = float(self.core.player.x)
+        pz = float(self.core.player.z)
+        ceil_h = float(self.core.ceiling_height)
+
+        player = self.core.player
+        yaw = float(getattr(player, 'yaw',   0.0) or 0.0)
+        pitch = float(getattr(player, 'pitch', 0.0) or 0.0)
+        fx = math.sin(yaw)*math.cos(pitch)
+        fy = math.sin(pitch)
+        fz = math.cos(yaw)*math.cos(pitch)
+        fl = math.sqrt(fx*fx+fy*fy+fz*fz) or 1.0
+        fx /= fl
+        fy /= fl
+        fz /= fl
+        upx, upy, upz = (1.0, 0.0, 0.0) if abs(fy) > 0.97 else (0.0, 1.0, 0.0)
+        rx = fy*upz-fz*upy
+        ry = fz*upx-fx*upz
+        rz = fx*upy-fy*upx
+        rl = math.sqrt(rx*rx+ry*ry+rz*rz) or 1.0
+        rx /= rl
+        ry /= rl
+        rz /= rl
+        ux = ry*fz-rz*fy
+        uy = rz*fx-rx*fz
+        uz = rx*fy-ry*fx
+
+        def billboard_quad_col(cx, cy, cz, w, h, col):
+            hx = (w*0.5)*rx
+            hy = (w*0.5)*ry
+            hz = (w*0.5)*rz
+            vx = (h*0.5)*ux
+            vy = (h*0.5)*uy
+            vz = (h*0.5)*uz
+            p0 = (cx-hx-vx, cy-hy-vy, cz-hz-vz)
+            p1 = (cx+hx-vx, cy+hy-vy, cz+hz-vz)
+            p2 = (cx+hx+vx, cy+hy+vy, cz+hz+vz)
+            p3 = (cx-hx+vx, cy-hy+vy, cz-hz+vz)
+            gb_glow.quad_col(p0, p1, p2, p3, col)
+
+        def radial_sprite_glow_col(cx, cy, cz, radius, rgb, alpha, segments=24):
+            if alpha <= 0.0 or radius <= 0.0:
+                return
+            r, g, b = rgb
+            c0 = (r, g, b, float(alpha))
+            c1 = (r, g, b, 0.0)
+            for i in range(segments):
+                a0 = (i/segments)*TWO_PI
+                a1 = ((i+1)/segments)*TWO_PI
+                p0 = (cx, cy, cz)
+                ca0, sa0 = math.cos(a0), math.sin(a0)
+                ca1, sa1 = math.cos(a1), math.sin(a1)
+                p1 = (cx+ca0*radius*rx, cy+sa0*radius, cz+ca0*radius*rz)
+                p2 = (cx+ca1*radius*rx, cy+sa1*radius, cz+ca1*radius*rz)
+                gb_glow.tri_col_vc(p0, c0, p1, c1, p2, c1)
+
+        def floor_glow_col(cx, cy, cz, radius, rgb, alpha, segments=22):
+            if alpha <= 0.0 or radius <= 0.0:
+                return
+            r, g, b = rgb
+            c0 = (r, g, b, float(alpha))
+            c1 = (r, g, b, 0.0)
+            for i in range(segments):
+                a0 = (i/segments)*TWO_PI
+                a1 = ((i+1)/segments)*TWO_PI
+                p0 = (cx, cy, cz)
+                p1 = (cx+math.cos(a0)*radius, cy, cz+math.sin(a0)*radius)
+                p2 = (cx+math.cos(a1)*radius, cy, cz+math.sin(a1)*radius)
+                gb_glow.tri_col_vc(p0, c0, p1, c1, p2, c1)
+
+        # --- Coins ---
+        for coin in self.core.coins.values():
+            if coin.taken:
+                continue
+            r, c = coin.cell
+            cx, cz = c+0.5, r+0.5
+            if (cx-px)**2+(cz-pz)**2 > _ENTITY_R2:
+                continue
+            bob = 0.06*math.sin(anim*1.6+r*0.37+c*0.51)
+            spin = (anim*3.0) % TWO_PI
+            cy = 1.22+bob
+            tmp = _GeoBuilder(textured=False)
+            tmp.coin_col(0.0, 0.0, 0.0)
+            ax = math.pi*0.5
+            for i in range(0, len(tmp.data), 7):
+                x, y, z = tmp.data[i], tmp.data[i+1], tmp.data[i+2]
+                x, y, z = _rot_pt_x(x, y, z, ax)
+                x, y, z = _rot_pt_y(x, y, z, spin)
+                gb.data.extend([x+cx, y+cy, z+cz, tmp.data[i+3],
+                               tmp.data[i+4], tmp.data[i+5], tmp.data[i+6]])
+            if self._tex_coin:
+                ttmp = _GeoBuilder(textured=True)
+                inner_r = 0.14*0.92
+                tk = 0.04
+                y0, y1 = -tk/2.0, tk/2.0
+                eps = 0.001
+                ttmp.disc_fan_tex(0.0, y1+eps, 0.0, inner_r, 24)
+                ttmp.disc_fan_tex(0.0, y0-eps, 0.0, inner_r,
+                                  24, normal_up=False)
+                for i in range(0, len(ttmp.data), 5):
+                    x, y, z = ttmp.data[i], ttmp.data[i+1], ttmp.data[i+2]
+                    x, y, z = _rot_pt_x(x, y, z, ax)
+                    x, y, z = _rot_pt_y(x, y, z, spin)
+                    gb_coin_tex.data.extend(
+                        [x+cx, y+cy, z+cz, ttmp.data[i+3], ttmp.data[i+4]])
+            d2 = (cx-px)**2+(cz-pz)**2
+            if d2 <= _GLOW_R2:
+                pulse = 0.16+0.06*math.sin(anim*2.2+r*0.17+c*0.23)
+                radial_sprite_glow_col(
+                    cx, 1.22+bob, cz, 0.34, (1.0, 0.90, 0.35), pulse)
+
+        # --- Key fragments ---
+        for frag in self.core.key_fragments.values():
+            if frag.taken:
+                continue
+            r, c = frag.cell
+            cx, cz = c+0.5, r+0.5
+            if (cx-px)**2+(cz-pz)**2 > _ENTITY_R2:
+                continue
+            kind = getattr(frag, 'kind', '')
+            if kind == 'KH':
+                base, glow_rgb = (0.55, 0.95, 1.0, 0.95), (0.65, 1.0, 1.0)
+            elif kind == 'KP':
+                base, glow_rgb = (0.9, 0.65, 1.0, 0.95), (0.95, 0.75, 1.0)
+            else:
+                base, glow_rgb = (0.75, 1.0, 0.65, 0.95), (0.85, 1.0, 0.75)
+            base_y = (ceil_h-0.85) if kind == 'KP' else 1.18
+            seed = float(sum((i+1)*ord(ch)
+                         for i, ch in enumerate(str(getattr(frag, 'id', '')))) % 997)
+            bob = 0.08*math.sin(anim*2.4+seed)
+            spin_y = (anim*140.0+seed*37.0)*(math.pi/180.0)
+            tmp = _GeoBuilder(textured=False)
+            tmp.key_col_custom(0.0, 0.0, 0.0, scale=1.05, color=base)
+            az = math.pi*0.5
+            cy = base_y+bob
+            for i in range(0, len(tmp.data), 7):
+                x, y, z = tmp.data[i], tmp.data[i+1], tmp.data[i+2]
+                x, y, z = _rot_pt_z(x, y, z, az)
+                x, y, z = _rot_pt_y(x, y, z, spin_y)
+                gb.data.extend([x+cx, y+cy, z+cz, tmp.data[i+3],
+                               tmp.data[i+4], tmp.data[i+5], tmp.data[i+6]])
+            if (cx-px)**2+(cz-pz)**2 <= _GLOW_R2:
+                radial_sprite_glow_col(
+                    cx, base_y+bob+0.05, cz, 0.55, glow_rgb, 0.12)
+
+        # --- Ghosts ---
+        ghost_colors = {1: (1.0, 0.35, 0.20, 0.82), 2: (0.30, 1.0, 0.55, 0.82),
+                        3: (0.45, 0.65, 1.0, 0.82), 4: (1.0, 0.85, 0.25, 0.82), 5: (0.95, 0.35, 1.0, 0.82)}
+        for g in self.core.ghosts.values():
+            gx = float(g.x)
+            gz = float(g.z)
+            if (gx-px)**2+(gz-pz)**2 > _ENTITY_R2:
+                continue
+            s = float(getattr(g, 'size_scale', 1.0) or 1.0)
+            bob = 0.05*math.sin(anim*2.0+g.id)
+            wobble = 0.06*math.sin(anim*4.6+g.id*0.7)
+            y_raise = 0.18+0.22*max(0.0, s-1.0)
+            base_col = ghost_colors.get(g.id, (1.0, 0.55, 0.15, 0.92))
+            col = (base_col[0], base_col[1], base_col[2], 0.92)
+            tmp = _GeoBuilder(textured=False)
+            tmp.ghost_col(0.0, 0.0, 0.0, 1.0, col,
+                          anim, segments=ghost_segments)
+            yaw_g = float(getattr(g, 'yaw', 0.0) or 0.0)
+            sx, sy, sz = 2.10*s, 2.75*s, 2.10*s
+            gy = 1.15+y_raise+bob+wobble
+            for i in range(0, len(tmp.data), 7):
+                x, y, z = tmp.data[i], tmp.data[i+1], tmp.data[i+2]
+                x *= sx
+                y *= sy
+                z *= sz
+                x, y, z = _rot_pt_y(x, y, z, yaw_g)
+                gb_ghost.data.extend(
+                    [x+gx, y+gy, z+gz, tmp.data[i+3], tmp.data[i+4], tmp.data[i+5], tmp.data[i+6]])
+            glow_y = 1.15+y_raise+bob+0.08
+            radial_sprite_glow_col(
+                gx, glow_y, gz, 0.55*s, (col[0], col[1], col[2]), 0.12)
+            radial_sprite_glow_col(
+                gx, glow_y, gz, 0.95*s, (col[0], col[1], col[2]), 0.05)
+
+        # --- Ceiling lamp glow ---
+        for r, c in (self._lamps or []):
+            lx = float(c)+0.5
+            lz = float(r)+0.5
+            floor_glow_col(lx, 0.015, lz, 1.75, (0.98, 0.95, 0.82), 0.20)
+            floor_glow_col(lx, 0.016, lz, 0.85, (0.98, 0.95, 0.82), 0.22)
+            ay = ceil_h-0.45
+            base = 1.10
+            for scale, a in ((1.0, 0.08), (1.4, 0.05), (1.9, 0.03), (2.6, 0.015)):
+                billboard_quad_col(lx, ay, lz, base*scale,
+                                   base*scale, (0.98, 0.95, 0.82, a))
+
+        # --- Spikes ---
+        spikes = getattr(self.core, 'spikes', None) or []
+        if spikes:
+            h_factor = float(self.core.spike_height_factor()) if hasattr(
+                self.core, 'spike_height_factor') else 0.0
+            for sp in spikes:
+                r, c = sp.cell
+                gb.spike_col(c+0.5, r+0.5, 0.85*h_factor)
+
+        # --- Gates ---
+        wall_h = float(self.core.wall_height)
+        for gate in self.core.gates.values():
+            for (r, c) in gate.cells:
+                gb.gate_bars_col(c+0.5, wall_h/2.0, r+0.5,
+                                 wall_h, gate.y_offset, gate.id == 'jail')
+
+        # --- Moving platforms ---
+        for plat in getattr(self.core, 'platforms', []):
+            r, c = plat.cell
+            gb.platform_col(c+0.5, plat.y_offset, r+0.5)
+
+        # --- Jail table + book ---
+        if getattr(self.core, 'jail_book_cell', None):
+            jr, jc = self.core.jail_book_cell
+            pulse = 0.16+0.06*math.sin(anim*2.2)
+            gb.table_book_col(jc+0.5, 0.0, jr+0.5, pulse)
+
+        # --- Checkpoint arrow ---
+        arrow = getattr(self.core, 'checkpoint_arrow', None)
+        if arrow and arrow.visible:
+            ar, ac = arrow.cell
+            cx = float(ac)+0.5
+            cz = float(ar)+0.5
+            bounce = 0.08*math.sin(anim*2.5)
+            cy = float(getattr(self.core, 'wall_height', 3.0))*0.45+bounce
+            pulse = 0.75+0.25*math.sin(anim*3.0)
+            radial_sprite_glow_col(
+                cx, cy, cz, 1.5, (0.15, 1.0, 0.4), 0.25*pulse, segments=48)
+            gb_arrow.arrow3d_col(cx, cy, cz, col=(0.0, 0.98, 0.35, 1.0))
+
+        # --- Sector signs ---
+        sector_signs = getattr(self.core, 'sector_signs', {}) or {}
+        for sid, (cell, facing) in sector_signs.items():
+            r, c = cell
+            gb.sign_col(c+0.5, 1.65, r+0.5, facing, 0.48, 0.18)
+            label = f"SECTOR {str(sid)[:1]}"
+            info = self._get_text_texture(label)
+            if info:
+                tex_id, _, _ = info
+                arr = gb_sign_tex.get(tex_id)
+                if arr is None:
+                    arr = _array('f')
+                    gb_sign_tex[tex_id] = arr
+                cx = c+0.5
+                cz = r+0.5
+                cy = 1.65
+                tw, th = 0.42, 0.11
+                off = 0.473
+                if facing == 'N':
+                    z = cz-off
+                    pts = [(cx-tw, cy+th, z, 0.0, 1.0), (cx+tw, cy+th, z, 1.0, 1.0),
+                           (cx+tw, cy-th, z, 1.0, 0.0), (cx-tw, cy-th, z, 0.0, 0.0)]
+                elif facing == 'S':
+                    z = cz+off
+                    pts = [(cx+tw, cy+th, z, 0.0, 1.0), (cx-tw, cy+th, z, 1.0, 1.0),
+                           (cx-tw, cy-th, z, 1.0, 0.0), (cx+tw, cy-th, z, 0.0, 0.0)]
+                elif facing == 'W':
+                    x = cx-off
+                    pts = [(x, cy+th, cz+tw, 0.0, 1.0), (x, cy+th, cz-tw, 1.0, 1.0),
+                           (x, cy-th, cz-tw, 1.0, 0.0), (x, cy-th, cz+tw, 0.0, 0.0)]
+                else:
+                    x = cx+off
+                    pts = [(x, cy+th, cz-tw, 0.0, 1.0), (x, cy+th, cz+tw, 1.0, 1.0),
+                           (x, cy-th, cz+tw, 1.0, 0.0), (x, cy-th, cz-tw, 0.0, 0.0)]
+                (x0, y0, z0, u0, v0), (x1, y1, z1, u1, v1), (x2,
+                                                             y2, z2, u2, v2), (x3, y3, z3, u3, v3) = pts
+                arr.extend([x0, y0, z0, u0, v0, x1, y1, z1, u1, v1, x2, y2, z2, u2, v2,
+                            x0, y0, z0, u0, v0, x2, y2, z2, u2, v2, x3, y3, z3, u3, v3])
+
+        # --- Jail painting ---
+        painting = getattr(self.core, 'jail_painting', None)
+        if painting:
+            (pr_cell, pc_cell), facing = painting
+            cx, cz, cy = pc_cell+0.5, pr_cell+0.5, 1.55
+            dr, dc = {'N': (-1, 0), 'S': (1, 0), 'W': (0, -1)
+                      }.get(facing, (0, 1))
+            wr, wc = pr_cell+dr, pc_cell+dc
+            if (wr, wc) in getattr(self.core, 'walls', set()):
+                neg, pos = 0, 0
+                if facing in ('N', 'S'):
+                    cc2 = wc-1
+                    while (wr, cc2) in self.core.walls:
+                        neg += 1
+                        cc2 -= 1
+                    cc2 = wc+1
+                    while (wr, cc2) in self.core.walls:
+                        pos += 1
+                        cc2 += 1
+                    cx += max(-0.28, min(0.28, (pos-neg)*0.12))
+                else:
+                    rr2 = wr-1
+                    while (rr2, wc) in self.core.walls:
+                        neg += 1
+                        rr2 -= 1
+                    rr2 = wr+1
+                    while (rr2, wc) in self.core.walls:
+                        pos += 1
+                        rr2 += 1
+                    cz += max(-0.28, min(0.28, (pos-neg)*0.12))
+
+            def wall_quad_col(cx0, cy0, cz0, w0, h0, facing0, col0, off0=0.49):
+                if facing0 == 'N':
+                    z = cz0-off0
+                    gb.quad_col((cx0-w0, cy0+h0, z), (cx0+w0, cy0+h0, z),
+                                (cx0+w0, cy0-h0, z), (cx0-w0, cy0-h0, z), col0)
+                elif facing0 == 'S':
+                    z = cz0+off0
+                    gb.quad_col((cx0+w0, cy0+h0, z), (cx0-w0, cy0+h0, z),
+                                (cx0-w0, cy0-h0, z), (cx0+w0, cy0-h0, z), col0)
+                elif facing0 == 'W':
+                    x = cx0-off0
+                    gb.quad_col((x, cy0+h0, cz0+w0), (x, cy0+h0, cz0-w0),
+                                (x, cy0-h0, cz0-w0), (x, cy0-h0, cz0+w0), col0)
+                else:
+                    x = cx0+off0
+                    gb.quad_col((x, cy0+h0, cz0-w0), (x, cy0+h0, cz0+w0),
+                                (x, cy0-h0, cz0+w0), (x, cy0-h0, cz0-w0), col0)
+
+            wall_quad_col(cx, cy, cz, 0.78, 0.50, facing,
+                          (0.30, 0.20, 0.10, 1.0))
+            wall_quad_col(cx, cy, cz, 0.72, 0.44, facing,
+                          (0.08, 0.08, 0.10, 0.98))
+            tex = self._get_jail_map_texture()
+            if tex:
+                arr = gb_sign_tex.get(int(tex))
+                if arr is None:
+                    arr = _array('f')
+                    gb_sign_tex[int(tex)] = arr
+                tw, th = 0.70, 0.41
+                off = 0.473
+                if facing == 'N':
+                    z = cz-off
+                    pts = [(cx-tw, cy+th, z, 0.0, 0.0), (cx+tw, cy+th, z, 1.0, 0.0),
+                           (cx+tw, cy-th, z, 1.0, 1.0), (cx-tw, cy-th, z, 0.0, 1.0)]
+                elif facing == 'S':
+                    z = cz+off
+                    pts = [(cx+tw, cy+th, z, 0.0, 0.0), (cx-tw, cy+th, z, 1.0, 0.0),
+                           (cx-tw, cy-th, z, 1.0, 1.0), (cx+tw, cy-th, z, 0.0, 1.0)]
+                elif facing == 'W':
+                    x = cx-off
+                    pts = [(x, cy+th, cz+tw, 0.0, 0.0), (x, cy+th, cz-tw, 1.0, 0.0),
+                           (x, cy-th, cz-tw, 1.0, 1.0), (x, cy-th, cz+tw, 0.0, 1.0)]
+                else:
+                    x = cx+off
+                    pts = [(x, cy+th, cz-tw, 0.0, 0.0), (x, cy+th, cz+tw, 1.0, 0.0),
+                           (x, cy-th, cz+tw, 1.0, 1.0), (x, cy-th, cz-tw, 0.0, 1.0)]
+                (x0, y0, z0, u0, v0), (x1, y1, z1, u1, v1), (x2,
+                                                             y2, z2, u2, v2), (x3, y3, z3, u3, v3) = pts
+                arr.extend([x0, y0, z0, u0, v0, x1, y1, z1, u1, v1, x2, y2, z2, u2, v2,
+                            x0, y0, z0, u0, v0, x2, y2, z2, u2, v2, x3, y3, z3, u3, v3])
+
+        # --- Flush draw calls (same order as kivy_renderer) ---
+        self._draw_dynamic_col(gb.data, vp)
+
+        if gb_arrow.data:
+            try:
+                self._set_no_fog_uniforms(self._col_prog)
+            except Exception:
+                pass
+            glDisable(GL_DEPTH_TEST)
+            self._draw_dynamic_col(gb_arrow.data, vp)
+            glEnable(GL_DEPTH_TEST)
+            try:
+                self._set_fog_uniforms(self._col_prog)
+            except Exception:
+                pass
+
+        if gb_ghost.data:
+            glDepthMask(False)
+            self._draw_dynamic_col(gb_ghost.data, vp)
+            glDepthMask(True)
+
+        if gb_glow.data:
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+            glDepthMask(False)
+            self._draw_dynamic_col(gb_glow.data, vp)
+            glDepthMask(True)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        if self._tex_coin and gb_coin_tex.data:
+            glUseProgram(self._tex_prog)
+            self._draw_dynamic_tex(gb_coin_tex.data, vp, self._tex_coin)
+
+        if gb_sign_tex:
+            glUseProgram(self._tex_prog)
+            for tex_id, arr in gb_sign_tex.items():
+                self._draw_dynamic_tex(arr, vp, tex_id)
+
+    # Cleanup helpers
+
+    def rebuild_geometry(self) -> None:
+        if not self._gl_ready:
+            return
+        self._build_world_vao()
+        self._build_lamp_vao()
+
+    def cleanup(self) -> None:
+        _delete_vao(self._wall_vao)
+        _delete_vao(self._floor_vao)
+        _delete_vao(self._lamp_vao)
+        for attr in ('_dyn_vao', '_dyn_tex_vao'):
+            v = getattr(self, attr, 0)
+            if v:
+                try:
+                    glDeleteVertexArrays(1, [int(v)])
+                except Exception:
+                    pass
+        for attr in ('_dyn_vbo', '_dyn_tex_vbo'):
+            v = getattr(self, attr, 0)
+            if v:
+                try:
+                    glDeleteBuffers(1, [int(v)])
+                except Exception:
+                    pass
+        if getattr(self, '_tex_coin', None):
+            try:
+                glDeleteTextures(1, [int(self._tex_coin)])
+            except Exception:
+                pass
+        if getattr(self, '_jail_map_texture', None):
+            try:
+                glDeleteTextures(1, [int(self._jail_map_texture)])
+            except Exception:
+                pass
+        for tid, _, _ in getattr(self, '_text_tex_cache', {}).values():
+            try:
+                glDeleteTextures(1, [int(tid)])
+            except Exception:
+                pass
+        if hasattr(self, '_text_tex_cache'):
+            self._text_tex_cache.clear()

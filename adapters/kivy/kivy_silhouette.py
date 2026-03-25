@@ -28,22 +28,37 @@ from kivy.core.window import Window
 def _build_patterns(n: int = 6):
     def empty():
         return [[0]*n for _ in range(n)]
+
     def add_rect(p, r0, c0, r1, c1):
         for r in range(r0, r1+1):
             for c in range(c0, c1+1):
                 if 0 <= r < n and 0 <= c < n:
                     p[r][c] = 1
     patterns = []
-    p = empty(); add_rect(p,1,1,1,4); add_rect(p,2,3,4,3); add_rect(p,4,1,4,2)
+    p = empty()
+    add_rect(p, 1, 1, 1, 4)
+    add_rect(p, 2, 3, 4, 3)
+    add_rect(p, 4, 1, 4, 2)
     patterns.append(p)
-    p = empty(); add_rect(p,1,2,4,3); add_rect(p,1,1,1,4)
+    p = empty()
+    add_rect(p, 1, 2, 4, 3)
+    add_rect(p, 1, 1, 1, 4)
     patterns.append(p)
-    p = empty(); add_rect(p,1,2,4,3); add_rect(p,0,2,1,3); add_rect(p,4,1,4,4)
+    p = empty()
+    add_rect(p, 1, 2, 4, 3)
+    add_rect(p, 0, 2, 1, 3)
+    add_rect(p, 4, 1, 4, 4)
     patterns.append(p)
-    p = empty(); add_rect(p,2,1,3,4); add_rect(p,1,2,4,3)
+    p = empty()
+    add_rect(p, 2, 1, 3, 4)
+    add_rect(p, 1, 2, 4, 3)
     patterns.append(p)
-    p = empty(); add_rect(p,1,1,1,4); add_rect(p,1,1,4,1)
-    add_rect(p,4,1,4,4); add_rect(p,2,4,4,4); add_rect(p,2,2,2,3)
+    p = empty()
+    add_rect(p, 1, 1, 1, 4)
+    add_rect(p, 1, 1, 4, 1)
+    add_rect(p, 4, 1, 4, 4)
+    add_rect(p, 2, 4, 4, 4)
+    add_rect(p, 2, 2, 2, 3)
     patterns.append(p)
     return patterns
 
@@ -75,15 +90,17 @@ class PatternDisplay(Widget):
         pad_scaled = pad * scale
         ox = self.x + (self.width - total_size * scale) / 2
         oy = self.y + (self.height - total_size * scale) / 2
-        
+
         with self.canvas:
             # Background like PySide (#2d2d30)
             Color(0.176, 0.176, 0.176, 1)
-            Rectangle(pos=(ox, oy), size=(total_size * scale, total_size * scale))
+            Rectangle(pos=(ox, oy), size=(
+                total_size * scale, total_size * scale))
             for r, row in enumerate(self._pattern):
                 for c, val in enumerate(row):
                     px = ox + pad_scaled + c * cell
-                    py = oy + pad_scaled + (n - 1 - r) * cell  # Flip Y coordinate
+                    py = oy + pad_scaled + \
+                        (n - 1 - r) * cell  # Flip Y coordinate
                     if val:
                         Color(1.0, 0.84, 0.0, 1)  # Gold like PySide
                     else:
@@ -91,7 +108,8 @@ class PatternDisplay(Widget):
                     Rectangle(pos=(px, py), size=(cell - 2, cell - 2))
             # Border like PySide
             Color(1.0, 0.84, 0.0, 0.5)
-            Line(rectangle=(ox, oy, total_size * scale, total_size * scale), width=1.5)
+            Line(rectangle=(ox, oy, total_size *
+                 scale, total_size * scale), width=1.5)
 
 
 class _CellButton(Button):
@@ -102,8 +120,8 @@ class _CellButton(Button):
         self._on = False
         self.size_hint = (None, None)
         self.size = (46, 46)  # Fixed size like PySide
-        self.background_normal  = ''
-        self.background_down    = ''
+        self.background_normal = ''
+        self.background_down = ''
         self.text = ''
         self._update_style()
 
@@ -118,7 +136,7 @@ class _CellButton(Button):
     def set_off(self):
         self._on = False
         self._update_style()
-        
+
     def _update_style(self):
         if self._on:
             # Gold style like PySide
@@ -126,7 +144,7 @@ class _CellButton(Button):
         else:
             # Dark gray style like PySide
             self.background_color = (0.25, 0.25, 0.26, 1.0)
-            
+
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
             # Visual feedback on press
@@ -135,7 +153,7 @@ class _CellButton(Button):
             else:
                 self.background_color = (0.21, 0.21, 0.21, 1.0)  # Darker gray
         return super().on_touch_down(touch)
-        
+
     def on_touch_up(self, touch):
         self._update_style()
         return super().on_touch_up(touch)
@@ -183,7 +201,8 @@ class KivySilhouetteMinigame(FloatLayout):
 
         root = BoxLayout(
             orientation='vertical', padding=0, spacing=0,
-            size_hint=(None, None), size=(720, 520),  # Proper size for PySide parity
+            # Proper size for PySide parity
+            size_hint=(None, None), size=(720, 520),
             pos_hint={'center_x': 0.5, 'center_y': 0.5},
         )
         self._panel = root
@@ -191,6 +210,7 @@ class KivySilhouetteMinigame(FloatLayout):
         with root.canvas.before:
             Color(0.18, 0.18, 0.22, 0.98)
             self._panel_bg = Rectangle(pos=root.pos, size=root.size)
+
         def _upd_panel_bg(w, v=None):
             if self._panel_bg is None:
                 return
@@ -203,9 +223,11 @@ class KivySilhouetteMinigame(FloatLayout):
         root.bind(pos=_upd_panel_bg, size=_upd_panel_bg)
 
         # Header bar that looks like a window title bar
-        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=35, spacing=8, padding=8)
-        header.background_color = (0.25, 0.25, 0.26, 1.0)  # Dark header background like PySide
-        
+        header = BoxLayout(orientation='horizontal',
+                           size_hint_y=None, height=35, spacing=8, padding=8)
+        # Dark header background like PySide
+        header.background_color = (0.25, 0.25, 0.26, 1.0)
+
         # Title in header
         title = Label(
             text='Silhouette Matching',
@@ -214,7 +236,7 @@ class KivySilhouetteMinigame(FloatLayout):
             color=(1.0, 0.84, 0.0, 1.0), bold=True,
             size_hint_x=1,
         )
-        
+
         # Close button in header
         close_btn = Button(
             text='✕', font_size=14,
@@ -223,18 +245,20 @@ class KivySilhouetteMinigame(FloatLayout):
             color=(1.0, 1.0, 1.0, 1.0),
         )
         close_btn.bind(on_press=lambda *_: self._finish(False))
-        
+
         header.add_widget(title)
         header.add_widget(close_btn)
         root.add_widget(header)
 
         # Main content area with proper padding
         content = BoxLayout(orientation='vertical', padding=8, spacing=8)
-        
+
         # Instructions with exact PySide styling
-        instructions = BoxLayout(orientation='horizontal', size_hint_y=None, height=50, padding=8)  # 8px padding + margin
-        instructions.background_color = (0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
-        
+        instructions = BoxLayout(
+            orientation='horizontal', size_hint_y=None, height=50, padding=8)  # 8px padding + margin
+        instructions.background_color = (
+            0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
+
         inst_label = Label(
             text='Match the silhouette to unlock the jail gate',
             font_size=18,
@@ -247,12 +271,13 @@ class KivySilhouetteMinigame(FloatLayout):
 
         # Grid area
         body = BoxLayout(orientation='horizontal', spacing=8)
-        
+
         left = BoxLayout(orientation='vertical', size_hint_x=1, spacing=6)
         # Target display with PySide-style container (no "Target" label in PySide)
         target_container = BoxLayout(orientation='vertical', padding=12)
-        target_container.background_color = (0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
-        
+        target_container.background_color = (
+            0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
+
         self._target_display = PatternDisplay(self._target)
         target_container.add_widget(self._target_display)
         left.add_widget(target_container)
@@ -261,8 +286,9 @@ class KivySilhouetteMinigame(FloatLayout):
         right = BoxLayout(orientation='vertical', size_hint_x=2, spacing=6)
         # Grid container with PySide-style background (no "Your Drawing" label in PySide)
         grid_container = BoxLayout(orientation='vertical', padding=12)
-        grid_container.background_color = (0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
-        
+        grid_container.background_color = (
+            0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
+
         # Simple grid container
         grid = GridLayout(cols=self._size, spacing=6, size_hint=(1, 1))
         self._cells = []
@@ -278,7 +304,7 @@ class KivySilhouetteMinigame(FloatLayout):
         right.add_widget(grid_container)
         body.add_widget(right)
         content.add_widget(body)
-        
+
         # Status with PySide-style background
         self._status = Label(
             text='Click the squares to draw the silhouette',
@@ -287,20 +313,23 @@ class KivySilhouetteMinigame(FloatLayout):
             color=(1.0, 0.84, 0.0, 1.0),  # #ffd700 like PySide
             size_hint_y=None, height=30,
         )
-        status_container = BoxLayout(orientation='horizontal', size_hint_y=None, height=40, padding=6)
-        status_container.background_color = (0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
+        status_container = BoxLayout(
+            orientation='horizontal', size_hint_y=None, height=40, padding=6)
+        status_container.background_color = (
+            0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
         status_container.add_widget(self._status)
         content.add_widget(status_container)
 
         # Buttons
-        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=40, spacing=10, padding=10)
+        btn_row = BoxLayout(orientation='horizontal',
+                            size_hint_y=None, height=40, spacing=10, padding=10)
         reset_btn = Button(
             text='Reset', font_size=14,
             background_normal='', background_color=(0.25, 0.25, 0.26, 1.0),
             size_hint_x=None, width=80,
         )
         reset_btn.bind(on_press=self._reset)
-        
+
         unlock_btn = Button(
             text='[b]Unlock[/b]', markup=True, font_size=14,
             background_normal='', background_color=(0.29, 0.71, 0.50, 1.0),
@@ -308,20 +337,20 @@ class KivySilhouetteMinigame(FloatLayout):
             size_hint_x=None, width=80,
         )
         unlock_btn.bind(on_press=self._check)
-        
+
         quit_btn = Button(
             text='Quit', font_size=14,
             background_normal='', background_color=(0.94, 0.27, 0.27, 1.0),
             size_hint_x=None, width=80,
         )
         quit_btn.bind(on_press=lambda *_: self._finish(False))
-        
+
         btn_row.add_widget(reset_btn)
         btn_row.add_widget(Widget(size_hint_x=1))  # Spacer
         btn_row.add_widget(unlock_btn)
         btn_row.add_widget(quit_btn)
         content.add_widget(btn_row)
-        
+
         root.add_widget(content)
 
         self.add_widget(root)

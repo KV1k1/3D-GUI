@@ -48,7 +48,6 @@ from OpenGL.GL import (
 )
 
 from core.game_core import GameCore
-from core.game_core import GameCore
 from core.performance_monitor import PerformanceMonitor
 
 
@@ -150,7 +149,6 @@ class _SimpleAudio:
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -193,25 +191,13 @@ class GameGLCanvas(glcanvas.GLCanvas):
             0,
         ]
 
-        # Request a modern accelerated context. Without this, some Windows setups fall back
-        # to a very slow software GL implementation (massive stutter / multi-second input lag).
+        # Request a basic OpenGL context for better compatibility
         ctx_attribs = None
-        try:
-            ctx_attribs = [
-                glcanvas.WX_GL_CONTEXT_MAJOR_VERSION,
-                3,
-                glcanvas.WX_GL_CONTEXT_MINOR_VERSION,
-                3,
-                glcanvas.WX_GL_CONTEXT_PROFILE_MASK,
-                glcanvas.WX_GL_CONTEXT_COMPATIBILITY_PROFILE,
-                0,
-            ]
-        except Exception:
-            ctx_attribs = None
+        # Don't request specific version/profile to avoid driver issues
 
         super().__init__(parent, attribList=attribs)
 
-        # Prevent background erase flicker and allow stable 2D overlay drawing.
+        # Stable 2D overlay drawing - prevents flicker :)
         try:
             self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         except Exception:
@@ -271,26 +257,26 @@ class GameGLCanvas(glcanvas.GLCanvas):
         self.performance_monitor: Optional[PerformanceMonitor] = None
 
         # Stats / end-screen state
-        # True while frozen stats screen is shown
+        # True WHILE frozen stats screen is shown
         self._stats_visible: bool = False
-        self._stats_text: str = ''                 # Formatted summary text
-        # True on level-2 completion (final end)
+        self._stats_text: str = ''                 # Summary text
+        # True on level-2 completion (the end)
         self._end_screen_visible: bool = False
 
         self._hud_font = wx.Font(
-            10, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, faceName='Segoe UI')
+            10, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, faceName='Arial')
         self._hud_font_bold = wx.Font(
-            11, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
+            11, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Arial')
         self._hud_font_big_bold = wx.Font(
-            22, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
+            22, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Arial')
         self._hud_font_level_title = wx.Font(
-            28, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
+            28, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Arial')
         self._hud_font_level_sub = wx.Font(
-            13, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, faceName='Segoe UI')
+            13, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL, faceName='Arial')
         self._hud_font_pause_title = wx.Font(
-            22, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
+            22, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Arial')
         self._hud_font_modal_btn = wx.Font(
-            18, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Segoe UI')
+            18, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD, faceName='Arial')
 
         self.Bind(wx.EVT_PAINT, self._on_paint)
         self.Bind(wx.EVT_SIZE, self._on_size)
@@ -429,6 +415,44 @@ class GameGLCanvas(glcanvas.GLCanvas):
         except Exception:
             pass
 
+    def _on_mouse_capture_lost(self, evt: wx.MouseCaptureLostEvent) -> None:
+        """Handle mouse capture being lost unexpectedly (window losing focus, etc.)"""
+        self._mouse_captured = False
+        self._mouse_center = None
+        try:
+            self.SetCursor(wx.Cursor(wx.CURSOR_ARROW))
+        except Exception:
+            pass
+        evt.Skip()
+
+    def _on_size(self, evt: wx.SizeEvent) -> None:
+        """Handle resize events and update OpenGL viewport"""
+        if not self._gl_initialized:
+            evt.Skip()
+            return
+
+        self._ensure_gl()
+        self.SetCurrent(self._gl_context)
+
+        w, h = self.GetClientSize()
+
+        # Reload textures if window reached proper size
+        if w >= 1800 and h >= 900:
+            if not getattr(self, '_textures_reloaded_for_fullscreen', False):
+                self.renderer._ensure_geometry_built()
+                self.renderer._ensure_textures_loaded()
+                self._textures_reloaded_for_fullscreen = True
+
+        self.renderer.resize(int(w), int(h))
+        self.renderer.render()
+        self._draw_hud_gl(int(w), int(h))
+
+        # Restore proper GL state after HUD rendering (PySide parity)
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_LIGHTING)
+
+        self.SwapBuffers()
+
     def _on_paint(self, _evt: wx.PaintEvent) -> None:
         _ = wx.PaintDC(self)
 
@@ -462,14 +486,23 @@ class GameGLCanvas(glcanvas.GLCanvas):
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        # Fix matrix stack overflow - completely reset both stacks
+        # Fix matrix stack overflow - completely reset both stacks efficiently
         # Reset PROJECTION stack to clean state
         glMatrixMode(GL_PROJECTION)
-        while True:
-            try:
+        try:
+            # Get current stack depth
+            from OpenGL.GL import glGetIntegerv, GL_PROJECTION_STACK_DEPTH
+            stack_depth = glGetIntegerv(GL_PROJECTION_STACK_DEPTH)[0]
+            # Pop all matrices
+            for _ in range(stack_depth):
                 glPopMatrix()
-            except Exception:
-                break  # Stack is empty now
+        except Exception:
+            # Fallback to original method if glGetIntegerv fails
+            while True:
+                try:
+                    glPopMatrix()
+                except Exception:
+                    break
         glLoadIdentity()
         glPushMatrix()
 
@@ -478,17 +511,23 @@ class GameGLCanvas(glcanvas.GLCanvas):
 
         # Reset MODELVIEW stack to clean state
         glMatrixMode(GL_MODELVIEW)
-        while True:
-            try:
+        try:
+            # Get current stack depth
+            from OpenGL.GL import glGetIntegerv, GL_MODELVIEW_STACK_DEPTH
+            stack_depth = glGetIntegerv(GL_MODELVIEW_STACK_DEPTH)[0]
+            # Pop all matrices
+            for _ in range(stack_depth):
                 glPopMatrix()
-            except Exception:
-                break  # Stack is empty now
+        except Exception:
+            # Fallback to original method if glGetIntegerv fails
+            while True:
+                try:
+                    glPopMatrix()
+                except Exception:
+                    break
         glLoadIdentity()
         glPushMatrix()
         glLoadIdentity()
-
-        # Vignette first - directly on top of 3D scene, below all HUD elements
-        self._draw_vignette_gl(w, h)
 
         # ADD THIS: Guaranteed state reset before any HUD text rendering
         glDisable(GL_LIGHTING)
@@ -509,15 +548,15 @@ class GameGLCanvas(glcanvas.GLCanvas):
         t = int(getattr(self.core, 'elapsed_s', 0.0) or 0.0)
         mm = t // 60
         ss = t % 60
-        self._gl_text(float(x + 12), float(y + 6),
-                      f'Time: {mm:02d}:{ss:02d}', 1.0, font_size=HUD_FS_MED, bold=True, color=HUD_COL_WHITE)
+        self._gl_text(float(x + 12), float(y + 1),
+                      f'Time: {mm:02d}:{ss:02d}', 1.0, font_size=11, bold=True, color=HUD_COL_WHITE)
 
         coins = int(getattr(self.core, 'coins_collected', 0))
         coins_req = int(getattr(self.core, 'coins_required', 0))
         keys = int(getattr(self.core, 'keys_collected', 0))
         keys_req = int(getattr(self.core, 'keys_required', 0))
-        self._gl_text(float(x + 12), float(y + 32),
-                      f'Coins: {coins}/{coins_req}   Keys: {keys}/{keys_req}', 1.0, font_size=HUD_FS_SMALL, bold=False, color=HUD_COL_WHITE)
+        self._gl_text(float(x + 12), float(y + 22),
+                      f'Coins: {coins}/{coins_req}   Keys: {keys}/{keys_req}', 1.0, font_size=11, bold=False, color=HUD_COL_WHITE)
 
         # Minimap icon
         icon_size = 54
@@ -537,14 +576,14 @@ class GameGLCanvas(glcanvas.GLCanvas):
             glBindTexture(GL_TEXTURE_2D, int(self._cam_icon_tex))
             glColor4f(1.0, 1.0, 1.0, 1.0)
             glBegin(GL_QUADS)
-            # Textures are uploaded flipped vertically (PIL negative stride). Top uses v=1.
-            glTexCoord2f(0.0, 1.0)
+            # Minimap icon needs to be upright - compensate for vertical texture flip
+            glTexCoord2f(0.0, 0.0)  # Top-left (flipped from 1.0)
             glVertex2f(float(ix), float(iy))
-            glTexCoord2f(1.0, 1.0)
+            glTexCoord2f(1.0, 0.0)  # Top-right (flipped from 1.0)
             glVertex2f(float(ix + icon_size), float(iy))
-            glTexCoord2f(1.0, 0.0)
+            glTexCoord2f(1.0, 1.0)  # Bottom-right (flipped from 0.0)
             glVertex2f(float(ix + icon_size), float(iy + icon_size))
-            glTexCoord2f(0.0, 0.0)
+            glTexCoord2f(0.0, 1.0)  # Bottom-left (flipped from 0.0)
             glVertex2f(float(ix), float(iy + icon_size))
             glEnd()
             glBindTexture(GL_TEXTURE_2D, 0)
@@ -575,17 +614,16 @@ class GameGLCanvas(glcanvas.GLCanvas):
                 alpha = max(0.0, min(1.0, popup_t / max(0.001, fade_out)))
 
             txt = f'SECTOR {popup_id}'
-            # Match PySide: uses _hud_font_bold (Segoe UI 11).
             _, tw_px, th_px = self.renderer.get_text_texture(
-                txt, font_family='Segoe UI', font_size=16, bold=True, color=(255, 220, 110, 255), pad=8)
+                txt, font_family='Arial', font_size=11, bold=False, color=(255, 220, 110, 255), pad=2)
             tw = float(tw_px)
             th = float(th_px)
             bx = float((w - tw) * 0.5)
-            by = float(h - 25)
-            pad_px = 10.0
-            self._gl_rect(float(bx - pad_px), float(by - th), float(tw + pad_px * 2),
-                          float(th + 10), 0.0, 0.0, 0.0, float((150 / 255) * alpha))
-            self._gl_text(float(bx), float(by - th), txt, 1.0, font_size=16,
+            by = float(h - 20)
+            pad_px = 10
+            self._gl_rect(float(bx), float(by - th), float(tw + pad_px),
+                          float(th + 12), 0.0, 0.0, 0.0, float((150 / 255) * alpha))
+            self._gl_text(float(bx), float(by - th), txt, 1.0, font_size=11,
                           bold=True, color=(255, 220, 110, int(255 * alpha)))
 
         if (not self._modal_visible) and bool(getattr(self.core, 'paused', False)):
@@ -605,18 +643,18 @@ class GameGLCanvas(glcanvas.GLCanvas):
                 self._draw_end_screen_gl(w, h)
             else:
                 self._draw_stats_screen_gl(w, h)
-            # Draw modal on top of stats/end screen (e.g. level-select after completion)
+            # Draw modal on top of stats/end screen
             if getattr(self, '_modal_visible', False):
                 self._draw_modal_gl(w, h)
 
-        # Draw lore fade (drawn after modal, before pause panel)
+        # Draw lore fade (after modal, before pause panel)
         self._draw_lore_fade_gl(w, h)
 
         # Draw "THE END" screen (if Level 2 complete)
         if getattr(self, '_show_the_end', False):
             self._draw_the_end_gl(w, h)
 
-        # Draw modal on top of everything else (when stats not visible) - ENSURE IT'S LAST
+        # Draw modal on top of everything else (when stats not visible)
         if getattr(self, '_modal_visible', False) and not getattr(self, '_stats_visible', False):
             self._draw_modal_gl(w, h)
 
@@ -660,7 +698,7 @@ class GameGLCanvas(glcanvas.GLCanvas):
         glVertex2f(x, y + hh)
         glEnd()
 
-        # Restore only texture state, preserve depth testing state for HUD
+        # Restore only texture state
         if texture_2d_enabled:
             glEnable(GL_TEXTURE_2D)
 
@@ -669,7 +707,7 @@ class GameGLCanvas(glcanvas.GLCanvas):
                  color: tuple[int, int, int, int] = (240, 240, 240, 255)) -> None:
         tex_id, tw_px, th_px = self.renderer.get_text_texture(
             str(txt),
-            font_family='Segoe UI',
+            font_family='Arial',
             font_size=int(font_size),
             bold=bool(bold),
             color=tuple(int(c) for c in color),
@@ -713,7 +751,7 @@ class GameGLCanvas(glcanvas.GLCanvas):
                         color: tuple[int, int, int, int] = (240, 240, 240, 255)) -> None:
         _, tw_px, th_px = self.renderer.get_text_texture(
             str(txt),
-            font_family='Segoe UI',
+            font_family='Arial',
             font_size=int(font_size),
             bold=bool(bold),
             color=tuple(int(c) for c in color),
@@ -726,7 +764,6 @@ class GameGLCanvas(glcanvas.GLCanvas):
 
     def _gl_line(self, x1: float, y1: float, x2: float, y2: float, *, color: tuple[int, int, int, int]) -> None:
         # Save and manage OpenGL state properly
-        # Note: In HUD context, only manage texture state, don't affect depth testing
         texture_2d_enabled = glIsEnabled(GL_TEXTURE_2D)
         glDisable(GL_TEXTURE_2D)
         glColor4f(float(color[0]) / 255.0, float(color[1]) / 255.0,
@@ -760,7 +797,7 @@ class GameGLCanvas(glcanvas.GLCanvas):
             line = ''
             for w in words:
                 trial = (line + ' ' + w).strip() if line else w
-                _, tw, _ = self.renderer.get_text_texture(trial, font_family='Segoe UI', font_size=int(
+                _, tw, _ = self.renderer.get_text_texture(trial, font_family='Arial', font_size=int(
                     font_size), bold=bool(bold), color=(220, 220, 220, 255), pad=8)
                 if int(tw) <= int(max_width_px) or not line:
                     line = trial
@@ -801,67 +838,6 @@ class GameGLCanvas(glcanvas.GLCanvas):
         self._lore_current = self._lore_queue.pop(0)
         self._lore_current_start = now
         self._lore_current_end = now + 2.5
-
-    def _draw_vignette_gl(self, w: int, h: int) -> None:
-        """Optimized vignette: 2 passes like QRadialGradients."""
-        # Note: In HUD context, depth testing is already disabled by _draw_hud_gl
-        # Only manage texture state, don't restore depth testing during HUD rendering
-        texture_2d_enabled = glIsEnabled(GL_TEXTURE_2D)
-
-        glDisable(GL_TEXTURE_2D)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-        cx = float(w) * 0.5
-        cy = float(h) * 0.52
-        min_dim = min(float(w), float(h))
-        r_inner = 0.32 * min_dim       # transparent centre
-        r_outer = 0.74 * min_dim       # max-dark ring
-        # Far enough to cover all four corners of any window shape
-        r_corner = math.sqrt((max(cx, w - cx))**2 + (max(cy, h - cy))**2) + 4.0
-        max_alpha = 255.0 / 255.0  # Full dark (completely opaque)
-        steps = 64  # Reduced from 128 for performance
-
-        # Pass 1: Main vignette
-        # Single pass from transparent center to dark corners
-        glBegin(GL_TRIANGLE_STRIP)
-        for i in range(steps + 1):
-            a = (i / steps) * 2.0 * math.pi
-            ca, sa = math.cos(a), math.sin(a)
-
-            # Inner vertex: transparent at r_inner
-            glColor4f(0.0, 0.0, 0.0, 0.0)
-            glVertex2f(cx + ca * r_inner, cy + sa * r_inner)
-
-            # Outer vertex: dark at corners (combines r_outer + corner extension)
-            glColor4f(0.0, 0.0, 0.0, max_alpha)
-            glVertex2f(cx + ca * r_corner, cy + sa * r_corner)
-        glEnd()
-
-        # Pass 2: Animated fog layer
-        t = time.perf_counter()
-        fog_cx = cx + 18.0 * math.sin(t * 0.35)
-        fog_cy = cy + 14.0 * math.cos(t * 0.31)
-        fog_r_inner = r_outer * 0.55
-        fog_r_outer = r_corner * 1.02
-
-        glBegin(GL_TRIANGLE_STRIP)
-        for i in range(steps + 1):
-            a = (i / steps) * 2.0 * math.pi
-            ca, sa = math.cos(a), math.sin(a)
-
-            # Inner vertex: transparent
-            glColor4f(0.0, 0.0, 0.0, 0.0)
-            glVertex2f(fog_cx + ca * fog_r_inner, fog_cy + sa * fog_r_inner)
-
-            # Outer vertex: subtle fog
-            glColor4f(0.0, 0.0, 0.0, 32.0 / 255.0)
-            glVertex2f(fog_cx + ca * fog_r_outer, fog_cy + sa * fog_r_outer)
-        glEnd()
-
-        # Restore only texture state, keep depth testing disabled for HUD
-        if texture_2d_enabled:
-            glEnable(GL_TEXTURE_2D)
 
     def _draw_closing_animation_gl(self, w: int, h: int, progress: float) -> None:
         """Iris-wipe to black as screen_close_progress goes 0 → 1."""
@@ -923,16 +899,15 @@ class GameGLCanvas(glcanvas.GLCanvas):
             return
 
         text = str(self._lore_current)
-        # Match PySide: Segoe UI 18, centered box at 56% height, outlined with a thick pen.
         _, tw_px, th_px = self.renderer.get_text_texture(
-            text, font_family='Segoe UI', font_size=18, bold=False, color=(255, 255, 255, 255), pad=10)
+            text, font_family='Arial', font_size=18, bold=False, color=(255, 255, 255, 255), pad=10)
         tw = float(min(w - 80, int(tw_px)))
         th = float(th_px)
         bx = float((w - tw) * 0.5)
         by = float(int(h * 0.56))
 
         outline_col = (0, 0, 0, alpha)
-        # Approximate QPen width(3) using two rings of offsets.
+        # Approximate QPen width(3) - two rings of offsets
         offsets = [
             (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1),
             (-2, 0), (2, 0), (0, -2), (0, 2), (-2, -2), (2, 2), (-2, 2), (2, -2),
@@ -1305,7 +1280,7 @@ class GameGLCanvas(glcanvas.GLCanvas):
                 h * 0.10), float(w), 80.0, title, 1.0, font_size=38, bold=True, color=HUD_COL_WHITE)
             if body:
                 self._gl_text_center(float(0), float(h * 0.10 + 60), float(
-                    w), 50.0, body, 1.0, font_size=18, bold=False, color=(200, 200, 200, 255))
+                    w), 50.0, body, 1.0, font_size=14, bold=False, color=(200, 200, 200, 255))
 
             btn_w = min(620, int(w * 0.62))
             btn_h = 82
@@ -1459,7 +1434,13 @@ class GameGLCanvas(glcanvas.GLCanvas):
 
 class WxGameWindow(wx.Frame):
     def __init__(self):
-        super().__init__(None, title='Within the Walls (WxPython)', size=(1280, 800))
+        # Use actual screen size instead of ShowFullScreen to avoid sizing issues
+        screen = wx.Display().GetClientArea()
+        width, height = screen.GetWidth(), screen.GetHeight()
+
+        super().__init__(None, title='Within the Walls (WxPython)', size=(width, height))
+        self.Show()
+        self.Center()
 
         self._progress_path = os.path.abspath('progression_wx.json')
         self._progress = self._load_progression()
@@ -1471,9 +1452,9 @@ class WxGameWindow(wx.Frame):
 
         self._save_path = os.path.abspath('savegame_wx.json')
 
-        autoload_level1_save = False
+        self._autoload_level1_save = False
         if last_level == 'level1' and os.path.exists(self._save_path):
-            autoload_level1_save = True
+            self._autoload_level1_save = True
 
         self.core = GameCore(level_id=last_level)
         self._current_level_id = last_level
@@ -1530,19 +1511,69 @@ class WxGameWindow(wx.Frame):
         self.canvas.Bind(wx.EVT_KEY_UP, self._on_key_up)
         self.canvas.Bind(wx.EVT_LEFT_DOWN, self._on_click)
         self.canvas.Bind(wx.EVT_KILL_FOCUS, self._on_kill_focus)
+        # Bind mouse capture lost event to prevent wxPython assertion errors
+        try:
+            self.canvas.Bind(wx.EVT_MOUSE_CAPTURE_LOST,
+                             self.canvas._on_mouse_capture_lost)
+        except AttributeError:
+            # Handler might not exist yet, bind after canvas is fully initialized
+            wx.CallAfter(lambda: self.canvas.Bind(
+                wx.EVT_MOUSE_CAPTURE_LOST, self.canvas._on_mouse_capture_lost))
 
         self._tick = wx.Timer(self)
         self._tick.Start(16)
 
         self._last_update_time = time.perf_counter()
 
+        # Defer VBO building to avoid blocking startup
+        wx.CallLater(100, self._deferred_initialization)
+
         self._register_core_callbacks()
+
+    def _deferred_initialization(self) -> None:
+        """Build VBOs after window is shown to avoid blocking startup"""
+        if hasattr(self.canvas, 'renderer') and self.canvas.renderer:
+            try:
+                # Wait for window to be properly sized before loading textures
+                wx.CallLater(1000, self._check_canvas_size_and_load)
+            except Exception:
+                pass
+
+    def _check_canvas_size_and_load(self) -> None:
+        """Check if canvas is properly sized before loading textures"""
+        w, h = self.canvas.GetClientSize()
+
+        # Force canvas to resize if it's still small
+        if w < 1800 or h < 900:
+            # Force window layout update
+            self.Layout()
+            self.Update()
+            self.Refresh()
+
+        # Check again after layout update
+        w, h = self.canvas.GetClientSize()
+
+        # Only load textures when canvas is at proper size
+        if w >= 1800 and h >= 900:
+            self._deferred_texture_loading()
+        else:
+            # Canvas still too small, wait longer
+            wx.CallLater(500, self._check_canvas_size_and_load)
+
+    def _deferred_texture_loading(self) -> None:
+        """Load textures and build geometry after window is fully shown"""
+        if hasattr(self.canvas, 'renderer') and self.canvas.renderer:
+            try:
+                self.canvas.renderer._ensure_geometry_built()
+                self.canvas.renderer._ensure_textures_loaded()
+            except Exception:
+                pass
 
         if self._current_level_id == 'level2':
             self._set_paused(False)
             self._start_level(
                 'level2', load_save=os.path.exists(self._save_path))
-        elif autoload_level1_save:
+        elif self._autoload_level1_save:
             self._set_paused(False)
             self._start_level('level1', load_save=True)
         else:
@@ -1984,11 +2015,26 @@ class WxGameWindow(wx.Frame):
         self._level_end_triggered = False
         self._perf_pdf_exported = False
         self._level_complete = False  # Reset level complete flag
+
+        # Explicit cleanup to ensure no cached data persists
+        # This prevents minimum FPS and frame drop counts from carrying over
+        try:
+            self.performance_monitor.frozen_stats = None
+            self.performance_monitor.frame_times.clear()
+            self.performance_monitor.fps_history.clear()
+            self.performance_monitor.input_events.clear()
+            self.performance_monitor.input_latencies.clear()
+            self.performance_monitor.memory_samples.clear()
+            self.performance_monitor.distance_walked = 0.0
+        except Exception:
+            pass
+
+        # Create fresh performance monitor for the new level
         try:
             self.performance_monitor = PerformanceMonitor(framework='wxPython')
             self.canvas.performance_monitor = self.performance_monitor
 
-            # Connect performance monitor to game core for tracking
+            # Connect performance monitor to game core
             self.core._performance_monitor = self.performance_monitor
             self.performance_monitor._game_start_time = time.perf_counter()
         except Exception:
@@ -1997,7 +2043,7 @@ class WxGameWindow(wx.Frame):
         for k in ('coins_half', 'ghost_close', 'l2_frags_done', 'l2_sector_f_done'):
             self._lore_flags.pop(k, None)
 
-        # Reset first-movement tracker so intro lore fires again on a fresh start
+        # Reset first-movement tracker
         self.__dict__.pop('_player_has_moved', None)
 
         # Reset "THE END" screen flag
@@ -2021,14 +2067,14 @@ class WxGameWindow(wx.Frame):
         self.keys_pressed.clear()
         self._register_core_callbacks()
 
-        # Load persisted UI/tutorial state and saved core state if requested.
+        # Load UI/tutorial and saved state
         if bool(load_save):
             try:
                 self._load_save_if_present()
             except Exception:
                 pass
 
-        # One-time level intro lore (fresh start only) — triggered on first movement.
+        # Level intro lore (fresh start only)
         if paused_was:
             self._set_paused(True)
         self._last_update_time = time.perf_counter()
@@ -2044,9 +2090,9 @@ class WxGameWindow(wx.Frame):
         self._last_update_time = current_time
         dt = min(dt, 0.05)
 
-        # Performance monitor: tick-to-tick wall time gives true FPS
+        # Performance monitor: tick-to-tick wall time
         try:
-            self.performance_monitor.tick()
+            self.performance_monitor.record_frame()
         except Exception:
             pass
 
@@ -2054,7 +2100,7 @@ class WxGameWindow(wx.Frame):
         if not paused:
             self.core.update(dt)
 
-        # Performance monitor: update scene data (resolution + scene objects)
+        # Update scene data (resolution + objects)
         try:
             self.performance_monitor.set_resolution(
                 *self.canvas.GetClientSize())
@@ -2104,7 +2150,7 @@ class WxGameWindow(wx.Frame):
             self.canvas.Refresh(False)
             return  # Don't update movement or time when modal is shown
 
-        move_speed = 0.18 if self._current_level_id == 'level1' else 0.30
+        move_speed = 0.12 if self._current_level_id == 'level1' else 0.18
         dx = 0.0
         dz = 0.0
 
@@ -2168,7 +2214,8 @@ class WxGameWindow(wx.Frame):
 
                 # Track ghost encounter for performance monitor
                 try:
-                    self.canvas.performance_monitor.record_ghost_encounter()
+                    # Ghost encounters removed from tracking
+                    pass
                 except Exception:
                     pass
         except Exception:
@@ -2180,6 +2227,11 @@ class WxGameWindow(wx.Frame):
     def _on_key_down(self, evt: wx.KeyEvent) -> None:
         code = int(evt.GetKeyCode())
         self.keys_pressed.add(code)
+
+        # Handle minimap toggle with 'M' key
+        if code == ord('M') or code == ord('m'):
+            self.canvas._try_open_minimap()
+            return
 
         # Record input event time for latency measurement (only for movement keys)
         try:
@@ -2328,12 +2380,12 @@ class WxGameWindow(wx.Frame):
                 # Get performance data from the monitor
                 performance_data = self.performance_monitor.get_performance_summary()
 
-                # Prepare gameplay metrics
+                # Prepare gameplay metrics with unified stats
                 gameplay_metrics = {
-                    'Coins Collected': f'{self.core.coins_collected}/{self.core.coins_required}',
-                    'Keys Collected': f'{self.core.keys_collected}/{self.core.keys_required}',
-                    'Jail Entries': str(self.core.jail_entries),
-                    'Avg Coin Collection Time': f'{self.core.avg_coin_time:.1f}s',
+                    'coins_collected': f'{self.core.coins_collected}/{self.core.coins_required}',
+                    'keys_collected': f'{self.core.keys_collected}/{self.core.keys_required}',
+                    'jail_entries': str(self.core.jail_entries),
+                    'avg_coin_collection_time': f'{self.core.avg_coin_time:.1f}s',
                 }
 
                 # Import PDF export here to avoid circular imports
