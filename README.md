@@ -1,4 +1,4 @@
-# Within the Walls – 3D bludisková hra v Pythone
+# Within the Walls – 3D bludisková hra
 
 > Repozitár k bakalárskej práci **Vizualizácia 3D objektov pomocou GUI frameworkov v jazyku Python**  
 
@@ -12,7 +12,6 @@
 - [Implementácia](#implementácia)
 - [Testovanie a výsledky](#testovanie-a-výsledky)
 - [Inštalácia a spustenie](#inštalácia-a-spustenie)
-- [Štruktúra repozitára](#štruktúra-repozitára)
 
 
 ## Ciele práce
