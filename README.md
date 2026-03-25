@@ -37,20 +37,23 @@ Prototypom, ktorý slúži ako testovacie prostredie, je 3D hra typu bludisko s 
 Táto trojica frameworkov pokrýva široké spektrum – od tradičného natívneho prístupu, cez profesionálny a výkonnostne orientovaný ekosystém, až po moderný GPU-first prístup zameraný na multiplatformovú konzistentnosť:
 
 ### Funkčné požiadavky
-
-- **Vizualizácia 3D priestoru** – bludisko, zbierateľné mince a fragmenty kľúča, nepriatelia, textúry
-- **Ovládanie** – pohyb klávesmi WASD, pohľad kamery myšou
-- **Herné mechaniky** – detekcia kolízií s mincami, aktivácia 3D puzzle minihry po zbere fragmentu kľúča, 5 typov duchov s unikátnymi superschopnosťami, hroty vysúvajúce sa v časových intervaloch, pohyblivá platforma, brány odomykané po splnení podmienok
-- **HUD** – počet mincí, fragmentov kľúča, herný čas a minimapa
-- **Pauzovacie menu** – pokračovanie, reštart, výber levelu, uloženie a ukončenie hry
-- **Zvuk** – zvukové efekty pre kroky, zber mince, otváranie brán a kolíziu s duchom
+-	Vizualizácia 3D priestoru: Aplikácia musí vedieť vykresliť 3D bludisko, zbierateľné mince a fragmenty kľúča, nepriatelia, textúry.
+-	Ovládanie: Hráč musí mať možnosť pohybovať pomocou klávesov WASD a ovládať pohľad kamery pomocou myši.
+- Detekcia kolízií s mincami, ktoré sú po zbere odstránené a zvýšia skóre.
+- Aktivácia 3D puzzle minihry po zbere fragmentu kľúča.
+-  Implementácia pohyblivých prekážok: 5 typov duchovia s unikátnymi superschopnosťami a pohyb po preddefinovaných trasách, hroty sa vysúvajú v časových intervaloch, platforma s cyklickým pohybom, brány sa odomykajú po splnení podmienok.
+-	Detekcia kolízií s nepriateľmi a pascami, po ktorom je hráč presunutý do väzenia.
+-	 Možnosť oslobodiť sa z väzenia interakciou s knihou, ktorá spustí minihru na kreslenie siluety.
+-	HUD musí zobrazovať počet mincí, fragmentov kľúča, herný čas a minimapu.
+-	Pauzovacie menu musí umožňovať pokračovanie, reštart, výber levelu, uloženie a ukončenie hry.
+-	Hra musí prehrávať zvukové efekty pre kroky, zber mince, otváranie brán a kolíziu s duchom.
 
 ### Nefunkčné požiadavky
+-	Výkon: Aplikácia musí dosahovať priemerný počet snímok za sekundu (FPS) aspoň 30 na referenčnom hardvéri pre plynulý zážitok.
+-	Použiteľnosť: Odozva na vstupy z klávesa a z myša musí byť okamžitá, bez citeľného oneskorenia.
+-	Kompatibilita: Aplikácia musí byť spustiteľná na operačných systémoch Windows a Linux bez zmeny zdrojového kódu.
+-	Udržateľnosť: Kód musí byť čitateľný, dobre štruktúrovaný a modulárny, herné jadro oddelené od GUI, aby umožňoval ľahké úpravy a rozširovanie.
 
-- **Výkon** – priemerné FPS aspoň 30 na referenčnom hardvéri
-- **Použiteľnosť** – odozva na vstupy z klávesnice a myši bez citeľného oneskorenia
-- **Kompatibilita** – spustiteľnosť na Windows a Linux bez zmeny zdrojového kódu
-- **Udržateľnosť** – herné jadro oddelené od GUI, čitateľný a modulárny kód
 
 ### Diagram prípadov použitia
 
