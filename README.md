@@ -181,7 +181,7 @@ Kivy vykazuje najnižšiu a stabilnú latenciu, čo zodpovedá jeho asynchrónne
 
 ### Spotreba pamäte RAM
 
-<img src="https://github.com/KV1k1/3D-GUI/blob/main/docs/ram">
+<img src="https://github.com/KV1k1/3D-GUI/blob/main/docs/ram.png">
 
 Kivy má najnižšiu priemernú spotrebu RAM, čo vyplýva z jeho jednoduchej architektúry. PySide a wxPython sú z hľadiska RAM porovnateľné.
 
@@ -194,7 +194,7 @@ Kivy má najnižšiu priemernú spotrebu RAM, čo vyplýva z jeho jednoduchej ar
 | Plynulosť animácií a odozva | 5 | 3 | 4 |
 | Vizuálny / herný dojem | 5 | 3 | 4 |
 | Flexibilita práce s 3D | 5 | 3.5 | 4 |
-| **Spolu** | **23/25** | **15** | **18.25** |
+| **Spolu** | **23** | **15** | **18.25** |
 
 ### Celkové hodnotenie
 
