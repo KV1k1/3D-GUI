@@ -147,16 +147,16 @@ Výkon meria trieda `PerformanceMonitor` pomocou `time.perf_counter()`. Záznamy
 
 | Metrika | PySide6 | wxPython | Kivy |
 |---------|---------|----------|------|
-| Priemerné FPS – Úroveň 1 | **59.94** | 42.44 | 59.08 |
-| Priemerné FPS – Úroveň 2 | **57.86** | 43.08 | 52.42 |
-| FPS stabilita – Úroveň 1 | **0.96** | 0.30 | 0.90 |
-| FPS stabilita – Úroveň 2 | **0.96** | 0.16 | 0.46 |
-| Výpadky snímok – Úroveň 1 | **1.20** | 43.00 | 6.60 |
-| Výpadky snímok – Úroveň 2 | **1.60** | 16.40 | 2.20 |
-| Latencia vstupu – Úroveň 1 | 29.78 ms | 7.38 ms | **8.14 ms** |
-| Latencia vstupu – Úroveň 2 | 53.44 ms | 53.48 ms | **13.52 ms** |
-| Spotreba RAM – Úroveň 1 | 367 MB | 345 MB | **329 MB** |
-| Spotreba RAM – Úroveň 2 | 409 MB | 380 MB | **300 MB** |
+| Priemerné FPS – Úroveň 1 | 59.94 | 42.44 | 59.08 |
+| Priemerné FPS – Úroveň 2 | 57.86 | 43.08 | 52.42 |
+| FPS stabilita – Úroveň 1 | 0.96 | 0.30 | 0.90 |
+| FPS stabilita – Úroveň 2 | 0.96 | 0.16 | 0.46 |
+| Výpadky snímok – Úroveň 1 | 1.20 | 43.00 | 6.60 |
+| Výpadky snímok – Úroveň 2 | 1.60 | 16.40 | 2.20 |
+| Latencia vstupu – Úroveň 1 | 29.78 ms | 7.38 ms | 8.14 ms |
+| Latencia vstupu – Úroveň 2 | 53.44 ms | 53.48 ms | 13.52 ms |
+| Spotreba RAM – Úroveň 1 | 367 MB | 345 MB | 329 MB |
+| Spotreba RAM – Úroveň 2 | 409 MB | 380 MB | 300 MB |
 
 ### Porovnanie priemerného FPS
 
@@ -189,12 +189,12 @@ Kivy má najnižšiu priemernú spotrebu RAM, čo vyplýva z jeho jednoduchej ar
 
 | Metrika | PySide | wxPython | Kivy |
 |---------|---------|----------|------|
-| Jednoduchosť implementácie | 4/5 | 3/5 | 3/5 |
-| Dokumentácia a komunita | 4/5 | 2.5/5 | 3.25/5 |
-| Plynulosť animácií a odozva | 5/5 | 3/5 | 4/5 |
-| Vizuálny / herný dojem | 5/5 | 3/5 | 4/5 |
-| Flexibilita práce s 3D | 5/5 | 3.5/5 | 4/5 |
-| **Spolu** | **23/25** | **15/25** | **18.25/25** |
+| Jednoduchosť implementácie | 4 | 3 | 3 |
+| Dokumentácia a komunita | 4 | 2.5 | 3.25 |
+| Plynulosť animácií a odozva | 5 | 3 | 4 |
+| Vizuálny / herný dojem | 5 | 3 | 4 |
+| Flexibilita práce s 3D | 5 | 3.5 | 4 |
+| **Spolu** | **23/25** | **15** | **18.25** |
 
 ### Celkové hodnotenie
 
@@ -232,12 +232,12 @@ PySide je dominantný vo výkonnostných metrikách a praktickej použiteľnosti
 
 ```bash
 # PySide6 verzia
-python src/pyside/main.py
+run_pyside6.py
 
 # wxPython verzia
-python src/wxpython/main.py
+run_wxpython.py
 
 # Kivy verzia
-python src/kivy/main.py
+run_kivy.py
 ```
 ---
