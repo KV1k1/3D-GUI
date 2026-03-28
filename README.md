@@ -57,7 +57,6 @@ Táto trojica frameworkov pokrýva široké spektrum – od tradičného natívn
 
 <img src="https://github.com/KV1k1/3D-GUI/blob/main/docs/use_case.png">
 
-*Obrázok 1 – Interakcia hráča s herným systémom*
 
 ---
 
@@ -69,7 +68,6 @@ Modul `core/game_core.py` neobsahuje žiadny import z GUI frameworkov. Trieda `G
 
 <img src="https://github.com/KV1k1/3D-GUI/blob/main/docs/package_diagram.png">
 
-*Obrázok 2 – Štruktúra herných balíkov*
 
 ### Závislosti
 
