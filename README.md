@@ -191,31 +191,25 @@ for r in range(grid_h):
     for c in range(grid_w):
         col = palette.get(sector_id_for_cell((r, c)))
         if col:
-            p.fillRect(...)   # bunka vyplnená farbou sektora
+            p.fillRect(...)  # bunka vyplnená farbou sektora
 p.setFont(QFont('Arial', 52, QFont.Bold))
 for sid, centroid in centroids.items():
-    p.drawText(..., sid[:1])   # sektorové písmená na centroidoch
+    p.drawText(..., sid[:1])  # sektorové písmená na centroidoch
 p.end()
 ptr  = img.constBits()
-data = ptr.tobytes()[:size]   # pixel buffer pre GPU
+data = ptr.tobytes()[:size]  # pixel buffer pre GPU
 # nahranie do GPU...
 ```
-
-*Kivy* neponúka kresliaci kontext mimo obrazovky, takže mapa sa generuje manuálne do bajtového poľa pixel po pixeli a text sektorov sa vloží cez `CoreLabel`:
+Kivy natívny 2D kresliaci kontext mimo obrazovky neponúka, avšak disponuje triedou Fbo (Framebuffer Object), ktorá umožňuje off-screen OpenGL renderovanie:
 ```
-data = bytearray(640 * 420 * 4)
-
-# farebné oblasti – pixel po pixeli
-for r in range(grid_h):
-    for c in range(grid_w):
-        col = palette.get(sector_id_for_cell((r, c)))
-        if col:
-            fill_rect(data, x0, y0, x1, y1, col)
-
-# text sektorových písmen
-lbl = CoreLabel(text=sid[:1], font_size=56, bold=True)
-lbl.refresh()
-blit_rgba(lbl.texture.pixels, *lbl.texture.size, dst_x, dst_y)
+fbo = Fbo(size=(640, 420), with_depthbuffer=False)
+with fbo:
+    ClearColor(0.196, 0.165, 0.141, 1.0)  # pozadie
+    ClearBuffers()
+    Color(0.314, 0.471, 0.784)  # farba sektora A
+    Rectangle(pos=(x, y), size=(cell+1, cell+1))  # bunka s prekrytím aby okraje neboli viditeľné
+    # ... sektorové písmená cez CoreLabel ...
+pixels = fbo.pixels  # RGBA data
 ```
 ### Geometria herného sveta
 
@@ -311,10 +305,10 @@ Testovanie prebiehalo na rovnakom hardvéri: AMD Ryzen 5 3600, 16 GB RAM, NVIDIA
 Výkon meria trieda `PerformanceMonitor`.
 Priemerné FPS – aritmetický priemer všetkých platných hodnôt FPS zaznamenaných počas celého behu,
 minimálne / maximálne FPS – krajné hodnoty z filtrovanej histórie,
+vstupová latencia – medián času medzi doručením udalosti frameworkom a aplikáciou zmeny stavu; filtrované hodnoty nad 500 ms,
 využitie pamäte – maximálna hodnota RAM v megabajtoch počas behu,
 čas štartu – doba od inicializácie po prvú vykreslenú snímku v milisekundách,
 čas načítania textúr – doba inicializácie herných assetov pri štarte,
-vstupová latencia – medián času medzi doručením udalosti frameworkom a aplikáciou zmeny stavu; filtrované hodnoty nad 500 ms,
 priemerný čas generovania textových textúr – priemerná doba vytvárania textových nápisov v milisekundách.
 
 
