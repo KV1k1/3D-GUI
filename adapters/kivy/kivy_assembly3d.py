@@ -1,16 +1,3 @@
-"""
-kivy_assembly3d.py  –  3D Assembly Minigame, exact PySide6 parity.
-
-Camera: distance=8, elevation=20°, azimuth=30° (matches setCameraPosition)
-Grid:   X lines x=-4..4 at z=0, Y lines y=-2..4 at z=0 (flat XY plane)
-Pieces: centered at z=0 on the grid
-Coords: pos[0]=X(left/right), pos[1]=Y(depth, front/back), pos[2]=Z(height)
-        ↑=(0,1,0) forward  ↓=(0,-1,0) back  ←=(-1,0,0)  →=(1,0,0)
-        Z+=(0,0,1) up      Z-=(0,0,-1) down
-Check: adjacency graph on integer-rounded positions
-Congrats: simulated popup window overlay (same pattern as main dialog)
-"""
-
 import ctypes
 import math
 import time
@@ -25,10 +12,11 @@ from kivy.uix.button import Button
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
+from kivy.uix.modalview import ModalView
 from kivy.uix.widget import Widget
 
 
-# ─── colours ──────────────────────────────────────────────────────────────────
+# colours
 _BG = (0.290, 0.290, 0.314, 1)   # #4a4a50
 _HDR_BG = (0.220, 0.220, 0.240, 1)
 _BTN_BG = (0.353, 0.353, 0.376, 1)   # #5a5a60
@@ -48,7 +36,7 @@ def _btn(text, fn, bg=_BTN_BG, fg=_WHITE, markup=False, **kw):
     return b
 
 
-# ─── shader ───────────────────────────────────────────────────────────────────
+# shader
 _VERT = b"""
 #version 330 core
 layout(location=0) in vec3 aPos;
@@ -87,7 +75,7 @@ def _get_prog():
     return p
 
 
-# ─── math ─────────────────────────────────────────────────────────────────────
+# math
 def _mul(a, b):
     o = [0.0]*16
     for c in range(4):
@@ -137,16 +125,13 @@ def _rot_y(a):
 
 
 def _camera_vp(w, h, rot_z_extra=0.0):
-    """
-    Camera matching pyqtgraph GLViewWidget:
-      distance=8, elevation=20°, azimuth=30°
-    Match our mesh orientation (Y-up):
-    - eye_x = dist * cos(elev) * cos(azim)
-    - eye_y = dist * cos(elev) * sin(azim)  (Y is depth)
-    - eye_z = dist * sin(elev)  (Z is height)
-    up vector = (0, 0, 1)  (Z is up)
-    FOV = 60° (pyqtgraph GLViewWidget default)
-    """
+    # Camera matching pyqtgraph GLViewWidget: distance=8, elevation=20°, azimuth=30°
+    # Match our mesh orientation (Y-up):
+    # - eye_x = dist * cos(elev) * cos(azim)
+    # - eye_y = dist * cos(elev) * sin(azim)  (Y is depth)
+    # - eye_z = dist * sin(elev)  (Z is height)
+    # up vector = (0, 0, 1)  (Z is up)
+    # FOV = 60° (pyqtgraph GLViewWidget default)
     dist = 8.0
     elev = math.radians(20)
     azim = math.radians(30) + rot_z_extra
@@ -158,7 +143,7 @@ def _camera_vp(w, h, rot_z_extra=0.0):
     return _mul(proj, view)
 
 
-# ─── geometry ─────────────────────────────────────────────────────────────────
+# geometry
 def _cube(col):
     r, g, b, a = col
     v = []
@@ -180,7 +165,7 @@ def _cube(col):
 
 
 def _pyramid(col):
-    """Pyramid (Y-up)."""
+    # Pyramid (Y-up).
     r, g, b, a = col
     verts = [
         (0.0, 0.5, 0.0),
@@ -201,13 +186,11 @@ def _pyramid(col):
 
 
 def _grid_verts():
-    """
-    X-Y plane grid at Z=0.
-      X-lines: (x-0.5,y0,0)→(x-0.5,y1,0)  for x=-4..4, y=-1.5..2.5
-      Y-lines: (x0,y-0.5,0)→(x1,y-0.5,0)  for y=-1..3
-    Gold for axis lines (x=0, y=0), grey for others.
-    Grid lines at half-integers for centered piece positions (matches wxPython).
-    """
+    # X-Y plane grid at Z=0.
+    # X-lines: (x-0.5,y0,0)→(x-0.5,y1,0)  for x=-4..4, y=-1.5..2.5
+    # Y-lines: (x0,y-0.5,0)→(x1,y-0.5,0)  for y=-1..3
+    # Gold for axis lines (x=0, y=0), grey for others.
+    # Grid lines at half-integers for centered piece positions (matches wxPython).
     v = []
     GREY = (0.30, 0.30, 0.30, 0.22)
     GOLD = (1.0,  0.84, 0.0,  0.32)
@@ -243,7 +226,7 @@ def _upload(raw):
     return int(vao), len(raw)//7
 
 
-# ─── piece / target data (coords: [x, y_depth, z_height]) ────────────────────
+# piece / target data (coords: [x, y_depth, z_height])
 Y_COL = (1, 0.875, 0, 1)
 B_COL = (0, 0.584, 1, 1)
 R_COL = (1, 0.271, 0, 1)
@@ -309,10 +292,9 @@ def _make_target(kind):
     ]
 
 
-# ─── GL 3D view ───────────────────────────────────────────────────────────────
+# GL 3D view
 class _GL3DView(Widget):
-    """GL view with Kivy-viewport-restoring Callback."""
-
+    # GL view with Kivy-viewport-restoring Callback.
     def __init__(self, bg_dark=True, allow_rotate=False, *, camera_dist=None, **kw):
         super().__init__(**kw)
         self._dark = bg_dark
@@ -448,13 +430,10 @@ class _GL3DView(Widget):
         GL.glDisable(GL.GL_SCISSOR_TEST)
 
 
-# ─── congratulations overlay ──────────────────────────────────────────────────
+# congratulations overlay
 class _CongratsOverlay(FloatLayout):
-    """
-    Simulated popup congratulations.
-    Dark bg, green title 'Congratulations!', white body, gold fragment text, OK button.
-    """
-
+    # Simulated popup congratulations.
+    # Dark bg, green title 'Congratulations!', white body, gold fragment text, OK button.
     def __init__(self, on_ok, **kw):
         kw.setdefault('size_hint', (1, 1))
         kw.setdefault('pos', (0, 0))
@@ -505,9 +484,9 @@ class _CongratsOverlay(FloatLayout):
             Line(rectangle=(w.x, w.y, w.width, w.height), width=1.5)
 
 
-# ─── minigame ─────────────────────────────────────────────────────────────────
-class KivyAssembly3DMinigame(FloatLayout):
-    """Full-screen overlay."""
+# minigame
+class KivyAssembly3DMinigame(ModalView):
+    # Modal view for 3D assembly minigame.
 
     # Constants
     GRID_MIN = -4
@@ -516,8 +495,9 @@ class KivyAssembly3DMinigame(FloatLayout):
     Z_MAX = 2
 
     def __init__(self, kind='KP', **kw):
-        kw.setdefault('size_hint', (1, 1))
-        kw.setdefault('pos', (0, 0))
+        kw.setdefault('size_hint', (None, None))
+        kw.setdefault('size', (900, 600))
+        kw.setdefault('auto_dismiss', False)
         super().__init__(**kw)
         self.kind = (kind or 'KP').upper()
         self._callback = None
@@ -539,17 +519,11 @@ class KivyAssembly3DMinigame(FloatLayout):
 
     def bind_result(self, cb): self._callback = cb
 
-    def open(self):
-        Window.add_widget(self)
+    def on_open(self):
+        # Reset state when opening to fix flashing issue on second open
+        self.reset(self.kind)
         self._gl_built = False
         Clock.schedule_once(self._build_gl, 0.15)
-
-    def dismiss(self):
-        Clock.unschedule(self._tick)
-        try:
-            Window.remove_widget(self)
-        except Exception:
-            pass
 
     def reset(self, kind):
         self.kind = (kind or 'KP').upper()
@@ -563,17 +537,11 @@ class KivyAssembly3DMinigame(FloatLayout):
         self._update_views()
         self._set_fb()
 
-    # ── UI ────────────────────────────────────────────────────────────────────
+    # UI
     def _build_ui(self):
-        with self.canvas.before:
-            Color(0, 0, 0, 0.72)
-            self._ol = Rectangle(pos=self.pos, size=self.size)
-        self.bind(size=lambda w, v: (setattr(self._ol, 'size', v), setattr(self._ol, 'pos', w.pos)),
-                  pos=lambda w, v: setattr(self._ol, 'pos', v))
-
+        # ModalView already has dim overlay, no need for manual background
         dlg = BoxLayout(orientation='vertical',
-                        size_hint=(0.78, 0.88),
-                        pos_hint={'center_x': .5, 'center_y': .5},
+                        size_hint=(1, 1),  # Fill the ModalView
                         spacing=0)
         with dlg.canvas.before:
             Color(*_BG)
@@ -720,7 +688,7 @@ class KivyAssembly3DMinigame(FloatLayout):
             self._piece_btns.append(b)
             self._piece_row.add_widget(b)
 
-    # ── GL ────────────────────────────────────────────────────────────────────
+    # GL
     def _build_gl(self, *_):
         try:
             _get_prog()
@@ -762,7 +730,7 @@ class KivyAssembly3DMinigame(FloatLayout):
         self._asm_view.set_scene(
             self._asm_vaos, self._asm_mats, self._gvao, self._gvtx)
 
-    # ── tick / flash ──────────────────────────────────────────────────────────
+    # tick / flash
     def _tick(self, dt):
         now = time.perf_counter()
         if self._game_parent and hasattr(self._game_parent, 'core'):
@@ -771,10 +739,17 @@ class KivyAssembly3DMinigame(FloatLayout):
         self._flash_t += dt
         if self._selected is not None and self._gl_built:
             self._flash_selected()
+        elif self._selected is not None:
+            pass
 
     def _flash_selected(self):
         i = self._selected
         if i is None or i >= len(self._placed) or self._placed[i]:
+            # Reset selection if piece is already placed
+            if i is not None and i < len(self._placed) and self._placed[i]:
+                self._selected = None
+            return
+        if i >= len(self._asm_vaos):
             return
         # Smooth flash between original colour and green, period=1s
         phase = (self._flash_t % 1.0)/1.0
@@ -809,7 +784,7 @@ class KivyAssembly3DMinigame(FloatLayout):
         self._asm_view.set_scene(
             self._asm_vaos, self._asm_mats, self._gvao, self._gvtx)
 
-    # ── piece actions ─────────────────────────────────────────────────────────
+    # piece actions
     def _select(self, idx):
         if idx >= len(self._placed) or self._placed[idx]:
             return

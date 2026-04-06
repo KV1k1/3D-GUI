@@ -1,14 +1,3 @@
-"""
-kivy_silhouette.py
-==================
-Kivy port of SilhouetteMatchDialog.
-
-The puzzle: a target 6x6 binary pattern is shown on the LEFT.
-The player clicks cells in the 6x6 editable grid on the RIGHT to toggle
-them gold/dark, trying to replicate the target pattern exactly.
-Reset clears the grid. Unlock checks if the player-drawn grid matches the target.
-"""
-
 from __future__ import annotations
 import random
 from typing import List
@@ -20,6 +9,7 @@ from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.label import Label
 from kivy.uix.button import Button
 from kivy.uix.widget import Widget
+from kivy.uix.modalview import ModalView
 from kivy.graphics import Color, Rectangle, Line
 from kivy.metrics import dp
 from kivy.core.window import Window
@@ -78,7 +68,7 @@ class PatternDisplay(Widget):
         n = len(self._pattern)
         if n == 0:
             return
-        # Use fixed cell size like PySide (26px) with 10px padding
+        # fixed cell size
         cell_px = 26
         pad = 10
         total_size = pad * 2 + cell_px * n
@@ -92,21 +82,18 @@ class PatternDisplay(Widget):
         oy = self.y + (self.height - total_size * scale) / 2
 
         with self.canvas:
-            # Background like PySide (#2d2d30)
             Color(0.176, 0.176, 0.176, 1)
             Rectangle(pos=(ox, oy), size=(
                 total_size * scale, total_size * scale))
             for r, row in enumerate(self._pattern):
                 for c, val in enumerate(row):
                     px = ox + pad_scaled + c * cell
-                    py = oy + pad_scaled + \
-                        (n - 1 - r) * cell  # Flip Y coordinate
+                    py = oy + pad_scaled + (n - 1 - r) * cell
                     if val:
                         Color(1.0, 0.84, 0.0, 1)  # Gold like PySide
                     else:
-                        Color(0.376, 0.376, 0.376, 1)  # Dark gray like PySide
+                        Color(0.376, 0.376, 0.376, 1)
                     Rectangle(pos=(px, py), size=(cell - 2, cell - 2))
-            # Border like PySide
             Color(1.0, 0.84, 0.0, 0.5)
             Line(rectangle=(ox, oy, total_size *
                  scale, total_size * scale), width=1.5)
@@ -119,7 +106,7 @@ class _CellButton(Button):
         self.col = col
         self._on = False
         self.size_hint = (None, None)
-        self.size = (46, 46)  # Fixed size like PySide
+        self.size = (46, 46)
         self.background_normal = ''
         self.background_down = ''
         self.text = ''
@@ -139,19 +126,17 @@ class _CellButton(Button):
 
     def _update_style(self):
         if self._on:
-            # Gold style like PySide
             self.background_color = (1.0, 0.84, 0.0, 1.0)
         else:
-            # Dark gray style like PySide
             self.background_color = (0.25, 0.25, 0.26, 1.0)
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
             # Visual feedback on press
             if self._on:
-                self.background_color = (0.9, 0.76, 0.0, 1.0)  # Darker gold
+                self.background_color = (0.9, 0.76, 0.0, 1.0)
             else:
-                self.background_color = (0.21, 0.21, 0.21, 1.0)  # Darker gray
+                self.background_color = (0.21, 0.21, 0.21, 1.0)
         return super().on_touch_down(touch)
 
     def on_touch_up(self, touch):
@@ -159,53 +144,67 @@ class _CellButton(Button):
         return super().on_touch_up(touch)
 
 
-class KivySilhouetteMinigame(FloatLayout):
-    """
-    Draw-to-match silhouette puzzle.
-    Open with .open(). Bind result with .bind_result(fn) where fn(success:bool).
-    """
+class KivySilhouetteMinigame(ModalView):
 
-    def __init__(self, **kwargs):
+    def __init__(self, hard_mode: bool = False, **kwargs):
+        kwargs.setdefault('size_hint', (None, None))
+        kwargs.setdefault('size', (720, 550))
+        kwargs.setdefault('auto_dismiss', False)
         super().__init__(**kwargs)
 
-        self.size_hint = (1, 1)
-
+        self._hard_mode = hard_mode
         self._callback = None
         self._size = 6
         patterns = _build_patterns(self._size)
-        self._target = random.choice(patterns)
+        if self._hard_mode:
+            # Ghost 4 hard pattern - specific challenging layout
+            self._target = [
+                [0, 1, 0, 0, 0, 1],
+                [1, 0, 1, 0, 1, 0],
+                [0, 1, 0, 1, 0, 1],
+                [0, 0, 1, 0, 1, 0],
+                [0, 1, 0, 1, 0, 1],
+                [1, 0, 1, 0, 1, 0],
+            ]
+        else:
+            self._target = random.choice(patterns)
         self._cells = []
-        self._bg = None
-        self._panel = None
         self._panel_bg = None
+        self._title_label = None
+        self._inst_label = None
         self._build_ui()
 
     def bind_result(self, callback):
         self._callback = callback
 
-    def open(self):
-        Window.add_widget(self)
-
-    def dismiss(self):
-        try:
-            Window.remove_widget(self)
-        except Exception:
-            pass
+    def on_open(self):
+        # Reset state when opening
+        self._reset()
+        # Choose new random pattern if not hard mode
+        if self._hard_mode:
+            self._target = [
+                [0, 1, 0, 0, 0, 1],
+                [1, 0, 1, 0, 1, 0],
+                [0, 1, 0, 1, 0, 1],
+                [0, 0, 1, 0, 1, 0],
+                [0, 1, 0, 1, 0, 1],
+                [1, 0, 1, 0, 1, 0],
+            ]
+            self._title_label.text = 'GHOST 4 CHALLENGE'
+            self._inst_label.text = 'Match this harder silhouette!'
+        else:
+            patterns = _build_patterns(self._size)
+            self._target = random.choice(patterns)
+            self._title_label.text = 'Silhouette Matching'
+            self._inst_label.text = 'Match the silhouette to unlock the jail gate'
+        self._target_display.set_pattern(self._target)
 
     def _build_ui(self):
-        with self.canvas.before:
-            Color(0, 0, 0, 160/255)
-            self._bg = Rectangle(size=self.size, pos=self.pos)
-        self.bind(size=lambda w, v: (setattr(self._bg, 'size', v), setattr(self._bg, 'pos', w.pos)),
-                  pos=lambda w, v: setattr(self._bg, 'pos', v))
-
+        # ModalView already has dim overlay, no need for manual background
         root = BoxLayout(
             orientation='vertical', padding=0, spacing=0,
-            # Proper size for PySide parity
-            size_hint=(None, None), size=(720, 520),
-            pos_hint={'center_x': 0.5, 'center_y': 0.5},
+            size_hint=(1, 1),  # Fill the ModalView
         )
-        self._panel = root
 
         with root.canvas.before:
             Color(0.18, 0.18, 0.22, 0.98)
@@ -222,15 +221,17 @@ class KivySilhouetteMinigame(FloatLayout):
                 Line(rectangle=(w.x, w.y, w.width, w.height), width=1.25)
         root.bind(pos=_upd_panel_bg, size=_upd_panel_bg)
 
-        # Header bar that looks like a window title bar
+        # Header bar - window title bar
         header = BoxLayout(orientation='horizontal',
                            size_hint_y=None, height=35, spacing=8, padding=8)
-        # Dark header background like PySide
         header.background_color = (0.25, 0.25, 0.26, 1.0)
 
         # Title in header
-        title = Label(
-            text='Silhouette Matching',
+        title_text = 'Silhouette Matching'
+        if self._hard_mode:
+            title_text = 'GHOST 4 CHALLENGE'
+        self._title_label = Label(
+            text=title_text,
             font_size=16,
             halign='left', valign='middle',
             color=(1.0, 0.84, 0.0, 1.0), bold=True,
@@ -246,37 +247,36 @@ class KivySilhouetteMinigame(FloatLayout):
         )
         close_btn.bind(on_press=lambda *_: self._finish(False))
 
-        header.add_widget(title)
+        header.add_widget(self._title_label)
         header.add_widget(close_btn)
         root.add_widget(header)
 
-        # Main content area with proper padding
+        # Main content area
         content = BoxLayout(orientation='vertical', padding=8, spacing=8)
 
-        # Instructions with exact PySide styling
         instructions = BoxLayout(
-            orientation='horizontal', size_hint_y=None, height=50, padding=8)  # 8px padding + margin
-        instructions.background_color = (
-            0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
+            orientation='horizontal', size_hint_y=None, height=50, padding=8)
+        instructions.background_color = (0.25, 0.25, 0.26, 1.0)
 
-        inst_label = Label(
-            text='Match the silhouette to unlock the jail gate',
+        inst_text = 'Match the silhouette to unlock the jail gate'
+        if self._hard_mode:
+            inst_text = 'Match this harder silhouette!'
+        self._inst_label = Label(
+            text=inst_text,
             font_size=18,
             halign='center', valign='middle',
-            color=(1.0, 0.84, 0.0, 1.0),  # #ffd700 like PySide
+            color=(1.0, 0.84, 0.0, 1.0),
             size_hint_x=1,
         )
-        instructions.add_widget(inst_label)
+        instructions.add_widget(self._inst_label)
         content.add_widget(instructions)
 
         # Grid area
         body = BoxLayout(orientation='horizontal', spacing=8)
 
         left = BoxLayout(orientation='vertical', size_hint_x=1, spacing=6)
-        # Target display with PySide-style container (no "Target" label in PySide)
         target_container = BoxLayout(orientation='vertical', padding=12)
-        target_container.background_color = (
-            0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
+        target_container.background_color = (0.25, 0.25, 0.26, 1.0)
 
         self._target_display = PatternDisplay(self._target)
         target_container.add_widget(self._target_display)
@@ -284,10 +284,8 @@ class KivySilhouetteMinigame(FloatLayout):
         body.add_widget(left)
 
         right = BoxLayout(orientation='vertical', size_hint_x=2, spacing=6)
-        # Grid container with PySide-style background (no "Your Drawing" label in PySide)
         grid_container = BoxLayout(orientation='vertical', padding=12)
-        grid_container.background_color = (
-            0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
+        grid_container.background_color = (0.25, 0.25, 0.26, 1.0)
 
         # Simple grid container
         grid = GridLayout(cols=self._size, spacing=6, size_hint=(1, 1))
@@ -310,13 +308,12 @@ class KivySilhouetteMinigame(FloatLayout):
             text='Click the squares to draw the silhouette',
             font_size=14,
             halign='center', valign='middle',
-            color=(1.0, 0.84, 0.0, 1.0),  # #ffd700 like PySide
+            color=(1.0, 0.84, 0.0, 1.0),
             size_hint_y=None, height=30,
         )
         status_container = BoxLayout(
             orientation='horizontal', size_hint_y=None, height=40, padding=6)
-        status_container.background_color = (
-            0.25, 0.25, 0.26, 1.0)  # #404040 like PySide
+        status_container.background_color = (0.25, 0.25, 0.26, 1.0)
         status_container.add_widget(self._status)
         content.add_widget(status_container)
 
@@ -356,11 +353,7 @@ class KivySilhouetteMinigame(FloatLayout):
         self.add_widget(root)
 
     def on_touch_down(self, touch):
-        if self._panel_bg is not None:
-            x, y = touch.pos
-            if not (self._panel_bg.pos[0] <= x <= self._panel_bg.pos[0] + self._panel_bg.size[0]
-                    and self._panel_bg.pos[1] <= y <= self._panel_bg.pos[1] + self._panel_bg.size[1]):
-                return True
+        # Let ModalView handle touch outside dismissal if needed
         return super().on_touch_down(touch)
 
     def _reset(self, *_):
@@ -369,21 +362,20 @@ class KivySilhouetteMinigame(FloatLayout):
                 if self._cells[r][c].is_on:
                     self._cells[r][c].set_off()
         self._status.text = 'Click the squares to draw the silhouette'
-        self._status.color = (1.0, 0.84, 0.0, 1.0)  # #ffd700 like PySide
+        self._status.color = (1.0, 0.84, 0.0, 1.0)
 
     def _check(self, *_):
         current = [[1 if self._cells[r][c].is_on else 0
                     for c in range(self._size)]
                    for r in range(self._size)]
         if current == self._target:
-            self._status.text = 'Correct! Unlocking gate...'
-            self._status.color = (1.0, 0.84, 0.0, 1.0)  # Keep gold like PySide
+            self._status.text = 'Correct!'
+            self._status.color = (1.0, 0.84, 0.0, 1.0)
             from kivy.clock import Clock
             Clock.schedule_once(lambda *_: self._finish(True), 0.6)
         else:
-            # Use 'X' instead of emoji for Kivy compatibility
             self._status.text = 'X Incorrect. Keep trying!'
-            self._status.color = (1.0, 1.0, 1.0, 1.0)  # #ffffff like PySide
+            self._status.color = (1.0, 1.0, 1.0, 1.0)
 
     def _finish(self, success: bool):
         self.dismiss()

@@ -219,14 +219,26 @@ class _StyledButton(wx.Control):
 
 
 class SilhouetteMatchDialog(wx.Dialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, hard_mode: bool = False):
         super().__init__(parent, title='Silhouette Matching', style=wx.DEFAULT_DIALOG_STYLE)
         self.SetSize((900, 620))
         self.SetMinSize((900, 620))
 
+        self._hard_mode = hard_mode
         self._size = 6
         self._patterns = self._build_patterns(self._size)
-        self._target = random.choice(self._patterns)
+        if self._hard_mode:
+            # Ghost 4 hard pattern - specific challenging layout
+            self._target = [
+                [0, 1, 0, 0, 0, 1],
+                [1, 0, 1, 0, 1, 0],
+                [0, 1, 0, 1, 0, 1],
+                [0, 0, 1, 0, 1, 0],
+                [0, 1, 0, 1, 0, 1],
+                [1, 0, 1, 0, 1, 0],
+            ]
+        else:
+            self._target = random.choice(self._patterns)
 
         root = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(root)
@@ -239,6 +251,8 @@ class SilhouetteMatchDialog(wx.Dialog):
         title_host.SetSizer(title_s)
         title = wx.StaticText(
             title_host, label='Match the silhouette to unlock the jail gate', style=wx.ALIGN_CENTER)
+        if self._hard_mode:
+            title.SetLabel('GHOST 4 CHALLENGE - Match this harder silhouette!')
         title.SetForegroundColour(wx.Colour(255, 215, 0))
         title_font = title.GetFont()
         title_font.SetPointSize(18)

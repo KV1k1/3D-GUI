@@ -14,28 +14,24 @@ from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtWidgets import QApplication, QMainWindow
 
 from core.game_core import GameCore
+from core.performance_monitor import PerformanceMonitor
 from .renderer_opengl import OpenGLRenderer
 from .silhouette_minigame import SilhouetteMatchDialog
-from core.performance_monitor import PerformanceMonitor
 from .assembly3d_minigame import Assembly3DMinigame
 
+FPS_CAMERA_SENSITIVITY = 0.002
 
-# ---------------------------------------------------------------------------
-# GL widget — owns the OpenGL surface, all painting, and HUD overlay
-# ---------------------------------------------------------------------------
 
 class GameGLWidget(QOpenGLWidget):
 
     mouse_moved = Signal(float, float)
 
-    def __init__(self, core: GameCore):
-        # Configure Modern Core OpenGL Profile for maximum performance
+    def __init__(self, core: GameCore, performance_monitor: PerformanceMonitor):
         fmt = QSurfaceFormat()
-        # Modern OpenGL Core Profile
         fmt.setProfile(QSurfaceFormat.CoreProfile)
-        fmt.setVersion(3, 3)  # Request OpenGL 3.3 Core Profile
+        fmt.setVersion(3, 3)
         fmt.setRenderableType(QSurfaceFormat.OpenGL)
-        fmt.setSamples(4)  # Enable 4x MSAA for better quality
+        fmt.setSamples(4)
 
         super().__init__()
         self.setFormat(fmt)
@@ -43,8 +39,7 @@ class GameGLWidget(QOpenGLWidget):
         self.core = core
         self.renderer = OpenGLRenderer(core)
 
-        # Performance monitor — replaced on every level start (like wxPython)
-        self.performance_monitor = PerformanceMonitor(framework='PySide6')
+        self.performance_monitor = performance_monitor
 
         self._pause_btn_rects: dict[str, tuple[int, int, int, int]] = {}
 
@@ -75,10 +70,12 @@ class GameGLWidget(QOpenGLWidget):
         self._time_bonus_text: str = ''
         self._time_bonus_until: float = 0.0
 
-        # End-screen state — written by the window, read by the paint path
+        self._flash_until: float = 0.0
+        self._flash_color: QColor = QColor(20, 20, 25, 180)
+
         self._show_the_end: bool = False
-        self._stats_text: str = ''          # formatted summary text
-        self._stats_visible: bool = False   # True while stats overlay is shown
+        self._stats_text: str = ''
+        self._stats_visible: bool = False
         self._end_screen_visible: bool = False
 
         self.setMouseTracking(True)
@@ -91,9 +88,11 @@ class GameGLWidget(QOpenGLWidget):
         self._render_timer.timeout.connect(self.update)
         self._render_timer.start(16)
 
-    # ── GL lifecycle ─────────────────────────────────────────────────────────
-
     def initializeGL(self) -> None:
+        if self.performance_monitor.startup_time_ms is None:
+            startup_ms = (time.perf_counter() -
+                          self.performance_monitor._startup_begin) * 1000
+            self.performance_monitor.record_startup_time(startup_ms)
         self.renderer.initialize()
 
     def resizeGL(self, w: int, h: int) -> None:
@@ -105,13 +104,16 @@ class GameGLWidget(QOpenGLWidget):
         except Exception:
             pass
 
-    # ── paint ────────────────────────────────────────────────────────────────
-
     def paintGL(self) -> None:
         self.renderer.render()
         self._update_scene_performance_data()
         if self.core.screen_closing or self.core.game_completed:
             self._draw_screen_close_animation()
+
+        if not (self.core.paused or self._stats_visible or self._show_the_end):
+            self.performance_monitor.record_frame()
+        else:
+            self.performance_monitor.record_frame(is_pause_frame=True)
 
     def _update_scene_performance_data(self) -> None:
         self.performance_monitor.update_scene_data(
@@ -141,7 +143,6 @@ class GameGLWidget(QOpenGLWidget):
             painter.fillRect(0, 0, w, h, QColor(0, 0, 0))
 
             if self._show_the_end:
-                # Level 2 — "THE END"
                 painter.setPen(QColor(255, 255, 255))
                 painter.setFont(QFont('Arial', 68, QFont.Bold))
                 painter.drawText(0, 0, w, h, Qt.AlignCenter, 'THE END')
@@ -150,7 +151,6 @@ class GameGLWidget(QOpenGLWidget):
                 painter.drawText(0, h - 46, w, 30,
                                  Qt.AlignCenter, 'Press ESC to continue')
             else:
-                # Level 1 — formatted stats
                 stats = self._stats_text
                 if stats:
                     lines = [ln.rstrip() for ln in stats.split('\n')]
@@ -206,18 +206,13 @@ class GameGLWidget(QOpenGLWidget):
     def paintEvent(self, event):
         super().paintEvent(event)
 
-        # Simple 20% dark overlay — only when not in end screen
         if not (self.core.screen_closing or self.core.game_completed):
             try:
                 painter = QPainter(self)
                 painter.setRenderHint(QPainter.Antialiasing, True)
                 w = self.width()
                 h = self.height()
-
-                # Simple 5% dark overlay
-                painter.fillRect(0, 0, w, h, QColor(
-                    0, 0, 0, 13))  # 13/255 ≈ 5%
-
+                painter.fillRect(0, 0, w, h, QColor(0, 0, 0, 13))
                 painter.end()
             except Exception:
                 pass
@@ -234,110 +229,324 @@ class GameGLWidget(QOpenGLWidget):
             return
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setFont(self._hud_font)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setFont(self._hud_font)
+
+            w = self.width()
+            h = self.height()
+
+            pad = 10
+            box_w = 320
+            box_h = 56
+            x = (w - box_w) // 2
+            y = pad
+
+            painter.fillRect(x, y, box_w, box_h, QColor(0, 0, 0, 160))
+            painter.setPen(QColor(240, 240, 240))
+            painter.drawRect(x, y, box_w, box_h)
+
+            painter.setFont(self._hud_font_bold)
+            t = int(self.core.elapsed_s)
+            painter.drawText(
+                x + 12, y + 22, f'Time: {t // 60:02d}:{t % 60:02d}')
+
+            nowp = time.perf_counter()
+            if self._time_bonus_text and nowp < self._time_bonus_until:
+                painter.setFont(QFont('Arial', 22, QFont.Bold))
+                painter.setPen(QColor(255, 220, 60))
+                painter.drawText(x + 210, y + 8, 120, 36, Qt.AlignLeft | Qt.AlignVCenter,
+                                 self._time_bonus_text)
+            elif self._time_bonus_text and nowp >= self._time_bonus_until:
+                self._time_bonus_text = ''
+
+            painter.setFont(self._hud_font)
+            painter.setPen(QColor(240, 240, 240))
+            painter.drawText(x + 12, y + 44,
+                             f'Coins: {self.core.coins_collected}/{self.core.coins_required}'
+                             f'   Keys: {self.core.keys_collected}/{self.core.keys_required}')
+
+            icon_size = 54
+            ix = w - icon_size - 16
+            iy = h - icon_size - 16
+            self._cam_icon_rect = (ix, iy, icon_size, icon_size)
+
+            now = time.perf_counter()
+            on_cd = now < self._minimap_cooldown_until
+            painter.fillRect(ix - 6, iy - 6, icon_size + 12,
+                             icon_size + 12, QColor(0, 0, 0, 130))
+            painter.setPen(QColor(220, 220, 220))
+            painter.drawRect(ix - 6, iy - 6, icon_size + 12, icon_size + 12)
+
+            if not self._cam_icon.isNull():
+                painter.drawImage(
+                    ix, iy,
+                    self._cam_icon.scaled(icon_size, icon_size,
+                                          Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation),
+                )
+            else:
+                painter.fillRect(ix, iy, icon_size, icon_size,
+                                 QColor(120, 120, 120))
+
+            if on_cd:
+                remaining = max(0.0, self._minimap_cooldown_until - now)
+                painter.fillRect(ix, iy, icon_size, icon_size,
+                                 QColor(0, 0, 0, 160))
+                painter.setPen(QColor(255, 210, 90))
+                painter.drawText(ix + 10, iy + 32,
+                                 f'{int(math.ceil(remaining))}s')
+
+            if now < self._minimap_until:
+                self._draw_minimap_overlay(painter)
+
+            popup_t = float(
+                getattr(self.core, '_sector_popup_timer', 0.0) or 0.0)
+            popup_id = str(getattr(self.core, '_sector_popup_id', '') or '')
+            if popup_t > 0.0 and popup_id:
+                fade_in = 0.25
+                fade_out = 0.5
+                total = 2.0
+                if popup_t > (total - fade_in):
+                    alpha = max(
+                        0.0, min(1.0, (total - popup_t) / max(0.001, fade_in)))
+                elif popup_t < fade_out:
+                    alpha = max(0.0, min(1.0, popup_t / max(0.001, fade_out)))
+                else:
+                    alpha = 1.0
+
+                text = f'SECTOR {popup_id}'
+                painter.setFont(self._hud_font_bold)
+                tw = painter.fontMetrics().horizontalAdvance(text)
+                th = painter.fontMetrics().height()
+                bx = (w - tw) // 2
+                by = h - 25
+                painter.fillRect(bx - 10, by - th, tw + 20, th + 10,
+                                 QColor(0, 0, 0, int(150 * alpha)))
+                painter.setPen(QColor(255, 220, 110, int(255 * alpha)))
+                painter.drawText(bx, by, text)
+
+            if self._modal_visible:
+                self._draw_modal(painter)
+
+            self._draw_lore_fade(painter)
+
+            if (not self._modal_visible) and getattr(self.core, 'paused', False):
+                self._draw_pause_panel(painter)
+        finally:
+            painter.end()
+
+    def trigger_flash(self, duration_ms: float = 300, color: Optional[QColor] = None) -> None:
+        self._flash_until = time.perf_counter() + (duration_ms / 1000.0)
+        if color:
+            self._flash_color = color
+        self._safe_update()
+
+    def enqueue_lore_lines(self, lines: list[str]) -> None:
+        for ln in (lines or []):
+            s = str(ln or '').strip()
+            if s:
+                self._lore_queue.append(s)
+        if not self._lore_current and self._lore_queue:
+            self._advance_lore_line()
+        self._safe_update()
+
+    def _advance_lore_line(self) -> None:
+        if not self._lore_queue:
+            self._lore_current = ''
+            self._lore_current_start = 0.0
+            self._lore_current_end = 0.0
+            return
+        now = time.perf_counter()
+        self._lore_current = self._lore_queue.pop(0)
+        self._lore_current_start = now
+        self._lore_current_end = now + 2.5
+
+    def is_lore_playing(self) -> bool:
+        return bool(self._lore_current or self._lore_queue)
+
+    def _draw_lore_fade(self, painter: QPainter) -> None:
+        if not self._lore_current:
+            if self._lore_queue:
+                self._advance_lore_line()
+            else:
+                return
+
+        now = time.perf_counter()
+        if now >= self._lore_current_end:
+            self._lore_current = ''
+            self._lore_current_start = 0.0
+            self._lore_current_end = 0.0
+            self._safe_update()
+            return
+
+        duration = max(0.01, self._lore_current_end - self._lore_current_start)
+        t = max(0.0, min(1.0, (now - self._lore_current_start) / duration))
+        fade = 0.18
+        a = t / fade if t < fade else (1.0 - t) / \
+            fade if t > 1.0 - fade else 1.0
+        alpha = int(230 * max(0.0, min(1.0, a)))
+        if alpha <= 0:
+            return
 
         w = self.width()
         h = self.height()
-        pad = 10
-        box_w = 320
-        box_h = 56
-        x = (w - box_w) // 2
-        y = pad
+        painter.setFont(QFont('Arial', 18))
+        text = self._lore_current
+        fm = painter.fontMetrics()
+        tw = min(w - 80, fm.horizontalAdvance(text))
+        th = fm.height()
+        bx = (w - tw) // 2
+        by = int(h * 0.56)
 
-        painter.fillRect(x, y, box_w, box_h, QColor(0, 0, 0, 160))
-        painter.setPen(QColor(240, 240, 240))
-        painter.drawRect(x, y, box_w, box_h)
+        outline = QPen(QColor(0, 0, 0, alpha))
+        outline.setWidth(3)
+        painter.setPen(outline)
+        for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
+            painter.drawText(bx + ox, by + oy, tw, th +
+                             4, Qt.AlignCenter, text)
+        painter.setPen(QColor(255, 255, 255, alpha))
+        painter.drawText(bx, by, tw, th + 4, Qt.AlignCenter, text)
 
-        painter.setFont(self._hud_font_bold)
-        t = int(self.core.elapsed_s)
-        painter.drawText(x + 12, y + 22, f'Time: {t // 60:02d}:{t % 60:02d}')
+    def _draw_minimap_overlay(self, painter: QPainter) -> None:
+        maze_rows = len(self.core.layout)
+        maze_cols = len(self.core.layout[0]) if maze_rows > 0 else 0
+        if maze_rows == 0 or maze_cols == 0:
+            return
 
-        nowp = time.perf_counter()
-        if self._time_bonus_text and nowp < self._time_bonus_until:
-            painter.setFont(QFont('Arial', 22, QFont.Bold))
-            painter.setPen(QColor(255, 220, 60))
-            painter.drawText(x + 210, y + 8, 120, 36, Qt.AlignLeft | Qt.AlignVCenter,
-                             self._time_bonus_text)
-        elif self._time_bonus_text and nowp >= self._time_bonus_until:
-            self._time_bonus_text = ''
+        max_cell_w = int(self.width() * 0.85 / maze_cols)
+        max_cell_h = int((self.height() - 40) / maze_rows)
+        cell_px = min(max_cell_w, max_cell_h)
+        if cell_px <= 0:
+            return
 
-        painter.setFont(self._hud_font)
-        painter.setPen(QColor(240, 240, 240))
-        painter.drawText(x + 12, y + 44,
-                         f'Coins: {self.core.coins_collected}/{self.core.coins_required}'
-                         f'   Keys: {self.core.keys_collected}/{self.core.keys_required}')
+        mw = maze_cols * cell_px
+        mh = maze_rows * cell_px
+        x0 = (self.width() - mw) // 2
+        y0 = 20 + ((self.height() - 40) - mh) // 2
 
-        # Minimap icon
-        icon_size = 54
-        ix = w - icon_size - 16
-        iy = h - icon_size - 16
-        self._cam_icon_rect = (ix, iy, icon_size, icon_size)
+        painter.fillRect(x0, y0, mw, mh, QColor(10, 10, 12, 210))
+        painter.setPen(QColor(230, 230, 230))
+        painter.drawRect(x0, y0, mw, mh)
+
+        def to_screen(r: float, c: float) -> tuple[float, float]:
+            return x0 + c * cell_px, y0 + r * cell_px
+
+        for r in range(maze_rows):
+            for c in range(maze_cols):
+                rx, ry = to_screen(r, c)
+                sz = int(cell_px + 1)
+                if (r, c) in self.core.walls:
+                    painter.fillRect(int(rx), int(ry), sz,
+                                     sz, QColor(45, 45, 55))
+                elif (r, c) in self.core.floors:
+                    painter.fillRect(int(rx), int(ry), sz, sz,
+                                     QColor(125, 125, 135))
+                else:
+                    painter.fillRect(int(rx), int(ry), sz,
+                                     sz, QColor(15, 15, 18))
+
+        pr, pc = int(self.core.player.z), int(self.core.player.x)
+        px, py = to_screen(pr + 0.5, pc + 0.5)
+        player_size = max(12, int(cell_px * 0.7))
+        half = player_size / 2
+
+        painter.setPen(QPen(QColor(0, 255, 0), 2))
+        painter.setBrush(QColor(50, 255, 50))
+        painter.drawPolygon(QPolygonF([
+            QPointF(px, py - half),
+            QPointF(px + half, py),
+            QPointF(px, py + half),
+            QPointF(px - half, py),
+        ]))
+
+        center_size = player_size * 0.4
+        painter.setPen(QPen(QColor(255, 255, 255), 1))
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawEllipse(int(px - center_size / 2), int(py - center_size / 2),
+                            int(center_size), int(center_size))
+
+        yaw = float(getattr(self.core.player, 'yaw', 0.0))
+        fx = math.sin(yaw)
+        fz = math.cos(yaw)
+        line_len = max(6, int(cell_px * 0.75))
+        painter.setPen(QPen(QColor(255, 220, 110), 2))
+        painter.drawLine(int(px), int(py), int(
+            px + int(fx * line_len)), int(py + int(fz * line_len)))
+
+        for coin in self.core.coins.values():
+            if coin.taken:
+                continue
+            r, c = coin.cell
+            cx, cy = to_screen(r + 0.5, c + 0.5)
+            coin_size = max(6, int(cell_px * 0.35))
+            painter.setPen(QPen(QColor(255, 215, 0), 1))
+            painter.setBrush(QColor(255, 215, 0))
+            painter.drawEllipse(int(cx - coin_size / 2),
+                                int(cy - coin_size / 2), coin_size, coin_size)
+
+        ghost_colors = {
+            1: QColor(255, 80, 60),
+            2: QColor(80, 255, 140),
+            3: QColor(110, 170, 255),
+            4: QColor(255, 220, 80),
+            5: QColor(255, 90, 255),
+        }
+        ghost_size = max(10, int(cell_px * 0.6))
+        for ghost in self.core.ghosts.values():
+            col = ghost_colors.get(ghost.id, QColor(255, 120, 30))
+            s = float(getattr(ghost, 'size_scale', 1.0) or 1.0)
+            gsz = int(max(8, ghost_size * s))
+            sx, sy = to_screen(ghost.z + 0.5, ghost.x + 0.5)
+
+            painter.setPen(QPen(col.darker(150), 1))
+            painter.setBrush(col)
+            painter.drawEllipse(int(sx - gsz / 2), int(sy - gsz / 2), gsz, gsz)
+
+            eye_size = max(2, int(gsz * 0.15))
+            eye_ox = gsz * 0.25
+            eye_oy = gsz * 0.1
+            for ex in (sx - eye_ox, sx + eye_ox):
+                ey = sy - eye_oy
+                painter.setPen(QPen(QColor(0, 0, 0), 1))
+                painter.setBrush(QColor(255, 255, 255))
+                painter.drawEllipse(int(ex - eye_size / 2),
+                                    int(ey - eye_size / 2), eye_size, eye_size)
+                pupil = max(1, int(eye_size * 0.5))
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(0, 0, 0))
+                painter.drawEllipse(int(ex - pupil / 2),
+                                    int(ey - pupil / 2), pupil, pupil)
 
         now = time.perf_counter()
-        on_cd = now < self._minimap_cooldown_until
-        painter.fillRect(ix - 6, iy - 6, icon_size + 12,
-                         icon_size + 12, QColor(0, 0, 0, 130))
-        painter.setPen(QColor(220, 220, 220))
-        painter.drawRect(ix - 6, iy - 6, icon_size + 12, icon_size + 12)
-
-        if not self._cam_icon.isNull():
-            painter.drawImage(
-                ix, iy,
-                self._cam_icon.scaled(icon_size, icon_size,
-                                      Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation),
-            )
-        else:
-            painter.fillRect(ix, iy, icon_size, icon_size,
-                             QColor(120, 120, 120))
-
-        if on_cd:
-            remaining = max(0.0, self._minimap_cooldown_until - now)
-            painter.fillRect(ix, iy, icon_size, icon_size,
-                             QColor(0, 0, 0, 160))
-            painter.setPen(QColor(255, 210, 90))
-            painter.drawText(ix + 10, iy + 32, f'{int(math.ceil(remaining))}s')
-
         if now < self._minimap_until:
-            self._draw_minimap_overlay(painter)
-
-        # Sector popup
-        popup_t = float(getattr(self.core, '_sector_popup_timer', 0.0) or 0.0)
-        popup_id = str(getattr(self.core, '_sector_popup_id', '') or '')
-        if popup_t > 0.0 and popup_id:
-            fade_in = 0.25
-            fade_out = 0.5
-            total = 2.0
-            if popup_t > (total - fade_in):
-                alpha = max(
-                    0.0, min(1.0, (total - popup_t) / max(0.001, fade_in)))
-            elif popup_t < fade_out:
-                alpha = max(0.0, min(1.0, popup_t / max(0.001, fade_out)))
-            else:
-                alpha = 1.0
-
-            text = f'SECTOR {popup_id}'
+            remaining = max(0.0, self._minimap_until - now)
             painter.setFont(self._hud_font_bold)
-            tw = painter.fontMetrics().horizontalAdvance(text)
+            ctext = f'MAP: {int(remaining + 0.5)}s'
+            tw = painter.fontMetrics().horizontalAdvance(ctext)
             th = painter.fontMetrics().height()
-            bx = (w - tw) // 2
-            by = h - 25
-            painter.fillRect(bx - 10, by - th, tw + 20, th + 10,
-                             QColor(0, 0, 0, int(150 * alpha)))
-            painter.setPen(QColor(255, 220, 110, int(255 * alpha)))
-            painter.drawText(bx, by, text)
+            cx2 = x0 + mw - tw - 10
+            cy2 = y0 + th + 5
+            painter.fillRect(cx2 - 3, cy2 - th + 3, tw + 6,
+                             th + 3, QColor(0, 0, 0, 180))
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(cx2, cy2, ctext)
 
-        if self._modal_visible:
-            self._draw_modal(painter)
+    def _try_open_minimap(self) -> None:
+        now = time.perf_counter()
+        if now < self._minimap_cooldown_until:
+            return
+        self._minimap_until = now + 10.0
+        self._minimap_cooldown_until = now + 30.0
 
-        self._draw_lore_fade(painter)
+    def _close_minimap(self) -> None:
+        self._minimap_until = 0.0
 
-        if (not self._modal_visible) and getattr(self.core, 'paused', False):
-            self._draw_pause_panel(painter)
-
-        painter.end()
-
-    # ── modal drawing ─────────────────────────────────────────────────────────
+    def _toggle_minimap(self) -> None:
+        now = time.perf_counter()
+        if now < self._minimap_until:
+            self._close_minimap()
+            return
+        self._try_open_minimap()
 
     def _draw_modal(self, painter: QPainter) -> None:
         w = self.width()
@@ -428,10 +637,10 @@ class GameGLWidget(QOpenGLWidget):
         painter.setPen(QColor(220, 220, 220)
                        if self._modal_allow_close else QColor(120, 120, 120))
         painter.drawRect(close_x, close_y, close_size, close_size)
-        painter.drawLine(close_x + 9, close_y + 9,
-                         close_x + close_size - 9, close_y + close_size - 9)
-        painter.drawLine(close_x + close_size - 9, close_y + 9,
-                         close_x + 9, close_y + close_size - 9)
+        painter.drawLine(close_x + 8, close_y + 8,
+                         close_x + close_size - 8, close_y + close_size - 8)
+        painter.drawLine(close_x + close_size - 8, close_y + 8,
+                         close_x + 8, close_y + close_size - 8)
 
     def _draw_pause_panel(self, painter: QPainter) -> None:
         w = self.width()
@@ -442,6 +651,7 @@ class GameGLWidget(QOpenGLWidget):
         panel_h = 610
         x0 = (w - panel_w) // 2
         y0 = (h - panel_h) // 2
+
         painter.fillRect(x0, y0, panel_w, panel_h, QColor(18, 18, 22, 235))
         painter.setPen(QColor(220, 220, 220))
         painter.drawRect(x0, y0, panel_w, panel_h)
@@ -455,18 +665,16 @@ class GameGLWidget(QOpenGLWidget):
         painter.setFont(self._hud_font)
         painter.setPen(QColor(235, 235, 235))
 
-        fps = self.performance_monitor.stable_fps(update_interval_s=2.5)
-        lat = self.performance_monitor.avg_input_latency_ms()
+        fps = self.performance_monitor.stable_display_fps(
+            update_interval_s=2.5)
         ram = self.performance_monitor.current_ram_mb()
 
         stats_x = x0 + 36
         stats_y = y0 + 96
         line_h = 24
         painter.drawText(stats_x, stats_y + line_h * 0, f'FPS: {int(fps)}')
-        painter.drawText(stats_x, stats_y + line_h * 1,
-                         f'Avg input latency: {lat:.1f} ms')
         painter.drawText(stats_x, stats_y + line_h *
-                         2, f'RAM usage: {ram:.1f} MB')
+                         1, f'RAM usage: {ram:.1f} MB')
 
         btn_w = 280
         btn_h = 48
@@ -475,11 +683,11 @@ class GameGLWidget(QOpenGLWidget):
         top_btn_y = y0 + 200
 
         buttons = [
-            ('resume',    'Resume',       center_x, top_btn_y + (btn_h + gap) * 0),
-            ('levels',    'Levels',       center_x, top_btn_y + (btn_h + gap) * 1),
-            ('save',      'Save Game',    center_x, top_btn_y + (btn_h + gap) * 2),
-            ('save_exit', 'Save + Exit',  center_x, top_btn_y + (btn_h + gap) * 3),
-            ('restart',   'Restart',      center_x, top_btn_y + (btn_h + gap) * 4),
+            ('resume',    'Resume',         center_x, top_btn_y + (btn_h + gap) * 0),
+            ('levels',    'Levels',         center_x, top_btn_y + (btn_h + gap) * 1),
+            ('save',      'Save Game',      center_x, top_btn_y + (btn_h + gap) * 2),
+            ('save_exit', 'Save + Exit',    center_x, top_btn_y + (btn_h + gap) * 3),
+            ('restart',   'Restart',        center_x, top_btn_y + (btn_h + gap) * 4),
             ('exit',      'Exit (No Save)', center_x, top_btn_y + (btn_h + gap) * 5),
         ]
 
@@ -491,258 +699,6 @@ class GameGLWidget(QOpenGLWidget):
             painter.drawRect(bx, by, btn_w, btn_h)
             painter.setPen(QColor(255, 255, 255))
             painter.drawText(bx, by, btn_w, btn_h, Qt.AlignCenter, label)
-
-    # ── minimap ───────────────────────────────────────────────────────────────
-
-    def _draw_minimap_overlay(self, painter: QPainter) -> None:
-        maze_rows = len(self.core.layout)
-        maze_cols = len(self.core.layout[0]) if maze_rows > 0 else 0
-        if maze_rows == 0 or maze_cols == 0:
-            return
-
-        max_cell_w = int(self.width() * 0.85 / maze_cols)
-        max_cell_h = int((self.height() - 40) / maze_rows)
-        cell_px = min(max_cell_w, max_cell_h)
-
-        mw = maze_cols * cell_px
-        mh = maze_rows * cell_px
-        x0 = (self.width() - mw) // 2
-        y0 = 20 + ((self.height() - 40) - mh) // 2
-
-        painter.fillRect(x0, y0, mw, mh, QColor(10, 10, 12, 210))
-        painter.setPen(QColor(230, 230, 230))
-        painter.drawRect(x0, y0, mw, mh)
-
-        def to_screen(r: float, c: float) -> tuple[float, float]:
-            return x0 + c * cell_px, y0 + r * cell_px
-
-        for r in range(maze_rows):
-            for c in range(maze_cols):
-                rx, ry = to_screen(r, c)
-                sz = int(cell_px + 1)
-                if (r, c) in self.core.walls:
-                    painter.fillRect(int(rx), int(ry), sz,
-                                     sz, QColor(45, 45, 55))
-                elif (r, c) in self.core.floors:
-                    painter.fillRect(int(rx), int(ry), sz, sz,
-                                     QColor(125, 125, 135))
-                else:
-                    painter.fillRect(int(rx), int(ry), sz,
-                                     sz, QColor(15, 15, 18))
-
-        # Player diamond
-        pr, pc = int(self.core.player.z), int(self.core.player.x)
-        px, py = to_screen(pr + 0.5, pc + 0.5)
-        player_size = max(12, int(cell_px * 0.7))
-        half = player_size / 2
-
-        painter.setPen(QPen(QColor(0, 255, 0), 2))
-        painter.setBrush(QColor(50, 255, 50))
-        painter.drawPolygon(QPolygonF([
-            QPointF(px, py - half),
-            QPointF(px + half, py),
-            QPointF(px, py + half),
-            QPointF(px - half, py)
-        ]))
-
-        center_size = player_size * 0.4
-        painter.setPen(QPen(QColor(255, 255, 255), 1))
-        painter.setBrush(QColor(255, 255, 255))
-        painter.drawEllipse(int(px - center_size / 2), int(py - center_size / 2),
-                            int(center_size), int(center_size))
-
-        # Directional pointer (like wxPython)
-        yaw = float(getattr(self.core.player, 'yaw', 0.0))
-        fx = math.sin(yaw)
-        fz = math.cos(yaw)
-        line_len = max(6, int(cell_px * 0.75))
-
-        # Facing line
-        painter.setPen(QPen(QColor(255, 220, 110), 2))
-        x1 = px + int(fx * line_len)
-        y1 = py + int(fz * line_len)
-        painter.drawLine(int(px), int(py), int(x1), int(y1))
-
-        for coin in self.core.coins.values():
-            if coin.taken:
-                continue
-            r, c = coin.cell
-            cx, cy = to_screen(r + 0.5, c + 0.5)
-            coin_size = max(8, int(cell_px * 0.6))
-            painter.setPen(QPen(QColor(255, 255, 0), 1))
-            painter.setBrush(QColor(255, 255, 0))
-            painter.drawEllipse(int(cx - coin_size / 2), int(cy - coin_size / 2),
-                                coin_size, coin_size)
-
-        # Ghosts
-        ghost_colors = {
-            1: QColor(255, 80, 60),
-            2: QColor(80, 255, 140),
-            3: QColor(110, 170, 255),
-            4: QColor(255, 220, 80),
-            5: QColor(255, 90, 255),
-        }
-        ghost_size = max(10, int(cell_px * 0.6))
-        for ghost in self.core.ghosts.values():
-            col = ghost_colors.get(ghost.id, QColor(255, 120, 30))
-            s = float(getattr(ghost, 'size_scale', 1.0) or 1.0)
-            gsz = int(max(8, ghost_size * s))
-            sx, sy = to_screen(ghost.z + 0.5, ghost.x + 0.5)
-
-            painter.setPen(QPen(col.darker(150), 1))
-            painter.setBrush(col)
-            painter.drawEllipse(int(sx - gsz / 2), int(sy - gsz / 2), gsz, gsz)
-
-            eye_size = max(2, int(gsz * 0.15))
-            eye_ox = gsz * 0.25
-            eye_oy = gsz * 0.1
-            for ex in (sx - eye_ox, sx + eye_ox):
-                ey = sy - eye_oy
-                painter.setPen(QPen(QColor(0, 0, 0), 1))
-                painter.setBrush(QColor(255, 255, 255))
-                painter.drawEllipse(int(ex - eye_size / 2), int(ey - eye_size / 2),
-                                    eye_size, eye_size)
-                pupil = max(1, int(eye_size * 0.5))
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor(0, 0, 0))
-                painter.drawEllipse(int(ex - pupil / 2), int(ey - pupil / 2),
-                                    pupil, pupil)
-
-        # Countdown
-        now = time.perf_counter()
-        if now < self._minimap_until:
-            remaining = max(0.0, self._minimap_until - now)
-            painter.setFont(self._hud_font_bold)
-            ctext = f'MAP: {int(remaining + 0.5)}s'
-            tw = painter.fontMetrics().horizontalAdvance(ctext)
-            th = painter.fontMetrics().height()
-            cx2 = x0 + mw - tw - 10
-            cy2 = y0 + th + 5
-            painter.fillRect(cx2 - 3, cy2 - th + 3, tw + 6,
-                             th + 3, QColor(0, 0, 0, 180))
-            painter.setPen(QColor(255, 255, 255))
-            painter.drawText(cx2, cy2, ctext)
-
-    def _try_open_minimap(self) -> None:
-        now = time.perf_counter()
-        if now < self._minimap_cooldown_until:
-            return
-        self._minimap_until = now + 10.0
-        self._minimap_cooldown_until = now + 30.0
-
-    # ── lore ─────────────────────────────────────────────────────────────────
-
-    def enqueue_lore_lines(self, lines: list[str]) -> None:
-        for ln in (lines or []):
-            s = str(ln or '').strip()
-            if s:
-                self._lore_queue.append(s)
-        if not self._lore_current and self._lore_queue:
-            self._advance_lore_line()
-        self._safe_update()
-
-    def _advance_lore_line(self) -> None:
-        if not self._lore_queue:
-            self._lore_current = ''
-            self._lore_current_start = 0.0
-            self._lore_current_end = 0.0
-            return
-        now = time.perf_counter()
-        self._lore_current = self._lore_queue.pop(0)
-        self._lore_current_start = now
-        self._lore_current_end = now + 2.5
-
-    def is_lore_playing(self) -> bool:
-        return bool(self._lore_current or self._lore_queue)
-
-    def _draw_lore_fade(self, painter: QPainter) -> None:
-        if not self._lore_current:
-            if self._lore_queue:
-                self._advance_lore_line()
-            else:
-                return
-
-        now = time.perf_counter()
-        if now >= self._lore_current_end:
-            self._lore_current = ''
-            self._lore_current_start = 0.0
-            self._lore_current_end = 0.0
-            self._safe_update()
-            return
-
-        duration = max(0.01, self._lore_current_end - self._lore_current_start)
-        t = max(0.0, min(1.0, (now - self._lore_current_start) / duration))
-        fade = 0.18
-        a = t / fade if t < fade else (1.0 - t) / \
-            fade if t > 1.0 - fade else 1.0
-        alpha = int(230 * max(0.0, min(1.0, a)))
-        if alpha <= 0:
-            return
-
-        w = self.width()
-        h = self.height()
-        painter.setFont(QFont('Arial', 18))
-        text = self._lore_current
-        fm = painter.fontMetrics()
-        tw = min(w - 80, fm.horizontalAdvance(text))
-        th = fm.height()
-        bx = (w - tw) // 2
-        by = int(h * 0.56)
-
-        outline = QPen(QColor(0, 0, 0, alpha))
-        outline.setWidth(3)
-        painter.setPen(outline)
-        for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
-            painter.drawText(bx + ox, by + oy, tw, th +
-                             4, Qt.AlignCenter, text)
-        painter.setPen(QColor(255, 255, 255, alpha))
-        painter.drawText(bx, by, tw, th + 4, Qt.AlignCenter, text)
-
-    # ── modal public API ──────────────────────────────────────────────────────
-
-    def show_level_select_modal(self, *, unlocked: set[str], allow_close: bool,
-                                return_to_pause: bool) -> None:
-        self._level_select_unlocked = set(unlocked or {'level1'})
-        self._level_select_unlocked.add('level1')
-        self._modal_visible = True
-        self._modal_kind = 'level_select'
-        self._modal_title = 'Select Level'
-        self._modal_body = ('Level 2 is locked until you complete Level 1.\n'
-                            'Entering a level always starts fresh.')
-        self._modal_allow_close = bool(allow_close)
-        self._modal_return_to_pause = bool(return_to_pause)
-        self._modal_btn_rects.clear()
-        self._safe_update()
-
-    def show_tutorial_modal(self, *, title: str, body: str) -> None:
-        self._modal_visible = True
-        self._modal_kind = 'tutorial'
-        self._modal_title = str(title or 'Tutorial')
-        self._modal_body = str(body or '')
-        self._modal_allow_close = True
-        self._modal_return_to_pause = False
-        self._modal_btn_rects.clear()
-        self._safe_update()
-
-    def hide_modal(self) -> None:
-        self._modal_visible = False
-        self._modal_kind = ''
-        self._modal_title = ''
-        self._modal_body = ''
-        self._modal_btn_rects.clear()
-        self._modal_allow_close = True
-        self._modal_return_to_pause = False
-        self._safe_update()
-
-    def hide_mouse_capture(self) -> None:
-        try:
-            self._mouse_captured = False
-            self._center_global = None
-            self.setCursor(Qt.ArrowCursor)
-        except Exception:
-            pass
-
-    # ── mouse / keyboard ──────────────────────────────────────────────────────
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if self._modal_visible:
@@ -780,21 +736,14 @@ class GameGLWidget(QOpenGLWidget):
         if event.button() == Qt.LeftButton:
             ix, iy, iw, ih = self._cam_icon_rect
             if ix <= event.position().x() <= ix + iw and iy <= event.position().y() <= iy + ih:
-                self._try_open_minimap()
+                self._toggle_minimap()
                 return
-            self._mouse_captured = True
-            self._center_global = self.mapToGlobal(self.rect().center())
-            self.setCursor(Qt.BlankCursor)
-            self.cursor().setPos(self._center_global)
+            center_global = self.mapToGlobal(self.rect().center())
+            self._fps_camera_start(center_global)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
-            ix, iy, iw, ih = self._cam_icon_rect
-            if ix <= event.position().x() <= ix + iw and iy <= event.position().y() <= iy + ih:
-                self._try_open_minimap()
-                return
-            self._mouse_captured = False
-            self.setCursor(Qt.ArrowCursor)
+            self._fps_camera_stop()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if getattr(self.core, 'paused', False):
@@ -814,15 +763,65 @@ class GameGLWidget(QOpenGLWidget):
     def keyReleaseEvent(self, event: QKeyEvent) -> None:
         event.ignore()
 
+    def hide_mouse_capture(self) -> None:
+        self._fps_camera_stop()
 
-# ---------------------------------------------------------------------------
-# Main window
-# ---------------------------------------------------------------------------
+    def show_level_select_modal(self, *, unlocked: set[str], allow_close: bool,
+                                return_to_pause: bool) -> None:
+        self._modal_visible = True
+        self._modal_kind = 'level_select'
+        self._modal_title = 'Select Level'
+        self._modal_body = 'Level 2 is locked until you complete Level 1.\nEntering a level always starts fresh.'
+        self._level_select_unlocked = set(unlocked)
+        self._modal_allow_close = bool(allow_close)
+        self._modal_return_to_pause = bool(return_to_pause)
+        self._modal_btn_rects.clear()
+        self.hide_mouse_capture()
+        self._safe_update()
+
+    def show_tutorial_modal(self, *, title: str, body: str) -> None:
+        self._modal_visible = True
+        self._modal_kind = 'tutorial'
+        self._modal_title = str(title)
+        self._modal_body = str(body)
+        self._modal_allow_close = True
+        self._modal_return_to_pause = False
+        self._modal_btn_rects.clear()
+        self.hide_mouse_capture()
+        self._safe_update()
+
+    def hide_modal(self) -> None:
+        self._modal_visible = False
+        self._modal_kind = ''
+        self._modal_title = ''
+        self._modal_body = ''
+        self._modal_btn_rects.clear()
+        self._safe_update()
+
+    def _fps_camera_start(self, center_global) -> None:
+        self._mouse_captured = True
+        self._center_global = center_global
+        self.setCursor(Qt.BlankCursor)
+        self.cursor().setPos(center_global)
+
+    def _fps_camera_stop(self) -> None:
+        self._mouse_captured = False
+        self._center_global = None
+        self.setCursor(Qt.ArrowCursor)
+
+    def _fps_camera_update(self, dx: float, dy: float) -> None:
+        self.core.rotate_player(-dx * FPS_CAMERA_SENSITIVITY)
+        self.core.tilt_camera(-dy * FPS_CAMERA_SENSITIVITY)
+
 
 class PySide6GameWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+
+        # This mirrors Kivy's approach: _startup_begin is stamped here,
+        # so startup_time_ms reflects the full cost from app launch to first frame.
+        self._perf = PerformanceMonitor(framework='PySide6')
 
         self._progress_path = os.path.abspath('progression.json')
         self._progress = self._load_progression()
@@ -835,11 +834,12 @@ class PySide6GameWindow(QMainWindow):
         self._save_path = os.path.abspath('savegame.json')
         self._current_level_id = last_level
 
-        autoload_level1_save = (
+        self._autoload_level1_save = (
             last_level == 'level1' and os.path.exists(self._save_path))
 
         self.core = GameCore(level_id=last_level)
 
+        # ── Audio (loaded after monitor, so audio I/O is included in startup) ─
         self._asset_dir = os.path.abspath('assets')
         _LOOPS = 999999999
         self._sfx_footsteps = QSoundEffect(self)
@@ -871,6 +871,8 @@ class PySide6GameWindow(QMainWindow):
 
         self._key_minigame_open = False
         self._assembly_minigame: Optional[Assembly3DMinigame] = None
+        self._solved_fragments: set[str] = set()
+        self._last_ghost_id: int = 0
 
         self._register_core_callbacks()
 
@@ -879,62 +881,49 @@ class PySide6GameWindow(QMainWindow):
 
         self.keys_pressed: set[int] = set()
 
-        self.gl = GameGLWidget(self.core)
+        # ── GL widget receives the already-created monitor ──────────────────
+        # Connect monitor to core BEFORE creating GL widget so texture loading
+        # time can be recorded during renderer initialization
+        self.core._performance_monitor = self._perf
+        self.gl = GameGLWidget(self.core, self._perf)
         self.setCentralWidget(self.gl)
-
-        # Connect performance monitor to game core for tracking
-        self.core._performance_monitor = self.gl.performance_monitor
-        self.gl.performance_monitor._game_start_time = time.perf_counter()
 
         self._lore_seen: set[str] = set()
         self._lore_flags: dict[str, bool] = {}
         self._persist_seen: dict[str, bool] = {}
         self._pending_gameplay_tutorial = False
 
-        # Level-end flow state
         self._level_end_triggered: bool = False
         self._level_complete: bool = False
         self._stats_text: str = ''
         self._perf_pdf_exported: bool = False
+        self._last_update_time: float = time.perf_counter()
 
+        self.gl.mouse_moved.connect(self._on_mouse_look)
+
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.startTimer(16)
+
+        # ── Deferred level start (same pattern as Kivy) ──────────────────────
+        # No eager GL init here — initializeGL() fires automatically when the
+        # widget is first shown, which happens before _deferred_start runs.
+        QTimer.singleShot(100, self._deferred_start)
+
+    def _deferred_start(self) -> None:
         if self._current_level_id == 'level2':
             self._set_paused(False)
             self._start_level(
                 'level2', load_save=os.path.exists(self._save_path))
-        elif autoload_level1_save:
+        elif self._autoload_level1_save:
             self._set_paused(False)
             self._start_level('level1', load_save=True)
         else:
             self._open_level_select_modal(startup=True)
 
-        self.gl.mouse_moved.connect(self._on_mouse_look)
-
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.startTimer(16)  # runs during modal dialogs
-
-        for k in ('coins_half', 'ghost_close', 'l2_frags_done', 'l2_sector_f_done'):
-            self._lore_flags.pop(k, None)
-        self.__dict__.pop('_player_has_moved', None)
-
-        try:
-            self.gl.makeCurrent()
-            self.gl.renderer = OpenGLRenderer(self.core)
-            self.gl.renderer.resize(self.gl.width(), self.gl.height())
-            self.gl.renderer.initialize()
-            self.gl.doneCurrent()
-        except Exception:
-            pass
-
-        self.keys_pressed.clear()
-        self._register_core_callbacks()
-
-        self._safe_gl_update()
-
     def _start_level(self, level_id: str, *, load_save: bool) -> None:
         level_id = str(level_id or 'level1')
         paused_was = bool(getattr(self.core, 'paused', False))
 
-        # Reset frozen state before swapping core
         try:
             self.core.simulation_frozen = False
         except Exception:
@@ -944,7 +933,6 @@ class PySide6GameWindow(QMainWindow):
         self._current_level_id = level_id
         self.gl.core = self.core
 
-        # Reset level-end state
         self._level_end_triggered = False
         self._level_complete = False
         self._stats_text = ''
@@ -953,17 +941,19 @@ class PySide6GameWindow(QMainWindow):
         self.gl._stats_text = ''
         self.gl._stats_visible = False
 
-        # Fresh performance monitor for every level
-        self.gl.performance_monitor = PerformanceMonitor(framework='PySide6')
-
-        # Explicit cleanup to ensure no cached data persists
-        self.gl.performance_monitor.frozen_stats = None
-        self.gl.performance_monitor.frame_times.clear()
-        self.gl.performance_monitor.fps_history.clear()
-        self.gl.performance_monitor.input_events.clear()
-        self.gl.performance_monitor.input_latencies.clear()
-        self.gl.performance_monitor.memory_samples.clear()
-        self.gl.performance_monitor.distance_walked = 0.0
+        # Fresh monitor for every level — preserve startup time across restarts
+        # (same logic as Kivy's _start_level)
+        old_startup_time = self._perf.startup_time_ms
+        old_texture_load_time = self._perf.texture_load_time_ms
+        self._perf = PerformanceMonitor(framework='PySide6')
+        if old_startup_time is not None:
+            self._perf.startup_time_ms = old_startup_time
+        if old_texture_load_time is not None:
+            self._perf.texture_load_time_ms = old_texture_load_time
+        self._perf.frozen_stats = None
+        self._perf.fps_history.clear()
+        self._perf.memory_samples.clear()
+        self.gl.performance_monitor = self._perf
 
         for k in ('coins_half', 'ghost_close', 'l2_frags_done', 'l2_sector_f_done'):
             self._lore_flags.pop(k, None)
@@ -983,10 +973,7 @@ class PySide6GameWindow(QMainWindow):
 
         self.keys_pressed.clear()
         self._register_core_callbacks()
-
-        # Connect performance monitor to game core for tracking
-        self.core._performance_monitor = self.gl.performance_monitor
-        self.gl.performance_monitor._game_start_time = time.perf_counter()
+        self.core._performance_monitor = self._perf
 
         if bool(load_save):
             self._load_save_if_present()
@@ -998,7 +985,6 @@ class PySide6GameWindow(QMainWindow):
         if (not load_save) and float(getattr(self.core, 'elapsed_s', 0.0) or 0.0) <= 0.0001:
             self._play_sfx(self._sfx_gate)
 
-        # Level intro lore
         if float(getattr(self.core, 'elapsed_s', 0.0) or 0.0) <= 0.0001:
             if level_id == 'level1' and not self._persist_seen.get('l1_intro'):
                 self._persist_seen['l1_intro'] = True
@@ -1080,116 +1066,93 @@ class PySide6GameWindow(QMainWindow):
         ev('exit_unlocked',            self._on_exit_unlocked)
         ev('sector_entered',           self._on_sector_entered)
         ev('sent_to_jail',             self._on_sent_to_jail)
+        ev('sent_to_spawn',           self._on_sent_to_spawn)
         ev('left_jail',                self._on_left_jail)
         ev('key_picked',               self._on_key_picked)
         ev('player_move', lambda d: None)
 
-    # ── level-end flow
+    # ── level-end flow ────────────────────────────────────────────────────────
 
     def _handle_level_end(self) -> None:
-        """Called once when game_won becomes True."""
         self._level_end_triggered = True
         self._level_complete = True
         self.core.simulation_frozen = True
         self._set_footsteps_playing(False)
 
-        # Unlock level 2 if we just finished level 1
         if self._current_level_id == 'level1':
             unlocked = set(self._progress.get('unlocked_levels') or ['level1'])
             unlocked.add('level2')
             self._progress['unlocked_levels'] = sorted(unlocked)
             self._save_progression()
 
-        # Build summary using the performance monitor that has been running
-        # since this level started (fresh monitor = correct measurements)
         try:
-            self.gl.performance_monitor.update_scene_data(
+            self._perf.update_scene_data(
                 walls_rendered=len(getattr(self.core, 'walls', set())),
                 coins=len(getattr(self.core, 'coins', [])),
                 ghosts=len(getattr(self.core, 'ghosts', {})),
                 spike_traps=len(getattr(self.core, 'spikes', [])),
                 moving_platforms=len(getattr(self.core, 'platforms', [])),
             )
-            self.gl.performance_monitor._game_core_elapsed_s = self.core.elapsed_s
-            self.gl.performance_monitor.freeze_stats()
-            t = int(getattr(self.core, 'elapsed_s', 0.0) or 0.0)
-            mm, ss = divmod(t, 60)
-            gameplay_metrics = {
-                'coins_collected': f'{self.core.coins_collected}/{self.core.coins_required}',
-                'jail_entries': str(self.core.jail_entries),
-            }
-            summary_text = self.gl.performance_monitor.format_summary_text(
-                gameplay_metrics)
+            self._perf._game_core_elapsed_s = self.core.elapsed_s
+            self._perf.freeze_stats()
+            summary_text = self._perf.format_summary_text()
         except Exception as exc:
             summary_text = f'Level complete!\n\nPress ESC to continue.\n\n({exc})'
 
-        # Export PDF
         try:
-            if not self._perf_pdf_exported:
-                perf_data = self.gl.performance_monitor.get_performance_summary()
-                t = int(getattr(self.core, 'elapsed_s', 0.0) or 0.0)
-                mm, ss = divmod(t, 60)
-                pdf_metrics = {
-                    'coins_collected': f'{self.core.coins_collected}/{self.core.coins_required}',
-                    'keys_collected': f'{self.core.keys_collected}/{self.core.keys_required}',
-                    'jail_entries': str(self.core.jail_entries),
-                    'avg_coin_collection_time': f'{self.core.avg_coin_time:.1f}s',
-                }
-                from core.pdf_export import export_performance_pdf
-                export_performance_pdf(
-                    framework='pyside6',
-                    level_id=self._current_level_id,
-                    performance_data=perf_data,
-                    gameplay_metrics=pdf_metrics,
-                    out_dir=os.path.abspath('performance_reports'),
-                )
-                self._perf_pdf_exported = True
-                print('[PySide6] PDF report exported to performance_reports/')
+            perf_data = self._perf.get_performance_summary()
+            from core.pdf_export import export_performance_pdf
+            export_performance_pdf(
+                framework='pyside6',
+                level_id=self._current_level_id,
+                performance_data=perf_data,
+                out_dir=os.path.abspath('performance_reports'),
+            )
+            self._perf_pdf_exported = True
+            print('[PySide6] PDF report exported to performance_reports/')
         except ImportError:
             pass
         except Exception as e:
             print(f'[PySide6] PDF export failed: {e}')
 
-        if self._current_level_id == 'level2':
-            self.show_end_screen(summary_text)
-        else:
-            self.show_stats_screen(summary_text)
-
+        self.show_stats_screen(summary_text)
         self._safe_gl_update()
 
     def show_stats_screen(self, text: str) -> None:
-        """Show the level-1 completion stats overlay."""
         self._stats_text = str(text or '')
         self._level_complete = True
         self.gl._stats_text = self._stats_text
         self.gl._show_the_end = False
 
     def show_end_screen(self, text: str) -> None:
-        """Show the level-2 'THE END' overlay."""
         self._stats_text = str(text or '')
         self._level_complete = True
         self.gl._stats_text = self._stats_text
         self.gl._show_the_end = True
+        try:
+            if os.path.exists(self._save_path):
+                os.remove(self._save_path)
+        except Exception:
+            pass
 
     def _on_stats_screen_esc(self) -> None:
-        """ESC pressed while the stats/end screen is showing."""
         if not self._level_complete:
             return
-
+        try:
+            if os.path.exists(self._save_path):
+                os.remove(self._save_path)
+        except Exception:
+            pass
         if self._current_level_id == 'level2':
-            # Level 2: "THE END" is already shown via _show_the_end; ESC goes to level select
-            self.gl._show_the_end = False
+            self._show_the_end_from_stats()
+        else:
             self._level_complete = False
             self._open_level_select_modal(startup=False)
-            return
 
-        # Level 1: hide stats and go to level select
+    def _show_the_end_from_stats(self) -> None:
         self.gl._stats_text = ''
         self._level_complete = False
-        self._open_level_select_modal(startup=False)
-        self._safe_gl_update()
-
-    # ── pause / toggle ────────────────────────────────────────────────────────
+        self.show_end_screen(self._stats_text)
 
     def _set_paused(self, paused: bool) -> None:
         self.core.paused = bool(paused)
@@ -1224,13 +1187,6 @@ class PySide6GameWindow(QMainWindow):
     # ── main update loop ──────────────────────────────────────────────────────
 
     def _update_game(self) -> None:
-        # FPS: tick-to-tick wall time
-        self.gl.performance_monitor.record_frame()
-
-        if not hasattr(self, '_last_update_time'):
-            self._last_update_time = time.perf_counter()
-            return
-
         now = time.perf_counter()
         dt = min(now - self._last_update_time, 0.05)
         self._last_update_time = now
@@ -1242,7 +1198,6 @@ class PySide6GameWindow(QMainWindow):
         elif not paused:
             self.core.update(dt)
 
-        # Level-end: game_won fires once
         if bool(getattr(self.core, 'game_won', False)) and not self._level_end_triggered:
             self._level_end_triggered = True
             self._handle_level_end()
@@ -1289,15 +1244,7 @@ class PySide6GameWindow(QMainWindow):
         if dx != 0.0 or dz != 0.0:
             moved = self.core.move_player(dx, dz)
             if moved:
-                # Record response for the most recently pressed movement key
-                try:
-                    _now = time.perf_counter()
-                    for kc in (Qt.Key_W, Qt.Key_S, Qt.Key_A, Qt.Key_D):
-                        if kc in self.keys_pressed:
-                            self.gl.performance_monitor.record_input_response(
-                                int(kc), _now)
-                except Exception:
-                    pass
+                self._perf.record_input_processed()
             self._set_footsteps_playing(moved)
         else:
             self._set_footsteps_playing(False)
@@ -1305,16 +1252,7 @@ class PySide6GameWindow(QMainWindow):
     # ── keyboard ──────────────────────────────────────────────────────────────
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        # Record key-press timestamp for latency measurement (movement keys only,
-        # matching wxPython which records on EVT_KEY_DOWN for W/A/S/D)
-        try:
-            if event.key() in (Qt.Key_W, Qt.Key_S, Qt.Key_A, Qt.Key_D):
-                key_code = int(event.key())
-                self.gl.performance_monitor.record_input_event(
-                    key_code, time.perf_counter())
-        except Exception:
-            pass
-
+        self._perf.record_input_event()
         self.keys_pressed.add(event.key())
 
         if event.key() == Qt.Key_E:
@@ -1322,15 +1260,12 @@ class PySide6GameWindow(QMainWindow):
             return
 
         if event.key() == Qt.Key_Escape:
-            # Stats/end screen: ESC advances
             if self._level_complete and (self.core.screen_closing or self.core.game_completed):
                 self._on_stats_screen_esc()
                 return
-
             if getattr(self.gl, '_modal_visible', False):
                 self._on_modal_close_clicked()
                 return
-
             self._toggle_pause()
             return
 
@@ -1338,7 +1273,7 @@ class PySide6GameWindow(QMainWindow):
             return
 
         if event.key() == Qt.Key_M:
-            self.gl._try_open_minimap()
+            self.gl._toggle_minimap()
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:
         self.keys_pressed.discard(event.key())
@@ -1375,7 +1310,7 @@ class PySide6GameWindow(QMainWindow):
         px = float(self.core.player.x)
         pz = float(self.core.player.z)
         nearest = min(
-            (math.hypot(float(g.x) - px, float(g.z) - pz)
+            (math.hypot(g.x - px, g.z - pz)
              for g in self.core.ghosts.values()),
             default=None,
         )
@@ -1393,13 +1328,20 @@ class PySide6GameWindow(QMainWindow):
         action = self.core.interact()
         if action == 'jail_book':
             self.keys_pressed.clear()
-            self._set_footsteps_playing(False)
+            if (self._current_level_id == 'level1'
+                    and not self._lore_flags.get('l1_jail_puzzle_success')):
+                self._lore_flags['l1_jail_puzzle_success'] = True
+                self._show_lore_line('The maze resets what it cannot control.')
             self._release_mouse()
+            self.keys_pressed.clear()
             prev = self.core.simulation_frozen
             self.core.simulation_frozen = True
             ok = False
             try:
-                ok = bool(SilhouetteMatchDialog(self).exec())
+                # Use hard mode if ghost 4 caught us
+                hard_mode = (self._last_ghost_id == 4)
+                ok = bool(SilhouetteMatchDialog(
+                    self, hard_mode=hard_mode).exec())
             finally:
                 self.core.simulation_frozen = prev
                 self._last_update_time = time.perf_counter()
@@ -1471,22 +1413,17 @@ class PySide6GameWindow(QMainWindow):
         self.gl._show_the_end = False
         self.gl._stats_text = ''
 
-        # Fresh performance monitor on restart
-        self.gl.performance_monitor = PerformanceMonitor(framework='PySide6')
-
-        # Explicit cleanup to ensure no cached data persists
-        # This prevents minimum FPS and frame drop counts from carrying over
-        self.gl.performance_monitor.frozen_stats = None
-        self.gl.performance_monitor.frame_times.clear()
-        self.gl.performance_monitor.fps_history.clear()
-        self.gl.performance_monitor.input_events.clear()
-        self.gl.performance_monitor.input_latencies.clear()
-        self.gl.performance_monitor.memory_samples.clear()
-        self.gl.performance_monitor.distance_walked = 0.0
-
-        # Connect performance monitor to game core for tracking
-        self.core._performance_monitor = self.gl.performance_monitor
-        self.gl.performance_monitor._game_start_time = time.perf_counter()
+        old_startup_time = self._perf.startup_time_ms
+        old_texture_load_time = self._perf.texture_load_time_ms
+        self._perf = PerformanceMonitor(framework='PySide6')
+        if old_startup_time is not None:
+            self._perf.startup_time_ms = old_startup_time
+        if old_texture_load_time is not None:
+            self._perf.texture_load_time_ms = old_texture_load_time
+        self._perf.frozen_stats = None
+        self._perf.fps_history.clear()
+        self._perf.memory_samples.clear()
+        self.gl.performance_monitor = self._perf
 
         try:
             self.gl.makeCurrent()
@@ -1502,6 +1439,7 @@ class PySide6GameWindow(QMainWindow):
 
         self.keys_pressed.clear()
         self._register_core_callbacks()
+        self.core._performance_monitor = self._perf
         if paused_was:
             self._set_paused(True)
         self._last_update_time = time.perf_counter()
@@ -1586,16 +1524,28 @@ class PySide6GameWindow(QMainWindow):
                 self._show_lore_line('A dream... Far too lucid.')
 
     def _on_sent_to_jail(self, data: dict) -> None:
+        # Track which ghost sent us to jail (ghost 4 triggers hard minigame)
+        reason = str(data.get('reason', ''))
+        if reason == 'ghost_4':
+            self._last_ghost_id = 4
+        elif reason.startswith('ghost'):
+            self._last_ghost_id = 1  # Normal ghost
+        else:
+            self._last_ghost_id = 0  # Spikes or other
         if self._current_level_id != 'level1':
             return
         if not self._persist_seen.get('tutorial_jail'):
             self._persist_seen['tutorial_jail'] = True
             self._show_tutorial_modal(
                 'Jail',
-                'This is not death.\n'
-                'To escape, find the table and press E to interact with the glowing book.\n\n'
+                'You were caught and sent to jail.\n\n'
                 'A sector map is displayed here. Use it to orient yourself before returning to the maze.',
             )
+
+    def _on_sent_to_spawn(self, data: dict) -> None:
+        """Ghost 3 sends player to spawn instead of jail - show lore and flash screen."""
+        self._show_lore_line('Be safe.')
+        self.gl.trigger_flash(300, QColor(20, 20, 25, 180))
 
     def _on_left_jail(self, data: dict) -> None:
         pass
@@ -1611,8 +1561,6 @@ class PySide6GameWindow(QMainWindow):
             pass
 
     def _on_game_won(self, data: dict) -> None:
-        # Unlock level 2 progression when level 1 is won (also done in _handle_level_end;
-        # this ensures the flag is set even if _handle_level_end hasn't fired yet)
         if self._current_level_id != 'level1':
             return
         unlocked = set(self._progress.get('unlocked_levels') or [])
@@ -1622,9 +1570,6 @@ class PySide6GameWindow(QMainWindow):
             self._save_progression()
 
     def _on_checkpoint_reached(self, data: dict) -> None:
-        # The actual level-end handling is in _update_game via the game_won guard
-        # (same pattern as wxPython). This callback only freezes input so the
-        # closing animation can play uninterrupted.
         self._set_paused(True)
         self._last_update_time = time.perf_counter()
         self._safe_gl_update()
@@ -1644,6 +1589,8 @@ class PySide6GameWindow(QMainWindow):
             return
         frag_id = str((data or {}).get('id', ''))
         if not frag_id:
+            return
+        if frag_id in self._solved_fragments:
             return
         try:
             frag = getattr(self.core, 'key_fragments', {}).get(frag_id)
@@ -1673,6 +1620,8 @@ class PySide6GameWindow(QMainWindow):
 
         if ok:
             self.core.mark_key_fragment_taken(frag_id)
+            self.core.defer_key_fragment(frag_id)
+            self._solved_fragments.add(frag_id)
         else:
             self.core.clear_pending_key_fragment(frag_id)
             self.core.defer_key_fragment(frag_id)
@@ -1681,7 +1630,7 @@ class PySide6GameWindow(QMainWindow):
         self._key_minigame_open = False
         self.keys_pressed.clear()
 
-    # ── timer override (keeps ticking through modal dialogs) ─────────────────
+    # ── timer (keeps ticking through modal dialogs) ───────────────────────────
 
     def timerEvent(self, event) -> None:
         self._update_game()
@@ -1691,99 +1640,6 @@ class PySide6GameWindow(QMainWindow):
             self.gl.update()
         except Exception:
             pass
-
-    # ── mouse look ────────────────────────────────────────────────────────────
-
-    def _on_mouse_look(self, dx: float, dy: float) -> None:
-        sensitivity = 0.002
-        self.core.rotate_player(-dx * sensitivity)
-        self.core.tilt_camera(-dy * sensitivity)
-
-    # ── audio helpers ─────────────────────────────────────────────────────────
-
-    def _play_sfx(self, sfx: QSoundEffect) -> None:
-        sfx.stop()
-        sfx.play()
-
-    def _set_footsteps_playing(self, playing: bool) -> None:
-        if playing == self._footsteps_playing:
-            return
-        self._footsteps_playing = playing
-        if playing:
-            self._sfx_footsteps.play()
-        else:
-            self._sfx_footsteps.stop()
-
-    def _play_ghost_sound(self) -> None:
-        if getattr(self.core, 'paused', False):
-            return
-        if self.core.game_won or self.core.game_completed:
-            return
-        if not getattr(self.core, 'ghosts', None):
-            return
-        px = float(self.core.player.x)
-        pz = float(self.core.player.z)
-        nearest = min(
-            (math.hypot(float(g.x) - px, float(g.z) - pz)
-             for g in self.core.ghosts.values()),
-            default=None,
-        )
-        if nearest is None or nearest > 10.0:
-            return
-        t = 1.0 if nearest <= 2.5 else max(0.0, (10.0 - nearest) / 7.5)
-        self._sfx_ghost.setVolume(0.06 + 0.55 * t)
-        self._play_sfx(self._sfx_ghost)
-
-    # ── interact ──────────────────────────────────────────────────────────────
-
-    def _handle_interact(self) -> None:
-        if getattr(self.core, 'paused', False):
-            return
-        action = self.core.interact()
-        if action == 'jail_book':
-            self.keys_pressed.clear()
-            self._set_footsteps_playing(False)
-            self._release_mouse()
-            prev = self.core.simulation_frozen
-            self.core.simulation_frozen = True
-            ok = False
-            try:
-                ok = bool(SilhouetteMatchDialog(self).exec())
-            finally:
-                self.core.simulation_frozen = prev
-                self._last_update_time = time.perf_counter()
-            if ok:
-                self.core.mark_jail_puzzle_success()
-            self._release_mouse()
-            self.keys_pressed.clear()
-        elif action == 'gate_jail':
-            self.core.try_leave_jail()
-
-    def _release_mouse(self) -> None:
-        try:
-            from PySide6.QtGui import QGuiApplication
-            QGuiApplication.mouseButtons()
-            if hasattr(self.gl, '_mouse_captured'):
-                self.gl._mouse_captured = False
-                self.gl.setCursor(Qt.ArrowCursor)
-        except Exception:
-            pass
-
-    # ── modal close ───────────────────────────────────────────────────────────
-
-    def _on_modal_close_clicked(self) -> None:
-        if not getattr(self.gl, '_modal_visible', False):
-            return
-        if not bool(getattr(self.gl, '_modal_allow_close', True)):
-            return
-        if (str(getattr(self.gl, '_modal_kind', '')) == 'level_select'
-                and bool(getattr(self.gl, '_modal_return_to_pause', False))):
-            self.gl.hide_modal()
-            self._set_paused(True)
-            self._safe_gl_update()
-            return
-        self.gl.hide_modal()
-        self._set_paused(False)
 
     # ── level selection ───────────────────────────────────────────────────────
 
@@ -1803,18 +1659,15 @@ class PySide6GameWindow(QMainWindow):
     def _on_level_selected(self, level_id: str) -> None:
         self.gl.hide_modal()
         self._set_paused(False)
-
-        # Persist "last_level" so restarting the game can resume at Level 2.
         try:
             self._progress['last_level'] = str(level_id)
             unlocked = set(self._progress.get('unlocked_levels', []))
-            # Unlock Level 2 when Level 1 is selected (but don't prevent re-selecting Level 1)
             if level_id == 'level1' and 'level2' not in unlocked:
                 unlocked.add('level2')
                 self._progress['unlocked_levels'] = sorted(unlocked)
             self._save_progression()
         except Exception as e:
-            print(f"Error saving progression: {e}")
+            print(f'Error saving progression: {e}')
         self._start_level(level_id, load_save=False)
 
 

@@ -1,39 +1,27 @@
+"""
+assembly3d_minigame.py  –  wxPython, OpenGL 3.3 core profile.
+
+_AsmGLCanvas is a full rewrite using VAOs/VBOs + GLSL shaders (same approach as
+kivy_assembly3d.py).  All legacy fixed-function calls (glBegin/glEnd,
+glMatrixMode, glFrustum, gluLookAt, glColor4f …) are gone.
+
+The rest of the file – _StyledButton, _StyledFeedback, Assembly3DMinigame – is
+unchanged from the previous wxPython version.
+"""
+
+import ctypes
 import math
 import time
-from typing import Any, Optional
+from typing import Any, List, Optional, Tuple
 
-import numpy as np
+import OpenGL.GL as GL
 import wx
 from wx import glcanvas
 
-from OpenGL.GL import (
-    GL_BLEND,
-    GL_COLOR_BUFFER_BIT,
-    GL_CULL_FACE,
-    GL_DEPTH_BUFFER_BIT,
-    GL_DEPTH_TEST,
-    GL_MODELVIEW,
-    GL_ONE_MINUS_SRC_ALPHA,
-    GL_PROJECTION,
-    GL_QUADS,
-    GL_SRC_ALPHA,
-    glBegin,
-    glBlendFunc,
-    glClear,
-    glClearColor,
-    glDisable,
-    glEnable,
-    glEnd,
-    glLoadIdentity,
-    glMatrixMode,
-    glPopMatrix,
-    glPushMatrix,
-    glRotatef,
-    glScalef,
-    glTranslatef,
-    glVertex3f,
-)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Styled button / feedback widgets  (unchanged from original)
+# ─────────────────────────────────────────────────────────────────────────────
 
 class _StyledButton(wx.Control):
     def __init__(
@@ -61,8 +49,7 @@ class _StyledButton(wx.Control):
         padding_x: int = 16,
         padding_y: int = 8,
     ):
-        style = wx.BORDER_NONE
-        super().__init__(parent, style=style)
+        super().__init__(parent, style=wx.BORDER_NONE)
         self._label = str(label)
         self._toggle = bool(toggle)
         self._value = False
@@ -95,12 +82,12 @@ class _StyledButton(wx.Control):
             self.SetMinSize((int(size[0]), int(size[1])))
 
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
-        self.Bind(wx.EVT_PAINT, self._on_paint)
+        self.Bind(wx.EVT_PAINT,         self._on_paint)
         self.Bind(wx.EVT_ERASE_BACKGROUND, lambda _e: None)
-        self.Bind(wx.EVT_ENTER_WINDOW, self._on_enter)
-        self.Bind(wx.EVT_LEAVE_WINDOW, self._on_leave)
-        self.Bind(wx.EVT_LEFT_DOWN, self._on_left_down)
-        self.Bind(wx.EVT_LEFT_UP, self._on_left_up)
+        self.Bind(wx.EVT_ENTER_WINDOW,  self._on_enter)
+        self.Bind(wx.EVT_LEAVE_WINDOW,  self._on_leave)
+        self.Bind(wx.EVT_LEFT_DOWN,     self._on_left_down)
+        self.Bind(wx.EVT_LEFT_UP,       self._on_left_up)
 
     def SetLabel(self, label: str) -> None:  # type: ignore[override]
         self._label = str(label)
@@ -144,22 +131,20 @@ class _StyledButton(wx.Control):
         if not self.IsEnabled():
             self.Refresh(False)
             return
-
         if was_pressed:
             x, y = evt.GetX(), evt.GetY()
             w, h = self.GetClientSize()
-            inside = 0 <= x < w and 0 <= y < h
-            if inside:
+            if 0 <= x < w and 0 <= y < h:
                 if self._toggle:
                     self._value = not bool(self._value)
-                evt_type = wx.EVT_TOGGLEBUTTON.typeId if self._toggle else wx.EVT_BUTTON.typeId
-                evt_btn = wx.CommandEvent(evt_type, self.GetId())
-                evt_btn.SetEventObject(self)
+                et = wx.EVT_TOGGLEBUTTON.typeId if self._toggle else wx.EVT_BUTTON.typeId
+                ce = wx.CommandEvent(et, self.GetId())
+                ce.SetEventObject(self)
                 try:
-                    evt_btn.SetInt(1 if self._value else 0)
+                    ce.SetInt(1 if self._value else 0)
                 except Exception:
                     pass
-                wx.PostEvent(self.GetEventHandler(), evt_btn)
+                wx.PostEvent(self.GetEventHandler(), ce)
         self.Refresh(False)
         evt.Skip()
 
@@ -201,20 +186,16 @@ class _StyledButton(wx.Control):
             fg = self._fg
             border = self._border
 
-        rect = wx.Rect(0, 0, int(w), int(h))
         path = gc.CreatePath()
-        r = float(max(0, int(self._radius)))
-        path.AddRoundedRectangle(float(rect.x) + 0.5, float(rect.y) +
-                                 0.5, float(rect.width) - 1.0, float(rect.height) - 1.0, r)
+        r = float(max(0, self._radius))
+        path.AddRoundedRectangle(0.5, 0.5, float(w) - 1.0, float(h) - 1.0, r)
         gc.SetBrush(wx.Brush(wx.Colour(*bg)))
         gc.SetPen(wx.Pen(wx.Colour(*border), width=2))
         gc.DrawPath(path)
 
         gc.SetFont(self.GetFont(), wx.Colour(*fg))
         tw, th = gc.GetTextExtent(self._label)
-        x = float((w - tw) / 2.0)
-        y = float((h - th) / 2.0)
-        gc.DrawText(self._label, x, y)
+        gc.DrawText(self._label, float((w - tw) / 2.0), float((h - th) / 2.0))
 
 
 class _StyledFeedback(wx.Panel):
@@ -258,35 +239,31 @@ class _StyledFeedback(wx.Panel):
             bg = (45, 90, 45)
             border = (74, 222, 128)
             weight = wx.FONTWEIGHT_BOLD
-            pad = 8
             border_w = 2
         elif self._mode == 'error':
             bg = (90, 45, 45)
             border = (239, 68, 68)
             weight = wx.FONTWEIGHT_BOLD
-            pad = 6
             border_w = 1
         else:
             bg = (90, 90, 96)
             border = (122, 122, 128)
             weight = wx.FONTWEIGHT_NORMAL
-            pad = 6
             border_w = 1
 
         f = self.GetFont()
         f.SetWeight(int(weight))
         self.SetFont(f)
 
-        rect = wx.Rect(0, 0, int(w), int(h))
         path = gc.CreatePath()
-        path.AddRoundedRectangle(float(rect.x) + 0.5, float(rect.y) +
-                                 0.5, float(rect.width) - 1.0, float(rect.height) - 1.0, 6.0)
+        path.AddRoundedRectangle(0.5, 0.5, float(w) - 1.0, float(h) - 1.0, 6.0)
         gc.SetBrush(wx.Brush(wx.Colour(*bg)))
         gc.SetPen(wx.Pen(wx.Colour(*border), width=int(border_w)))
         gc.DrawPath(path)
 
         text = str(self._text or '')
-        max_w = max(0, int(w) - int(pad) * 2)
+        pad = 6
+        max_w = max(0, w - pad * 2)
         if max_w > 0:
             try:
                 text = wx.Control.Ellipsize(text, dc, wx.ELLIPSIZE_END, max_w)
@@ -294,46 +271,337 @@ class _StyledFeedback(wx.Panel):
                 pass
         gc.SetFont(self.GetFont(), wx.Colour(255, 255, 255))
         tw, th = gc.GetTextExtent(text)
-        x = float((w - tw) / 2.0)
-        y = float((h - th) / 2.0)
-        # Keep deterministic centering; only clamp when padding would be violated.
-        x = max(float(pad), x)
-        y = max(float(pad), y)
-        gc.DrawText(text, x, y)
+        gc.DrawText(text, max(float(pad), float((w - tw) / 2.0)),
+                    max(float(pad), float((h - th) / 2.0)))
 
 
-class _AsmGLCanvas(glcanvas.GLCanvas):
-    def __init__(self, parent: wx.Window, *, bg: tuple[int, int, int, int], orbit: bool = False):
-        super().__init__(parent, attribList=[
-            glcanvas.WX_GL_RGBA, glcanvas.WX_GL_DOUBLEBUFFER, glcanvas.WX_GL_DEPTH_SIZE, 24, 0])
-        self._ctx = glcanvas.GLContext(self)
-        self._bg = tuple(int(x) for x in bg)
+# ─────────────────────────────────────────────────────────────────────────────
+# GLSL shader (shared, lazily compiled once per GL context)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VERT = b"""
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec4 aColor;
+out vec4 vColor;
+uniform mat4 uMVP;
+void main(){ vColor=aColor; gl_Position=uMVP*vec4(aPos,1.0); }
+"""
+_FRAG = b"""
+#version 330 core
+in vec4 vColor; out vec4 FragColor;
+void main(){ FragColor=vColor; }
+"""
+
+# Per-canvas program handle (keyed by GLContext id so multi-window apps work)
+_prog_cache: dict[int, int] = {}
+
+
+def _get_prog(ctx_id: int) -> int:
+    if ctx_id in _prog_cache:
+        return _prog_cache[ctx_id]
+
+    def _sh(src: bytes, kind: int) -> int:
+        s = GL.glCreateShader(kind)
+        GL.glShaderSource(s, src)
+        GL.glCompileShader(s)
+        if not GL.glGetShaderiv(s, GL.GL_COMPILE_STATUS):
+            raise RuntimeError(GL.glGetShaderInfoLog(s).decode())
+        return s
+
+    p = GL.glCreateProgram()
+    GL.glAttachShader(p, _sh(_VERT, GL.GL_VERTEX_SHADER))
+    GL.glAttachShader(p, _sh(_FRAG, GL.GL_FRAGMENT_SHADER))
+    GL.glLinkProgram(p)
+    if not GL.glGetProgramiv(p, GL.GL_LINK_STATUS):
+        raise RuntimeError(GL.glGetProgramInfoLog(p).decode())
+    _prog_cache[ctx_id] = p
+    return p
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Math helpers  (column-major, identical to kivy_assembly3d.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _mul(a: List[float], b: List[float]) -> List[float]:
+    o = [0.0] * 16
+    for c in range(4):
+        for r in range(4):
+            o[r + c * 4] = sum(a[r + k * 4] * b[k + c * 4] for k in range(4))
+    return o
+
+
+def _persp(fov: float, asp: float, n: float, f: float) -> List[float]:
+    t = 1.0 / math.tan(math.radians(fov) / 2.0)
+    nf = 1.0 / (n - f)
+    return [t / asp, 0, 0, 0,  0, t, 0, 0,  0, 0, (f + n) * nf, -1,  0, 0, 2 * f * n * nf, 0]
+
+
+def _lookat(ex: float, ey: float, ez: float,
+            cx: float, cy: float, cz: float,
+            ux: float, uy: float, uz: float) -> List[float]:
+    fx, fy, fz = cx - ex, cy - ey, cz - ez
+    fl = math.sqrt(fx*fx + fy*fy + fz*fz) or 1e-9
+    fx /= fl
+    fy /= fl
+    fz /= fl
+    rx = fy*uz - fz*uy
+    ry = fz*ux - fx*uz
+    rz = fx*uy - fy*ux
+    rl = math.sqrt(rx*rx + ry*ry + rz*rz) or 1e-9
+    rx /= rl
+    ry /= rl
+    rz /= rl
+    upx = ry*fz - rz*fy
+    upy = rz*fx - rx*fz
+    upz = rx*fy - ry*fx
+    return [rx, upx, -fx, 0,
+            ry, upy, -fy, 0,
+            rz, upz, -fz, 0,
+            -(rx*ex + ry*ey + rz*ez),
+            -(upx*ex + upy*ey + upz*ez),
+            (fx*ex + fy*ey + fz*ez), 1]
+
+
+def _tmat(tx: float, ty: float, tz: float) -> List[float]:
+    m = [1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1]
+    m[12] = tx
+    m[13] = ty
+    m[14] = tz
+    return m
+
+
+def _camera_vp(w: int, h: int,
+               dist: float = 8.0,
+               elev_deg: float = 20.0,
+               azim_deg: float = 30.0,
+               fov: float = 60.0) -> List[float]:
+    """Build VP matrix.  Z is up, camera orbits in azimuth around Z-up world."""
+    elev = math.radians(elev_deg)
+    azim = math.radians(azim_deg)
+    ex = dist * math.cos(elev) * math.cos(azim)
+    ey = dist * math.cos(elev) * math.sin(azim)
+    ez = dist * math.sin(elev)
+    proj = _persp(fov, float(w) / float(max(1, h)), 0.1, 80.0)
+    view = _lookat(ex, ey, ez,  0, 0, 0,  0, 0, 1)   # Z is up
+    return _mul(proj, view)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Geometry helpers  (identical to kivy_assembly3d.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _cube(col: Tuple[float, float, float, float]) -> List[float]:
+    r, g, b, a = col
+    v: List[float] = []
+    for q in [
+        [(-0.5, -0.5, 0.5), (0.5, -0.5, 0.5), (0.5, 0.5, 0.5), (-0.5, 0.5, 0.5)],
+        [(0.5, -0.5, -0.5), (-0.5, -0.5, -0.5),
+         (-0.5, 0.5, -0.5), (0.5, 0.5, -0.5)],
+        [(-0.5, -0.5, -0.5), (-0.5, -0.5, 0.5),
+         (-0.5, 0.5, 0.5), (-0.5, 0.5, -0.5)],
+        [(0.5, -0.5, 0.5), (0.5, -0.5, -0.5), (0.5, 0.5, -0.5), (0.5, 0.5, 0.5)],
+        [(-0.5, 0.5, 0.5), (0.5, 0.5, 0.5), (0.5, 0.5, -0.5), (-0.5, 0.5, -0.5)],
+        [(-0.5, -0.5, -0.5), (0.5, -0.5, -0.5),
+         (0.5, -0.5, 0.5), (-0.5, -0.5, 0.5)],
+    ]:
+        p0, p1, p2, p3 = q
+        for p in [p0, p1, p2, p0, p2, p3]:
+            v.extend([*p, r, g, b, a])
+    return v
+
+
+def _pyramid(col: Tuple[float, float, float, float]) -> List[float]:
+    r, g, b, a = col
+    verts = [(0.0, 0.5, 0.0), (0.5, -0.5, 0.5), (0.5, -0.5, -0.5),
+             (-0.5, -0.5, -0.5), (-0.5, -0.5, 0.5)]
+    faces = [(0, 1, 2), (0, 2, 3), (0, 3, 4), (0, 4, 1), (1, 2, 3), (1, 3, 4)]
+    v: List[float] = []
+    for a0, b0, c0 in faces:
+        for p in (verts[a0], verts[b0], verts[c0]):
+            v.extend([p[0], p[1], p[2], r, g, b, a])
+    return v
+
+
+def _grid_verts() -> List[float]:
+    """
+    X-Y plane grid at Z=0 with half-integer offsets.
+    Grid lines at half-integers so pieces at integer positions sit IN cells.
+    """
+    v: List[float] = []
+    GREY = (0.30, 0.30, 0.30, 0.22)
+    GOLD = (1.0,  0.84, 0.0,  0.32)
+    for x in range(-4, 5):
+        c = GOLD if x == 0 else GREY
+        xf = float(x) - 0.5  # Half-integer offset for centered grid cells
+        v.extend([xf, -1.5, 0, *c,  xf, 2.5, 0, *c])
+    for y in range(-1, 4):
+        c = GOLD if y == 0 else GREY
+        yf = float(y) - 0.5  # Half-integer offset for centered grid cells
+        v.extend([-4, yf, 0, *c,  4, yf, 0, *c])
+    return v
+
+
+def _upload(raw: List[float]) -> Tuple[int, int]:
+    """Upload vertex data (x,y,z,r,g,b,a per vertex) into a new VAO/VBO."""
+    if not raw:
+        return 0, 0
+    n = len(raw) // 7
+    data = (ctypes.c_float * len(raw))(*raw)
+    stride = 7 * 4
+    vao = GL.glGenVertexArrays(1)
+    GL.glBindVertexArray(vao)
+    vbo = GL.glGenBuffers(1)
+    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
+    GL.glBufferData(GL.GL_ARRAY_BUFFER, ctypes.sizeof(
+        data), data, GL.GL_STATIC_DRAW)
+    GL.glVertexAttribPointer(
+        0, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(0))
+    GL.glEnableVertexAttribArray(0)
+    GL.glVertexAttribPointer(
+        1, 4, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(12))
+    GL.glEnableVertexAttribArray(1)
+    GL.glBindVertexArray(0)
+    return int(vao), n
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Piece / target data  (plain lists, no numpy – matches kivy_assembly3d.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_Y_COL = (1.0, 0.875, 0.0, 1.0)   # yellow
+_B_COL = (0.0, 0.584, 1.0, 1.0)   # blue
+_R_COL = (1.0, 0.271, 0.0, 1.0)   # red
+
+
+def _make_pieces(kind: str) -> List[dict]:
+    """Initial piece positions. Pieces at z=0.5 sit on grid (matching Kivy/PySide6)."""
+    k = (kind or 'KP').upper()
+    if k == 'KP':
+        return [
+            {'type': 'cube',    'color': _Y_COL, 'pos': [2., 0., 0.5]},
+            {'type': 'cube',    'color': _B_COL, 'pos': [-2., 0., 0.5]},
+            {'type': 'pyramid', 'color': _R_COL, 'pos': [0., 0., 0.5]},
+        ]
+    if k == 'K':
+        cs = [_B_COL, _Y_COL, _R_COL, _R_COL, _B_COL]
+        return [{'type': 'cube', 'color': c, 'pos': [-3. + i, 0., 0.5]} for i, c in enumerate(cs)]
+    return [
+        {'type': 'cube',    'color': _Y_COL, 'pos': [-2., 0., 0.5]},
+        {'type': 'cube',    'color': _R_COL, 'pos': [-1., 0., 0.5]},
+        {'type': 'pyramid', 'color': _B_COL, 'pos': [0., 0., 0.5]},
+        {'type': 'pyramid', 'color': _Y_COL, 'pos': [1., 0., 0.5]},
+    ]
+
+
+def _make_target(kind: str) -> List[dict]:
+    k = (kind or 'KP').upper()
+    if k == 'KP':
+        return [
+            {'type': 'cube',    'pos': [0, 0, 0]},
+            {'type': 'cube',    'pos': [0, 1, 0]},
+            {'type': 'pyramid', 'pos': [0, 2, 0]},
+        ]
+    if k == 'K':
+        return [
+            {'type': 'cube', 'pos': [0, 0, 0]}, {
+                'type': 'cube', 'pos': [1, 0, 0]},
+            {'type': 'cube', 'pos': [2, 0, 0]}, {
+                'type': 'cube', 'pos': [0, 1, 0]},
+            {'type': 'cube', 'pos': [1, 1, 0]},
+        ]
+    return [
+        {'type': 'cube',    'pos': [0, 0, 0]}, {
+            'type': 'cube',    'pos': [1, 0, 0]},
+        {'type': 'pyramid', 'pos': [0, 1, 0]}, {
+            'type': 'pyramid', 'pos': [1, 1, 0]},
+    ]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _AsmGLCanvas  –  core-profile GL canvas
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# GL context attributes for core profile (matching main renderer)
+_GL_ATTRS = [
+    wx.glcanvas.WX_GL_RGBA,
+    wx.glcanvas.WX_GL_DOUBLEBUFFER,
+    wx.glcanvas.WX_GL_CORE_PROFILE,
+    wx.glcanvas.WX_GL_MAJOR_VERSION, 3,
+    wx.glcanvas.WX_GL_MINOR_VERSION, 3,
+    wx.glcanvas.WX_GL_DEPTH_SIZE, 24,
+]
+
+
+class _AsmGLCanvas(wx.glcanvas.GLCanvas):
+    """
+    Core-profile OpenGL canvas for one 3-D view panel (reference or assembly).
+
+    Scene data is stored as (vao, vtx_count) pairs plus translation matrices so
+    that the same VAOs can be reused with different positions without re-uploading.
+
+    public API (called by Assembly3DMinigame):
+      set_scene(vaos, mats, gvao=0, gvtx=0)   – set piece VAOs + grid VAO
+      set_camera(dist, elev, azim, azim_extra, fov)
+      request_redraw()
+    """
+
+    def __init__(self, parent: wx.Window, *,
+                 bg_dark: bool = True,
+                 orbit: bool = False):
+        attribs = [
+            glcanvas.WX_GL_RGBA,
+            glcanvas.WX_GL_DOUBLEBUFFER,
+            glcanvas.WX_GL_DEPTH_SIZE, 24,
+            0,
+        ]
+        super().__init__(parent, attribList=attribs)
+
+        # Try to obtain a core-profile 3.3 context
+        try:
+            ca = glcanvas.GLContextAttrs()
+            ca = ca.PlatformDefaults().CoreProfile().OGLVersion(3, 3).EndList()
+            self._ctx = glcanvas.GLContext(self, ctxAttribs=ca)
+        except Exception:
+            self._ctx = glcanvas.GLContext(self)
+
+        self._bg_dark = bool(bg_dark)
+        self._orbit = bool(orbit)
         self._initialized = False
 
-        # Camera params (approximate pyqtgraph GLViewWidget defaults used in PySide).
-        self._cam_distance = 5.0
-        self._cam_elev_deg = 20.0
-        self._cam_azim_deg = 30.0
-        self._cam_target = (0.0, 0.0, 0.0)
-        self._fov = 50.0
+        # Camera params
+        self._cam_dist = 8.0
+        self._cam_elev = 20.0   # degrees
+        self._cam_azim = 30.0   # degrees
+        self._cam_azim_extra = 0.0   # added by orbit drag
+        self._cam_elev_extra = 0.0   # added by orbit drag
+        self._fov = 60.0
 
-        self._pieces: list[dict[str, Any]] = []
-        self._target: list[dict[str, Any]] = []
-        self._draw_mode = 'assembly'
+        # Scene
+        self._vaos: List[Tuple[int, int]] = []   # (vao, vtx_count) per piece
+        self._mats: List[List[float]] = []   # translation matrix per piece
+        self._gvao: int = 0                       # grid VAO
+        self._gvtx: int = 0                       # grid vertex count
 
-        self._selected_idx: Optional[int] = None
-        self._flash_green: bool = False
-
-        self._orbit_enabled = bool(orbit)
+        # Orbit drag
         self._dragging = False
-        self._last_mouse: Optional[tuple[int, int]] = None
+        self._last_mouse: Optional[Tuple[int, int]] = None
 
-        self.Bind(wx.EVT_PAINT, self._on_paint)
-        self.Bind(wx.EVT_SIZE, self._on_size)
-        if self._orbit_enabled:
+        self.Bind(wx.EVT_PAINT,  self._on_paint)
+        self.Bind(wx.EVT_SIZE, lambda _e: self.Refresh(False))
+        self.Bind(wx.EVT_ERASE_BACKGROUND, lambda _e: None)
+
+        if self._orbit:
             self.Bind(wx.EVT_LEFT_DOWN, self._on_left_down)
-            self.Bind(wx.EVT_LEFT_UP, self._on_left_up)
-            self.Bind(wx.EVT_MOTION, self._on_motion)
+            self.Bind(wx.EVT_LEFT_UP,   self._on_left_up)
+            self.Bind(wx.EVT_MOTION,    self._on_motion)
+
+        # Refresh timer so animation / flash stays smooth even without user input
+        self._timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, lambda _e: self.Refresh(False), self._timer)
+        self._timer.Start(33)   # ~30 fps
+
+    # ── orbit drag ────────────────────────────────────────────────────────────
 
     def _on_left_down(self, evt: wx.MouseEvent) -> None:
         self._dragging = True
@@ -353,278 +621,207 @@ class _AsmGLCanvas(glcanvas.GLCanvas):
             pass
 
     def _on_motion(self, evt: wx.MouseEvent) -> None:
-        if not self._dragging:
-            return
-        if not evt.Dragging() or not evt.LeftIsDown():
+        if not self._dragging or not evt.Dragging() or not evt.LeftIsDown():
             return
         if self._last_mouse is None:
             self._last_mouse = (evt.GetX(), evt.GetY())
             return
-        x, y = evt.GetX(), evt.GetY()
         lx, ly = self._last_mouse
-        dx = float(x - lx)
-        dy = float(y - ly)
-        self._last_mouse = (x, y)
-
-        self._cam_azim_deg = float(self._cam_azim_deg) + dx * 0.4
-        self._cam_elev_deg = float(self._cam_elev_deg) + dy * 0.4
-        self._cam_elev_deg = max(-89.0, min(89.0, float(self._cam_elev_deg)))
+        dx, dy = float(evt.GetX() - lx), float(evt.GetY() - ly)
+        self._last_mouse = (evt.GetX(), evt.GetY())
+        self._cam_azim_extra -= dx * 0.4
+        self._cam_elev_extra += dy * 0.4
+        self._cam_elev_extra = max(-89.0, min(89.0, self._cam_elev_extra))
         self.Refresh(False)
 
-    def set_scene(self, *, pieces: list[dict[str, Any]], target: list[dict[str, Any]], mode: str) -> None:
-        self._pieces = list(pieces)
-        self._target = list(target)
-        self._draw_mode = str(mode or 'assembly')
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def set_scene(self, vaos: List[Tuple[int, int]], mats: List[List[float]],
+                  gvao: int = 0, gvtx: int = 0) -> None:
+        self._vaos = vaos
+        self._mats = mats
+        self._gvao = gvao
+        self._gvtx = gvtx
         self.Refresh(False)
 
-    def set_selection(self, idx: Optional[int], *, flash_green: bool) -> None:
-        self._selected_idx = None if idx is None else int(idx)
-        self._flash_green = bool(flash_green)
+    def set_camera(self, dist: float = 8.0, elev: float = 20.0,
+                   azim: float = 30.0, fov: float = 60.0) -> None:
+        self._cam_dist = float(dist)
+        self._cam_elev = float(elev)
+        self._cam_azim = float(azim)
+        self._fov = float(fov)
         self.Refresh(False)
 
-    def set_camera(
-        self,
-        *,
-        distance: float = 8.0,
-        elevation_deg: float = 20.0,
-        azimuth_deg: float = 30.0,
-        target: Optional[tuple[float, float, float]] = None,
-        fov: Optional[float] = None,
-    ) -> None:
-        self._cam_distance = float(distance)
-        self._cam_elev_deg = float(elevation_deg)
-        self._cam_azim_deg = float(azimuth_deg)
-        if target is not None:
-            self._cam_target = (float(target[0]), float(
-                target[1]), float(target[2]))
-        if fov is not None:
-            self._fov = float(fov)
+    def request_redraw(self) -> None:
         self.Refresh(False)
+
+    # ── GL lifecycle ──────────────────────────────────────────────────────────
 
     def _ensure(self) -> None:
         if self._initialized:
             return
         self.SetCurrent(self._ctx)
-        glEnable(GL_DEPTH_TEST)
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glDisable(GL_CULL_FACE)
+        GL.glEnable(GL.GL_DEPTH_TEST)
+        GL.glDepthFunc(GL.GL_LEQUAL)
+        GL.glEnable(GL.GL_BLEND)
+        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+        GL.glDisable(GL.GL_CULL_FACE)
+        # Compile shader for this context
+        try:
+            _get_prog(id(self._ctx))
+        except Exception as e:
+            print(f'[_AsmGLCanvas] shader compile failed: {e}')
         self._initialized = True
 
-    def _on_size(self, _evt: wx.SizeEvent) -> None:
-        self.Refresh(False)
-
-    def _setup_3d(self, w: int, h: int) -> None:
-        aspect = float(w) / float(max(1, h))
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        fov = float(self._fov)
-        near = 0.1
-        far = 100.0
-        top = math.tan(math.radians(fov) / 2.0) * near
-        right = top * aspect
-        # glFrustum replacement (manual)
-        from OpenGL.GL import glFrustum
-
-        glFrustum(-right, right, -top, top, near, far)
-
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-
-        # Z-up orbit camera
-        from OpenGL.GLU import gluLookAt
-
-        elev = math.radians(float(self._cam_elev_deg))
-        azim = math.radians(float(self._cam_azim_deg))
-        dist = float(self._cam_distance)
-        tx, ty, tz = (float(self._cam_target[0]), float(
-            self._cam_target[1]), float(self._cam_target[2]))
-
-        cx = tx + dist * math.cos(elev) * math.cos(azim)
-        cy = ty + dist * math.cos(elev) * math.sin(azim)
-        cz = tz + dist * math.sin(elev)
-
-        gluLookAt(cx, cy, cz, tx, ty, tz, 0.0, 0.0, 1.0)
-
-    def _draw_grid(self) -> None:
-        # Grid: light grey plane + yellow axis highlight
-        from OpenGL.GL import GL_LINES, glColor4f, glLineWidth
-
-        glLineWidth(1.25)
-        glBegin(GL_LINES)
-
-        # Grid lines (floor plane: XY at Z=0)
-        # Grid lines at half-integers for centered piece positions
-        for x in range(-4, 5):
-            glColor4f(0.65, 0.65, 0.68, 0.55)
-            xf = float(x) - 0.5
-            glVertex3f(xf, -4.5, 0.0)
-            glVertex3f(xf, 4.5, 0.0)
-        for y in range(-4, 5):
-            glColor4f(0.65, 0.65, 0.68, 0.55)
-            yf = float(y) - 0.5
-            glVertex3f(-4.5, yf, 0.0)
-            glVertex3f(4.5, yf, 0.0)
-
-        # Highlight axes (subtle yellow)
-        glColor4f(1.0, 0.84, 0.0, 0.35)
-        glVertex3f(-4.5, -0.5, 0.0)
-        glVertex3f(4.5, -0.5, 0.0)
-        glVertex3f(-0.5, -4.5, 0.0)
-        glVertex3f(-0.5, 4.5, 0.0)
-
-        glEnd()
-
-    def _draw_cube(self, color: tuple[float, float, float, float]) -> None:
-        r, g, b, a = color
-        from OpenGL.GL import glColor4f
-
-        glColor4f(r, g, b, a)
-        # unit cube with base on Z=0 (so it sits on the floor grid)
-        faces = [
-            # z0
-            [(-0.5, -0.5, 0.0), (0.5, -0.5, 0.0),
-             (0.5, 0.5, 0.0), (-0.5, 0.5, 0.0)],
-            # z1
-            [(-0.5, -0.5, 1.0), (0.5, -0.5, 1.0),
-             (0.5, 0.5, 1.0), (-0.5, 0.5, 1.0)],
-            # x-
-            [(-0.5, -0.5, 0.0), (-0.5, 0.5, 0.0),
-             (-0.5, 0.5, 1.0), (-0.5, -0.5, 1.0)],
-            # x+
-            [(0.5, -0.5, 0.0), (0.5, 0.5, 0.0),
-             (0.5, 0.5, 1.0), (0.5, -0.5, 1.0)],
-            # y-
-            [(-0.5, -0.5, 0.0), (0.5, -0.5, 0.0),
-             (0.5, -0.5, 1.0), (-0.5, -0.5, 1.0)],
-            # y+
-            [(-0.5, 0.5, 0.0), (0.5, 0.5, 0.0),
-             (0.5, 0.5, 1.0), (-0.5, 0.5, 1.0)],
-        ]
-        glBegin(GL_QUADS)
-        for face in faces:
-            for vx, vy, vz in face:
-                glVertex3f(float(vx), float(vy), float(vz))
-        glEnd()
-
-    def _draw_pyramid(self, color: tuple[float, float, float, float]) -> None:
-        r, g, b, a = color
-        from OpenGL.GL import GL_TRIANGLES, glColor4f
-
-        glColor4f(r, g, b, a)
-        apex = (0.0, 0.0, 1.0)
-        base = [(0.5, 0.5, 0.0), (0.5, -0.5, 0.0),
-                (-0.5, -0.5, 0.0), (-0.5, 0.5, 0.0)]
-
-        glBegin(GL_TRIANGLES)
-        for i in range(4):
-            v1 = base[i]
-            v2 = base[(i + 1) % 4]
-            glVertex3f(*apex)
-            glVertex3f(*v1)
-            glVertex3f(*v2)
-        glEnd()
-
-        glBegin(GL_QUADS)
-        for vx, vy, vz in base:
-            glVertex3f(float(vx), float(vy), float(vz))
-        glEnd()
-
-    def _draw_part(self, part: dict[str, Any]) -> None:
-        t = str(part.get('type', 'cube'))
-        pos = part.get('pos')
-        rot = part.get('rot') or [0, 0, 0]
-        col = part.get('color')
-        if pos is None:
-            return
-        if col is None:
-            col = (255, 255, 255, 255)
-
-        rgba = (float(col[0]) / 255.0, float(col[1]) / 255.0,
-                float(col[2]) / 255.0, float(col[3]) / 255.0)
-
-        if self._draw_mode == 'assembly' and self._selected_idx is not None:
-            try:
-                idx = int(part.get('_idx', -1))
-            except Exception:
-                idx = -1
-            if idx == int(self._selected_idx) and bool(self._flash_green):
-                rgba = (0.15, 0.95, 0.25, rgba[3])
-
-        glPushMatrix()
-        glTranslatef(float(pos[0]), float(pos[1]), float(pos[2]))
-        try:
-            glRotatef(float(rot[0]), 1.0, 0.0, 0.0)
-            glRotatef(float(rot[1]), 0.0, 1.0, 0.0)
-            glRotatef(float(rot[2]), 0.0, 0.0, 1.0)
-        except Exception:
-            pass
-
-        if t == 'pyramid':
-            self._draw_pyramid(rgba)
-        else:
-            self._draw_cube(rgba)
-        glPopMatrix()
+    # ── paint ─────────────────────────────────────────────────────────────────
 
     def _on_paint(self, _evt: wx.PaintEvent) -> None:
-        dc = wx.PaintDC(self)
-        del dc
+        _ = wx.PaintDC(self)
         self._ensure()
         self.SetCurrent(self._ctx)
 
         w, h = self.GetClientSize()
-        bg = self._bg
-        glClearColor(bg[0] / 255.0, bg[1] / 255.0,
-                     bg[2] / 255.0, bg[3] / 255.0)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        if w < 2 or h < 2:
+            return
 
-        self._setup_3d(int(w), int(h))
-
-        from OpenGL.GL import glEnable, glDisable
-
-        if self._draw_mode == 'assembly':
-            glEnable(GL_BLEND)
-            self._draw_grid()
-            glDisable(GL_BLEND)
-            for p in self._pieces:
-                self._draw_part(p)
+        # Clear with background colour
+        if self._bg_dark:
+            GL.glClearColor(0.314, 0.314, 0.333, 1.0)   # #505055
         else:
-            glDisable(GL_BLEND)
-            for p in self._target:
-                self._draw_part(p)
+            GL.glClearColor(0.941, 0.941, 0.961, 1.0)   # #f0f0f5
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+        GL.glViewport(0, 0, int(w), int(h))
 
+        if not self._vaos and not self._gvao:
+            self.SwapBuffers()
+            return
+
+        prog = _get_prog(id(self._ctx))
+        GL.glUseProgram(prog)
+        loc = GL.glGetUniformLocation(prog, b'uMVP')
+
+        # Build camera VP
+        elev = self._cam_elev + self._cam_elev_extra
+        azim = self._cam_azim + self._cam_azim_extra
+        vp = _camera_vp(w, h, self._cam_dist, elev, azim, self._fov)
+
+        # Draw grid
+        if self._gvao and self._gvtx:
+            GL.glUniformMatrix4fv(loc, 1, GL.GL_FALSE,
+                                  (ctypes.c_float * 16)(*vp))
+            GL.glBindVertexArray(self._gvao)
+            GL.glDrawArrays(GL.GL_LINES, 0, self._gvtx)
+            GL.glBindVertexArray(0)
+
+        # Draw pieces
+        for i, (vao, vtx) in enumerate(self._vaos):
+            if not vao or not vtx:
+                continue
+            m = self._mats[i] if i < len(self._mats) else _tmat(0, 0, 0)
+            mvp = _mul(vp, m)
+            GL.glUniformMatrix4fv(loc, 1, GL.GL_FALSE,
+                                  (ctypes.c_float * 16)(*mvp))
+            GL.glBindVertexArray(vao)
+            GL.glDrawArrays(GL.GL_TRIANGLES, 0, vtx)
+            GL.glBindVertexArray(0)
+
+        GL.glUseProgram(0)
         self.SwapBuffers()
 
+    def Destroy(self) -> bool:
+        try:
+            self._timer.Stop()
+        except Exception:
+            pass
+        return super().Destroy()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Assembly3DMinigame  –  wx.Dialog wrapping the two GL canvases
+# ─────────────────────────────────────────────────────────────────────────────
 
 class Assembly3DMinigame(wx.Dialog):
+    """
+    3-D Assembly Minigame dialog.
+
+    Usage (same as before):
+        dlg = Assembly3DMinigame(parent, kind='KP')
+        if dlg.ShowModal() == wx.ID_OK:
+            ...
+        # or call reset(kind=...) to reuse the same instance.
+    """
+
+    GRID_MIN = -4
+    GRID_MAX = 4
+    Z_MIN = 0
+    Z_MAX = 2
+
     def __init__(self, parent=None, *, kind: str = 'KP'):
-        super().__init__(parent, title='3D Assembly Minigame', style=wx.DEFAULT_DIALOG_STYLE)
+        super().__init__(parent, title='3D Assembly Minigame',
+                         style=wx.DEFAULT_DIALOG_STYLE)
         self.kind = str(kind or 'KP').upper()
 
         self.SetSize((900, 600))
         self.SetMinSize((900, 600))
 
-        self._selection_flash_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self._on_flash_timer,
-                  self._selection_flash_timer)
-        self._selection_flash_timer.Start(33)
-
-        self._game_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self._on_game_timer, self._game_timer)
-        self._game_timer.Start(16)
-        self._last_game_update = time.perf_counter()
-
         self.selected_piece: Optional[int] = None
+
+        # VAO lists - separate for each canvas since VAOs cannot be shared between contexts
+        # (vao, vtx) per piece for asm_view
+        self._piece_vaos: List[Tuple[int, int]] = []
+        # (vao, vtx) per piece for ref_view
+        self._ref_vaos: List[Tuple[int, int]] = []
+        # duplicate for ref_view context
+        self._piece_vaos_ref: List[Tuple[int, int]] = []
+        # duplicate for ref_view context
+        self._ref_vaos_ref: List[Tuple[int, int]] = []
+        self._gvao: int = 0
+        self._gvtx: int = 0
+        # grid for ref_view (not used but kept for consistency)
+        self._gvao_ref: int = 0
+        self._gl_built = False
+
+        # Flash state
+        self._flash_vaos: List[Tuple[int, int]] = []  # green flash VAOs
+        self._flash_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_flash_timer, self._flash_timer)
+        self._flash_timer.Start(33)
 
         self._build_ui()
         self._build_scene_for_kind()
         self._update_feedback()
 
+        # Center on parent like PySide6
+        try:
+            self.CentreOnParent()
+        except Exception:
+            pass
+
+        # Build GL after the window is shown so context is ready
+        self.Bind(wx.EVT_SHOW, self._on_show)
+
+    # ── show / close ──────────────────────────────────────────────────────────
+
+    def _on_show(self, evt: wx.ShowEvent) -> None:
+        if evt.IsShown():
+            wx.CallAfter(self._build_gl)
+        evt.Skip()
+
     def reset(self, *, kind: str) -> None:
         self.kind = str(kind or 'KP').upper()
         self._build_scene_for_kind()
         self._ensure_piece_controls_match_scene()
+        self._update_views()
         self._update_feedback()
+
+    def Destroy(self) -> bool:
+        try:
+            self._flash_timer.Stop()
+        except Exception:
+            pass
+        return super().Destroy()
+
+    # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         self.SetBackgroundColour(wx.Colour(74, 74, 80))
@@ -632,60 +829,56 @@ class Assembly3DMinigame(wx.Dialog):
         root = wx.BoxSizer(wx.HORIZONTAL)
         self.SetSizer(root)
 
-        # Left: large empty grey + small reference view at bottom (like PySide screenshot).
+        # ── Left: Reference panel ─────────────────────────────────────────────
         left_panel = wx.Panel(self)
         left_panel.SetBackgroundColour(wx.Colour(74, 74, 80))
         left = wx.BoxSizer(wx.VERTICAL)
         left_panel.SetSizer(left)
         root.Add(left_panel, 1, wx.EXPAND | wx.ALL, 10)
 
-        ref_header = wx.Panel(left_panel)
-        ref_header.SetBackgroundColour(wx.Colour(90, 90, 96))
-        ref_header_s = wx.BoxSizer(wx.VERTICAL)
-        ref_header.SetSizer(ref_header_s)
-        ref_label = wx.StaticText(
-            ref_header, label='Reference', style=wx.ALIGN_CENTER)
-        f = ref_label.GetFont()
+        ref_hdr = wx.Panel(left_panel)
+        ref_hdr.SetBackgroundColour(wx.Colour(90, 90, 96))
+        ref_hdr_s = wx.BoxSizer(wx.VERTICAL)
+        ref_hdr.SetSizer(ref_hdr_s)
+        lbl = wx.StaticText(ref_hdr, label='Reference', style=wx.ALIGN_CENTER)
+        f = lbl.GetFont()
         f.SetPointSize(16)
         f.SetWeight(wx.FONTWEIGHT_BOLD)
-        ref_label.SetFont(f)
-        ref_label.SetForegroundColour(wx.Colour(255, 255, 255))
-        ref_header_s.Add(ref_label, 1, wx.EXPAND | wx.ALL, 8)
-        left.Add(ref_header, 0, wx.EXPAND | wx.BOTTOM, 8)
+        lbl.SetFont(f)
+        lbl.SetForegroundColour(wx.Colour(255, 255, 255))
+        ref_hdr_s.Add(lbl, 1, wx.EXPAND | wx.ALL, 8)
+        left.Add(ref_hdr, 0, wx.EXPAND | wx.BOTTOM, 8)
 
-        self.ref_view = _AsmGLCanvas(
-            left_panel, bg=(80, 80, 85, 255), orbit=True)
-        self.ref_view.set_camera(
-            distance=8.0, elevation_deg=20.0, azimuth_deg=30.0, fov=60.0)
+        self.ref_view = _AsmGLCanvas(left_panel, bg_dark=True, orbit=True)
+        self.ref_view.set_camera(dist=8.0, elev=20.0, azim=30.0, fov=60.0)
         left.Add(self.ref_view, 1, wx.EXPAND)
 
-        # Right: assembly view + controls.
+        # ── Right: Assembly panel ─────────────────────────────────────────────
         right_panel = wx.Panel(self)
         right_panel.SetBackgroundColour(wx.Colour(74, 74, 80))
         right = wx.BoxSizer(wx.VERTICAL)
         right_panel.SetSizer(right)
         root.Add(right_panel, 2, wx.EXPAND | wx.ALL, 10)
 
-        asm_header = wx.Panel(right_panel)
-        asm_header.SetBackgroundColour(wx.Colour(90, 90, 96))
-        asm_header_s = wx.BoxSizer(wx.VERTICAL)
-        asm_header.SetSizer(asm_header_s)
-        asm_label = wx.StaticText(
-            asm_header, label='Assembly Area', style=wx.ALIGN_CENTER)
-        f2 = asm_label.GetFont()
+        asm_hdr = wx.Panel(right_panel)
+        asm_hdr.SetBackgroundColour(wx.Colour(90, 90, 96))
+        asm_hdr_s = wx.BoxSizer(wx.VERTICAL)
+        asm_hdr.SetSizer(asm_hdr_s)
+        lbl2 = wx.StaticText(
+            asm_hdr, label='Assembly Area', style=wx.ALIGN_CENTER)
+        f2 = lbl2.GetFont()
         f2.SetPointSize(16)
         f2.SetWeight(wx.FONTWEIGHT_BOLD)
-        asm_label.SetFont(f2)
-        asm_label.SetForegroundColour(wx.Colour(255, 255, 255))
-        asm_header_s.Add(asm_label, 1, wx.EXPAND | wx.ALL, 8)
-        right.Add(asm_header, 0, wx.EXPAND | wx.BOTTOM, 8)
+        lbl2.SetFont(f2)
+        lbl2.SetForegroundColour(wx.Colour(255, 255, 255))
+        asm_hdr_s.Add(lbl2, 1, wx.EXPAND | wx.ALL, 8)
+        right.Add(asm_hdr, 0, wx.EXPAND | wx.BOTTOM, 8)
 
-        self.asm_view = _AsmGLCanvas(right_panel, bg=(240, 240, 245, 255))
-        self.asm_view.set_camera(distance=5.0, elevation_deg=20.0,
-                                 azimuth_deg=30.0, target=(0.0, 0.0, 0.0), fov=50.0)
+        self.asm_view = _AsmGLCanvas(right_panel, bg_dark=False, orbit=False)
+        self.asm_view.set_camera(dist=5.0, elev=20.0, azim=30.0, fov=50.0)
         right.Add(self.asm_view, 1, wx.EXPAND)
 
-        # Feedback + action buttons in a single row.
+        # Feedback + action buttons
         ctrl_row = wx.BoxSizer(wx.HORIZONTAL)
         right.Add(ctrl_row, 0, wx.EXPAND | wx.TOP, 8)
 
@@ -694,43 +887,34 @@ class Assembly3DMinigame(wx.Dialog):
 
         btn_reset = _StyledButton(right_panel, label='Reset')
         btn_reset.SetMinSize((80, 38))
-        btn_reset.Bind(wx.EVT_BUTTON, lambda _evt: self._reset_pieces())
+        btn_reset.Bind(wx.EVT_BUTTON, lambda _e: self._reset_pieces())
         ctrl_row.Add(btn_reset, 0, wx.RIGHT, 6)
 
-        btn_check = _StyledButton(
-            right_panel,
-            label='Check',
-            bg=(74, 222, 128),
-            fg=(45, 45, 48),
-            border=(34, 197, 94),
-            hover_bg=(34, 197, 94),
-            hover_border=(22, 163, 74),
-        )
+        btn_check = _StyledButton(right_panel, label='Check',
+                                  bg=(74, 222, 128), fg=(45, 45, 48),
+                                  border=(34, 197, 94),
+                                  hover_bg=(34, 197, 94), hover_border=(22, 163, 74))
         btn_check.SetMinSize((80, 38))
-        btn_check.Bind(wx.EVT_BUTTON, lambda _evt: self._check_assembly())
+        btn_check.Bind(wx.EVT_BUTTON, lambda _e: self._check_assembly())
         ctrl_row.Add(btn_check, 0, wx.RIGHT, 6)
 
-        btn_quit = _StyledButton(
-            right_panel,
-            label='Quit',
-            bg=(239, 68, 68),
-            fg=(255, 255, 255),
-            border=(220, 38, 38),
-            hover_bg=(220, 38, 38),
-            hover_border=(185, 28, 28),
-        )
+        btn_quit = _StyledButton(right_panel, label='Quit',
+                                 bg=(239, 68, 68), fg=(255, 255, 255),
+                                 border=(220, 38, 38),
+                                 hover_bg=(220, 38, 38), hover_border=(185, 28, 28))
         btn_quit.SetMinSize((80, 38))
-        btn_quit.Bind(wx.EVT_BUTTON, lambda _evt: self.EndModal(wx.ID_CANCEL))
+        btn_quit.Bind(wx.EVT_BUTTON, lambda _e: self.EndModal(wx.ID_CANCEL))
         ctrl_row.Add(btn_quit, 0)
 
-        # Piece buttons row.
+        # Piece buttons row
         self._piece_btn_panel = wx.Panel(right_panel)
         self._piece_btn_panel.SetBackgroundColour(wx.Colour(74, 74, 80))
         self._piece_btn_host = wx.BoxSizer(wx.HORIZONTAL)
         self._piece_btn_panel.SetSizer(self._piece_btn_host)
         right.Add(self._piece_btn_panel, 0, wx.EXPAND | wx.TOP, 8)
+        self.piece_btns: List[_StyledButton] = []
 
-        # Arrow pad inside a container panel (like PySide arrow_widget).
+        # Arrow pad
         arrow_host = wx.Panel(right_panel)
         arrow_host.SetBackgroundColour(wx.Colour(90, 90, 96))
         arrow_s = wx.BoxSizer(wx.HORIZONTAL)
@@ -752,72 +936,56 @@ class Assembly3DMinigame(wx.Dialog):
         arrow_grid = wx.GridSizer(3, 3, 4, 4)
         arrow_inner_s.Add(arrow_grid, 1, wx.EXPAND)
 
-        def add_btn(lbl: str, fn) -> None:
+        def _abtn(lbl: str, fn) -> None:
             if lbl.strip() == '':
                 p = wx.Panel(arrow_inner)
                 p.SetBackgroundColour(wx.Colour(90, 90, 96))
                 arrow_grid.Add(p, 0, wx.EXPAND)
                 return
-            b = _StyledButton(
-                arrow_inner,
-                label=lbl,
-                size=(40, 40),
-                pressed_bg=(255, 215, 0),
-                pressed_fg=(45, 45, 48),
-                pressed_border=(255, 237, 78),
-                padding_x=0,
-                padding_y=0,
-            )
-            b.Bind(wx.EVT_BUTTON, lambda _evt: fn())
+            b = _StyledButton(arrow_inner, label=lbl, size=(40, 40),
+                              pressed_bg=(255, 215, 0), pressed_fg=(45, 45, 48),
+                              pressed_border=(255, 237, 78),
+                              padding_x=0, padding_y=0)
+            b.Bind(wx.EVT_BUTTON, lambda _e: fn())
             arrow_grid.Add(b, 0, wx.EXPAND)
 
-        add_btn(' ', lambda: None)
-        add_btn('↑', lambda: self._move_selected_piece(0, 1, 0))
-        add_btn(' ', lambda: None)
+        _abtn(' ', lambda: None)
+        _abtn('↑', lambda: self._move_selected_piece(0, 1, 0))
+        _abtn(' ', lambda: None)
+        _abtn('←', lambda: self._move_selected_piece(-1, 0, 0))
+        _abtn(' ', lambda: None)
+        _abtn('→', lambda: self._move_selected_piece(1, 0, 0))
+        _abtn(' ', lambda: None)
+        _abtn('↓', lambda: self._move_selected_piece(0, -1, 0))
+        _abtn(' ', lambda: None)
 
-        add_btn('←', lambda: self._move_selected_piece(-1, 0, 0))
-        add_btn(' ', lambda: None)
-        add_btn('→', lambda: self._move_selected_piece(1, 0, 0))
-
-        add_btn(' ', lambda: None)
-        add_btn('↓', lambda: self._move_selected_piece(0, -1, 0))
-        add_btn(' ', lambda: None)
-
-        btn_zp = _StyledButton(
-            z_col,
-            label='Z+',
-            size=(40, 40),
-            bg=(255, 248, 220),
-            fg=(45, 45, 48),
-            border=(255, 215, 0),
-            hover_bg=(255, 237, 78),
-            hover_border=(255, 215, 0),
-            font_point=11,
-            padding_x=0,
-            padding_y=0,
-        )
+        _zbtn_kw = dict(size=(40, 40), bg=(255, 248, 220), fg=(45, 45, 48),
+                        border=(255, 215, 0), hover_bg=(255, 237, 78),
+                        hover_border=(255, 215, 0), font_point=11,
+                        padding_x=0, padding_y=0)
+        btn_zp = _StyledButton(z_col, label='Z+', **_zbtn_kw)
         btn_zp.Bind(wx.EVT_BUTTON,
-                    lambda _evt: self._move_selected_piece(0, 0, 1))
+                    lambda _e: self._move_selected_piece(0, 0, 1))
         z_col_s.Add(btn_zp, 0, wx.ALIGN_CENTER | wx.BOTTOM, 8)
 
-        btn_zm = _StyledButton(
-            z_col,
-            label='Z-',
-            size=(40, 40),
-            bg=(255, 248, 220),
-            fg=(45, 45, 48),
-            border=(255, 215, 0),
-            hover_bg=(255, 237, 78),
-            hover_border=(255, 215, 0),
-            font_point=11,
-            padding_x=0,
-            padding_y=0,
-        )
+        btn_zm = _StyledButton(z_col, label='Z-', **_zbtn_kw)
         btn_zm.Bind(wx.EVT_BUTTON,
-                    lambda _evt: self._move_selected_piece(0, 0, -1))
+                    lambda _e: self._move_selected_piece(0, 0, -1))
         z_col_s.Add(btn_zm, 0, wx.ALIGN_CENTER)
 
-        self.piece_btns: list[wx.ToggleButton] = []
+    # ── scene / GL ────────────────────────────────────────────────────────────
+
+    def _build_scene_for_kind(self) -> None:
+        self.pieces = _make_pieces(self.kind)
+        self.target_structure = _make_target(self.kind)
+        self.placed = [False] * len(self.pieces)
+        self.selected_piece = None
+        self._gl_built = False
+
+        for i, p in enumerate(self.pieces):
+            p['_idx'] = i
+
+        self._ensure_piece_controls_match_scene()
 
     def _ensure_piece_controls_match_scene(self) -> None:
         for b in list(self.piece_btns):
@@ -827,175 +995,137 @@ class Assembly3DMinigame(wx.Dialog):
                 pass
         self.piece_btns = []
 
-        parent = getattr(self, '_piece_btn_panel', None) or self
-        for i, piece in enumerate(getattr(self, 'pieces', []) or []):
-            b = _StyledButton(
-                parent, label=f"{str(piece.get('type', 'cube')).capitalize()} {i + 1}", toggle=True)
+        parent = self._piece_btn_panel
+        for i, piece in enumerate(self.pieces):
+            lbl = f"{str(piece.get('type', 'cube')).capitalize()} {i + 1}"
+            b = _StyledButton(parent, label=lbl, toggle=True)
             b.SetMinSize((130, 38))
-            b.Bind(wx.EVT_TOGGLEBUTTON, lambda _evt,
+            b.Bind(wx.EVT_TOGGLEBUTTON, lambda _e,
                    idx=i: self._select_piece(idx))
             self._piece_btn_host.Add(b, 0, wx.RIGHT, 6)
             self.piece_btns.append(b)
         try:
-            if getattr(self, '_piece_btn_panel', None) is not None:
-                self._piece_btn_panel.Layout()
+            self._piece_btn_panel.Layout()
         except Exception:
             pass
         self.Layout()
 
-    def _on_game_timer(self, _evt: wx.TimerEvent) -> None:
-        parent = self.GetParent()
-        if parent is not None and hasattr(parent, 'core'):
-            try:
-                current_time = time.perf_counter()
-                dt = current_time - \
-                    float(getattr(self, '_last_game_update', current_time))
-                dt = min(dt, 0.1)
-                parent.core.elapsed_s += dt
-                self._last_game_update = current_time
-            except Exception:
-                pass
+    def _build_gl(self) -> None:
+        """Upload VAOs for current pieces + target + grid.  Called once after show."""
+        if self._gl_built:
+            return
+
+        # Ensure both canvases have initialized their GL contexts
+        self.ref_view._ensure()
+        self.asm_view._ensure()
+
+        # Upload piece VAOs for asm_view context
+        self.asm_view.SetCurrent(self.asm_view._ctx)
+        self._piece_vaos = []
+        for p in self.pieces:
+            col = p['color']
+            raw = _cube(col) if p['type'] == 'cube' else _pyramid(col)
+            self._piece_vaos.append(_upload(raw))
+
+        # Upload target VAOs for asm_view context (not used but kept)
+        self._ref_vaos = []
+        for i, t in enumerate(self.target_structure):
+            col = self.pieces[i]['color'] if i < len(
+                self.pieces) else (0.7, 0.7, 0.7, 1.0)
+            raw = _cube(col) if t['type'] == 'cube' else _pyramid(col)
+            self._ref_vaos.append(_upload(raw))
+
+        # Grid VAO for asm_view
+        self._gvao, self._gvtx = _upload(_grid_verts())
+
+        # Upload separate VAOs for ref_view context (VAOs cannot be shared!)
+        self.ref_view.SetCurrent(self.ref_view._ctx)
+        self._piece_vaos_ref = []
+        for p in self.pieces:
+            col = p['color']
+            raw = _cube(col) if p['type'] == 'cube' else _pyramid(col)
+            self._piece_vaos_ref.append(_upload(raw))
+
+        self._ref_vaos_ref = []
+        for i, t in enumerate(self.target_structure):
+            col = self.pieces[i]['color'] if i < len(
+                self.pieces) else (0.7, 0.7, 0.7, 1.0)
+            raw = _cube(col) if t['type'] == 'cube' else _pyramid(col)
+            self._ref_vaos_ref.append(_upload(raw))
+
+        self._flash_vaos = []  # allocated on demand in _on_flash_timer
+
+        self._gl_built = True
+        self._update_views()
+
+    def _asm_mats_from_pieces(self) -> List[List[float]]:
+        return [_tmat(float(p['pos'][0]), float(p['pos'][1]), float(p['pos'][2]))
+                for p in self.pieces]
+
+    def _ref_mats_from_target(self) -> List[List[float]]:
+        return [_tmat(float(t['pos'][0]), float(t['pos'][1]), float(t['pos'][2]))
+                for t in self.target_structure]
+
+    def _update_views(self) -> None:
+        if not self._gl_built:
+            return
+
+        # Use separate VAOs for each canvas since VAOs cannot be shared between contexts
+        self.ref_view.set_scene(
+            self._ref_vaos_ref, self._ref_mats_from_target())
+        self.asm_view.set_scene(self._piece_vaos, self._asm_mats_from_pieces(),
+                                self._gvao, self._gvtx)
+
+    # ── flash timer ──────────────────────────────────────────────────────────
 
     def _on_flash_timer(self, _evt: wx.TimerEvent) -> None:
-        if self.selected_piece is None:
-            try:
-                self.asm_view.set_selection(None, flash_green=False)
-            except Exception:
-                pass
+        """Rebuild the selected piece's VAO with a flashing green colour."""
+        if not self._gl_built:
             return
-        idx = int(self.selected_piece)
-        if idx < 0 or idx >= len(getattr(self, 'pieces', []) or []):
-            return
-        if idx < 0 or idx >= len(getattr(self, 'placed', []) or []):
+        idx = self.selected_piece
+        if idx is None or idx < 0 or idx >= len(self.pieces):
             return
         if self.placed[idx]:
-            try:
-                self.asm_view.set_selection(None, flash_green=False)
-            except Exception:
-                pass
             return
 
-        # 2.5Hz-ish blink like the PySide "selected" flash.
-        flash_green = (int(time.perf_counter() * 5.0) % 2) == 0
+        flash = (int(time.perf_counter() * 5.0) % 2) == 0
+        p = self.pieces[idx]
+        orig_col = p['color']
+        col = (0.15, 0.95, 0.25, float(orig_col[3])) if flash else orig_col
+
+        # Re-upload just this piece's VAO
+        self.asm_view.SetCurrent(self.asm_view._ctx)
+        raw = _cube(col) if p['type'] == 'cube' else _pyramid(col)
+        old_vao, _ = self._piece_vaos[idx]
+        # Delete old VAO to avoid leaking (best-effort)
         try:
-            self.asm_view.set_selection(idx, flash_green=flash_green)
+            GL.glDeleteVertexArrays(1, [old_vao])
         except Exception:
             pass
+        self._piece_vaos[idx] = _upload(raw)
 
-    def _build_scene_for_kind(self) -> None:
-        self.pieces = self._generate_pieces_3d(self.kind)
-        self.target_structure = self._generate_target_structure_3d(self.kind)
-        self.placed = [False] * len(self.pieces)
-        self.selected_piece = None
+        self.asm_view.set_scene(self._piece_vaos, self._asm_mats_from_pieces(),
+                                self._gvao, self._gvtx)
 
-        # Tag each piece with a stable index so the GL renderer can highlight it.
-        for i, p in enumerate(self.pieces):
-            try:
-                p['_idx'] = int(i)
-            except Exception:
-                pass
-
-        self._ensure_piece_controls_match_scene()
-
-        self.ref_view.set_scene(
-            pieces=self.pieces, target=self.target_structure, mode='reference')
-        self.asm_view.set_scene(
-            pieces=self.pieces, target=self.target_structure, mode='assembly')
-
-        # Auto-center assembly camera target so the grid + pieces fill the canvas instead of sitting with wide margins.
-        try:
-            pts = []
-            for p in self.pieces:
-                pos = p.get('pos')
-                if pos is None:
-                    continue
-                pts.append((float(pos[0]), float(pos[1]), float(pos[2])))
-            if pts:
-                cx = float(sum(x for x, _, _ in pts) / len(pts))
-                cy = float(sum(y for _, y, _ in pts) / len(pts))
-                cz = float(sum(z for _, _, z in pts) / len(pts))
-                self.asm_view.set_camera(
-                    distance=5.0, elevation_deg=20.0, azimuth_deg=30.0, target=(cx, cy, cz), fov=50.0)
-        except Exception:
-            pass
-
-    def _generate_pieces_3d(self, kind: str):
-        yellow = (255, 223, 0, 255)
-        blue = (0, 149, 255, 255)
-        red = (255, 69, 0, 255)
-
-        kind = str(kind or 'KP').upper()
-
-        if kind == 'KP':
-            return [
-                {'type': 'cube', 'color': yellow, 'pos': np.array(
-                    [2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
-                {'type': 'cube', 'color': blue, 'pos': np.array(
-                    [-2, 0, 0], dtype=float), 'rot': [0, 0, 0]},
-                {'type': 'pyramid', 'color': red, 'pos': np.array(
-                    [0, 0, 0], dtype=float), 'rot': [0, 0, 0]},
-            ]
-
-        if kind == 'K':
-            colors = [blue, yellow, red, red, blue]
-            pieces = []
-            for i, col in enumerate(colors):
-                pieces.append({'type': 'cube', 'color': col, 'pos': np.array(
-                    [-2 + i, 0, 0], dtype=float), 'rot': [0, 0, 0]})
-            return pieces
-
-        colors = [yellow, red, blue, yellow]
-        types = ['cube', 'cube', 'pyramid', 'pyramid']
-        pieces = []
-        for i, (t, col) in enumerate(zip(types, colors)):
-            pieces.append({'type': t, 'color': col, 'pos': np.array(
-                [-2 + i, 0, 0], dtype=float), 'rot': [0, 0, 0]})
-        return pieces
-
-    def _generate_target_structure_3d(self, kind: str):
-        kind = str(kind or 'KP').upper()
-
-        if kind == 'KP':
-            return [
-                {'type': 'cube', 'pos': np.array([0, 0, 0], dtype=float), 'rot': [
-                    0, 0, 0], 'color': self.pieces[0]['color']},
-                {'type': 'cube', 'pos': np.array([0, 0, 1], dtype=float), 'rot': [
-                    0, 0, 0], 'color': self.pieces[1]['color']},
-                {'type': 'pyramid', 'pos': np.array([0, 0, 2], dtype=float), 'rot': [
-                    0, 0, 0], 'color': self.pieces[2]['color']},
-            ]
-
-        if kind == 'K':
-            return [
-                {'type': 'cube', 'pos': np.array([0, 0, 0], dtype=float), 'rot': [
-                    0, 0, 0], 'color': self.pieces[0]['color']},
-                {'type': 'cube', 'pos': np.array([1, 0, 0], dtype=float), 'rot': [
-                    0, 0, 0], 'color': self.pieces[1]['color']},
-                {'type': 'cube', 'pos': np.array([2, 0, 0], dtype=float), 'rot': [
-                    0, 0, 0], 'color': self.pieces[2]['color']},
-                {'type': 'cube', 'pos': np.array([0, 1, 0], dtype=float), 'rot': [
-                    0, 0, 0], 'color': self.pieces[3]['color']},
-                {'type': 'cube', 'pos': np.array([1, 1, 0], dtype=float), 'rot': [
-                    0, 0, 0], 'color': self.pieces[4]['color']},
-            ]
-
-        return [
-            {'type': 'cube', 'pos': np.array([0, 0, 0], dtype=float), 'rot': [
-                0, 0, 0], 'color': self.pieces[0]['color']},
-            {'type': 'cube', 'pos': np.array([1, 0, 0], dtype=float), 'rot': [
-                0, 0, 0], 'color': self.pieces[1]['color']},
-            {'type': 'pyramid', 'pos': np.array([0, 1, 0], dtype=float), 'rot': [
-                0, 0, 0], 'color': self.pieces[2]['color']},
-            {'type': 'pyramid', 'pos': np.array([1, 1, 0], dtype=float), 'rot': [
-                0, 0, 0], 'color': self.pieces[3]['color']},
-        ]
-
-    GRID_MIN = -2
-    GRID_MAX = 2
-    Z_MIN = 0
-    Z_MAX = 2
+    # ── piece interaction ─────────────────────────────────────────────────────
 
     def _select_piece(self, idx: int) -> None:
+        # Restore original color for previously selected piece before changing selection
+        if self.selected_piece is not None and self.selected_piece != idx and self._gl_built:
+            prev_idx = self.selected_piece
+            if 0 <= prev_idx < len(self.pieces) and not self.placed[prev_idx]:
+                # Restore original color for previously selected piece
+                self.asm_view.SetCurrent(self.asm_view._ctx)
+                old_vao, _ = self._piece_vaos[prev_idx]
+                try:
+                    GL.glDeleteVertexArrays(1, [old_vao])
+                except Exception:
+                    pass
+                p = self.pieces[prev_idx]
+                raw = _cube(p['color']) if p['type'] == 'cube' else _pyramid(
+                    p['color'])
+                self._piece_vaos[prev_idx] = _upload(raw)
+
         self.selected_piece = int(idx)
         for i, b in enumerate(self.piece_btns):
             try:
@@ -1008,30 +1138,34 @@ class Assembly3DMinigame(wx.Dialog):
         if self.selected_piece is None:
             return
         idx = int(self.selected_piece)
-        if idx < 0 or idx >= len(self.pieces):
+        if idx < 0 or idx >= len(self.pieces) or self.placed[idx]:
             return
-        if self.placed[idx]:
-            return
-
         pos = self.pieces[idx]['pos']
-        new_pos = pos.copy()
-        new_pos[0] = max(self.GRID_MIN, min(self.GRID_MAX, new_pos[0] + dx))
-        new_pos[1] = max(self.GRID_MIN, min(self.GRID_MAX, new_pos[1] + dy))
-        new_pos[2] = max(self.Z_MIN, min(self.Z_MAX, new_pos[2] + dz))
-        self.pieces[idx]['pos'] = new_pos
-        self.asm_view.Refresh(False)
+        pos[0] = max(self.GRID_MIN, min(self.GRID_MAX, pos[0] + dx))
+        pos[1] = max(self.GRID_MIN, min(self.GRID_MAX, pos[1] + dy))
+        pos[2] = max(self.Z_MIN,    min(self.Z_MAX,    pos[2] + dz))
+        self._update_views()
         self._update_feedback()
 
     def _reset_pieces(self) -> None:
-        for i, piece in enumerate(self.pieces):
-            if self.kind == 'KP':
-                piece['pos'] = np.array(
-                    [2 if i == 0 else -2 if i == 1 else 0, 0, 0], dtype=float)
-            else:
-                piece['pos'] = np.array([-2 + i, 0, 0], dtype=float)
+        fresh = _make_pieces(self.kind)
+        for i, p in enumerate(self.pieces):
+            p['pos'] = list(fresh[i]['pos'])
         self.placed = [False] * len(self.pieces)
         self.selected_piece = None
-        self.asm_view.Refresh(False)
+        # Restore original colours (remove any flash tint)
+        if self._gl_built:
+            self.asm_view.SetCurrent(self.asm_view._ctx)
+            for i, p in enumerate(self.pieces):
+                old_vao, _ = self._piece_vaos[i]
+                try:
+                    GL.glDeleteVertexArrays(1, [old_vao])
+                except Exception:
+                    pass
+                raw = _cube(p['color']) if p['type'] == 'cube' else _pyramid(
+                    p['color'])
+                self._piece_vaos[i] = _upload(raw)
+        self._update_views()
         self._update_feedback()
 
     def _update_feedback(self) -> None:
@@ -1040,56 +1174,42 @@ class Assembly3DMinigame(wx.Dialog):
                 b.SetValue(self.selected_piece == i)
             except Exception:
                 pass
-
         if all(self.placed) and self.pieces:
-            self.feedback_label.set_text(
-                '🎉 Perfect Assembly! 🎉', mode='success')
+            self.feedback_label.set_text('Perfect Assembly!', mode='success')
         else:
             self.feedback_label.set_text(
                 'Select piece → Use arrows to move → Z+/- for height', mode='normal')
 
+    # ── check / congratulations ───────────────────────────────────────────────
+
     def _check_assembly(self) -> None:
-        def neighbors_from_positions(positions: list[np.ndarray]) -> dict[int, set[int]]:
-            adj: dict[int, set[int]] = {i: set()
-                                        for i in range(len(positions))}
-            ipos = [np.round(p).astype(int) for p in positions]
-            for i in range(len(ipos)):
-                for j in range(i + 1, len(ipos)):
-                    diff = np.abs(ipos[i] - ipos[j])
-                    touching = (np.sum(diff == 1) == 1) and (
-                        np.sum(diff == 0) == 2)
-                    if touching:
-                        adj[i].add(j)
-                        adj[j].add(i)
-            return adj
+        def adj(positions):
+            a = {i: set() for i in range(len(positions))}
+            ip = [[round(v) for v in pos] for pos in positions]
+            for i in range(len(ip)):
+                for j in range(i + 1, len(ip)):
+                    diff = [abs(ip[i][k] - ip[j][k]) for k in range(3)]
+                    if sum(1 for d in diff if d == 1) == 1 and sum(1 for d in diff if d == 0) == 2:
+                        a[i].add(j)
+                        a[j].add(i)
+            return a
 
-        color_type_ok = True
-        for i, target in enumerate(self.target_structure):
-            if i >= len(self.pieces):
-                color_type_ok = False
-                break
-            if self.pieces[i]['type'] != target['type']:
-                color_type_ok = False
-                break
+        type_ok = all(
+            i < len(self.pieces) and self.pieces[i]['type'] == t['type']
+            for i, t in enumerate(self.target_structure)
+        )
+        ta = adj([t['pos'] for t in self.target_structure])
+        pa = adj([p['pos'] for p in self.pieces])
+        adj_ok = all(pa.get(i, set()) == ta.get(i, set())
+                     for i in range(len(self.target_structure)))
 
-        target_adj = neighbors_from_positions(
-            [t['pos'] for t in self.target_structure])
-        placed_adj = neighbors_from_positions([p['pos'] for p in self.pieces])
-
-        adjacency_ok = True
-        for i in range(len(self.target_structure)):
-            if placed_adj.get(i, set()) != target_adj.get(i, set()):
-                adjacency_ok = False
-                break
-
-        if color_type_ok and adjacency_ok:
+        if type_ok and adj_ok:
             self.feedback_label.set_text('Perfect Assembly!', mode='success')
             self._show_congratulations()
             self.EndModal(wx.ID_OK)
-            return
-
-        self.feedback_label.set_text(
-            '❌ Incorrect - Keep Trying!', mode='error')
+        else:
+            self.feedback_label.set_text(
+                '❌ Incorrect - Keep Trying!', mode='error')
 
     def _show_congratulations(self) -> None:
         dlg = wx.Dialog(self, title='Success!', style=wx.DEFAULT_DIALOG_STYLE)
@@ -1123,21 +1243,10 @@ class Assembly3DMinigame(wx.Dialog):
         s.Add(t3, 0, wx.ALIGN_CENTER | wx.TOP | wx.LEFT | wx.RIGHT, 8)
 
         ok = _StyledButton(dlg, label='OK')
-        ok.Bind(wx.EVT_BUTTON, lambda _evt: dlg.EndModal(wx.ID_OK))
+        ok.Bind(wx.EVT_BUTTON, lambda _e: dlg.EndModal(wx.ID_OK))
         s.Add(ok, 0, wx.ALIGN_CENTER | wx.ALL, 16)
 
         dlg.Fit()
         dlg.CentreOnParent()
         dlg.ShowModal()
         dlg.Destroy()
-
-    def Destroy(self) -> bool:
-        try:
-            self._selection_flash_timer.Stop()
-        except Exception:
-            pass
-        try:
-            self._game_timer.Stop()
-        except Exception:
-            pass
-        return super().Destroy()

@@ -56,7 +56,6 @@ class Ghost:
     forward: bool = True
     target_index: int = 0
     size_scale: float = 1.0
-    speed_mult: float = 1.0
     collision_radius: float = 0.75
     can_phase_walls: bool = False
     time_penalty_s: float = 0.0
@@ -190,17 +189,18 @@ class GameCore:
         self._spike_seed_cells: Set[Tuple[int, int]] = set()
 
         self.ghost_abilities: Dict[int, dict] = {
-            1: {'size_scale': 2.10, 'speed_mult': 1.0, 'collision_radius': 1.35, 'can_phase_walls': False, 'time_penalty_s': 0.0},
-            2: {'size_scale': 1.35, 'speed_mult': 1.05, 'collision_radius': 0.95, 'can_phase_walls': True, 'time_penalty_s': 0.0},
-            3: {'size_scale': 1.35, 'speed_mult': 1.0, 'collision_radius': 0.95, 'can_phase_walls': False, 'time_penalty_s': 0.0},
-            4: {'size_scale': 1.35, 'speed_mult': 1.85, 'collision_radius': 1.00, 'can_phase_walls': False, 'time_penalty_s': 0.0},
-            5: {'size_scale': 1.45, 'speed_mult': 1.10, 'collision_radius': 1.05, 'can_phase_walls': False, 'time_penalty_s': 30.0},
+            1: {'size_scale': 2.10, 'collision_radius': 1.35, 'can_phase_walls': False, 'time_penalty_s': 0.0},
+            2: {'size_scale': 1.35, 'collision_radius': 0.95, 'can_phase_walls': True, 'time_penalty_s': 0.0},
+            3: {'size_scale': 1.35, 'collision_radius': 0.95, 'can_phase_walls': False, 'time_penalty_s': 0.0},
+            4: {'size_scale': 1.35, 'collision_radius': 1.00, 'can_phase_walls': False, 'time_penalty_s': 0.0},
+            5: {'size_scale': 1.45, 'collision_radius': 1.05, 'can_phase_walls': False, 'time_penalty_s': 30.0},
         }
 
         self._parse_maps()
 
         spawn = self._pick_spawn_cell()
-        self.player = Player(x=spawn[1] + 0.5, y=0.5, z=spawn[0] + 0.5)
+        self.player = Player(
+            x=spawn[1] + 0.5, y=0.5, z=spawn[0] + 0.5, yaw=math.pi/2)
 
         self.wall_height = 4.5
         self.ceiling_height = self.wall_height
@@ -215,8 +215,6 @@ class GameCore:
         self.in_jail = False
         self.paused = False
 
-        # Used for minigames: freeze hazards/world updates but keep elapsed time running.
-        # This keeps the run fair (time still counts) without killing the player while in a modal.
         self.simulation_frozen = False
         self.game_won = False
         self.game_completed = False
@@ -267,7 +265,6 @@ class GameCore:
             self.open_gate('start')
 
     def _pick_spawn_cell(self) -> Tuple[int, int]:
-        # Prefer a walkable cell adjacent to the start marker.
         if self.start_cells:
             sr, sc = self.start_cells[0]
             for nb in ((sr, sc + 1), (sr, sc - 1), (sr + 1, sc), (sr - 1, sc)):
@@ -276,7 +273,6 @@ class GameCore:
             if (sr, sc) in self.floors and (sr, sc) not in self.walls:
                 return (sr, sc)
 
-        # Fallback: first available walkable floor.
         for cell in sorted(self.floors):
             if cell not in self.walls:
                 return cell
@@ -471,11 +467,8 @@ class GameCore:
         self._sector_popup_timer = 0.0
 
     def _spawn_coins(self) -> None:
-        """Center-prioritized distribution for 3-block wide paths"""
-        # Create exclusion zones: from S to nearest d, and from E to nearest d
         exclusion_zones = set()
 
-        # Find all 'd' gate cells in layout
         gate_cells = []
         if hasattr(self, 'layout') and self.layout:
             for r, row in enumerate(self.layout):
@@ -483,12 +476,9 @@ class GameCore:
                     if char == 'd':
                         gate_cells.append((r, c))
 
-        # Exclude from start cells to nearest gate
         for start_cell in self.start_cells:
-            # Find nearest gate to this start
             nearest_gate = min(gate_cells, key=lambda g: abs(
                 g[0] - start_cell[0]) + abs(g[1] - start_cell[1]))
-            # Add all cells in rectangle from start to gate
             min_r, max_r = min(start_cell[0], nearest_gate[0]), max(
                 start_cell[0], nearest_gate[0])
             min_c, max_c = min(start_cell[1], nearest_gate[1]), max(
@@ -497,12 +487,9 @@ class GameCore:
                 for c in range(min_c, max_c + 1):
                     exclusion_zones.add((r, c))
 
-        # Exclude from exit cells to nearest gate
         for exit_cell in self.exit_cells:
-            # Find nearest gate to this exit
             nearest_gate = min(gate_cells, key=lambda g: abs(
                 g[0] - exit_cell[0]) + abs(g[1] - exit_cell[1]))
-            # Add all cells in rectangle from exit to gate
             min_r, max_r = min(exit_cell[0], nearest_gate[0]), max(
                 exit_cell[0], nearest_gate[0])
             min_c, max_c = min(exit_cell[1], nearest_gate[1]), max(
@@ -511,10 +498,8 @@ class GameCore:
                 for c in range(min_c, max_c + 1):
                     exclusion_zones.add((r, c))
 
-        # Also exclude actual gate cells for safety
         exclusion_zones.update(gate_cells)
 
-        # Force 1 coin in jail if jail exists
         selected_coins: List[Tuple[int, int]] = []
         jail_coin_forced = False
         jail_coin_pos = None
@@ -529,13 +514,11 @@ class GameCore:
                 jail_coin_pos = jail_cell
                 jail_coin_forced = True
 
-        # Adjust total coins needed (subtract 1 if we forced jail coin)
         total_coins = self.coins_required - (1 if jail_coin_forced else 0)
 
-        # Collect valid cells and categorize by path width
-        center_cells = []  # Block 2 (middle) in 3-block wide paths
-        edge_cells = []    # Blocks 1 and 3 (edges) in paths
-        isolated_cells = []  # Cells not in 3-block paths
+        center_cells = []
+        edge_cells = []
+        isolated_cells = []
 
         for cell in self.floors:
             if cell in exclusion_zones:
@@ -543,43 +526,33 @@ class GameCore:
 
             r, c = cell
 
-            # Check if this cell has any wall neighbors (adjacent cells)
-            # Only exclude if it has 2+ wall neighbors (less restrictive)
             wall_neighbors = 0
             for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 neighbor = (r + dr, c + dc)
                 if neighbor in self.walls:
                     wall_neighbors += 1
 
-            # Skip cells with many wall neighbors, but allow cells with 0-1 wall neighbors
             if wall_neighbors >= 2:
                 continue
 
-            # Check if this is a center block in a 3-block wide path
             is_center_horizontal = False
             is_center_vertical = False
 
-            # Check horizontal center (left and right are both floor)
             left_cell = (r, c - 1)
             right_cell = (r, c + 1)
             if left_cell in self.floors and right_cell in self.floors:
                 if left_cell not in self.walls and right_cell not in self.walls:
-                    # More lenient: just need left and right to be floor (not requiring 2-block extension)
                     is_center_horizontal = True
 
-            # Check vertical center (up and down are both floor)
             up_cell = (r - 1, c)
             down_cell = (r + 1, c)
             if up_cell in self.floors and down_cell in self.floors:
                 if up_cell not in self.walls and down_cell not in self.walls:
-                    # More lenient: just need up and down to be floor (not requiring 2-block extension)
                     is_center_vertical = True
 
-            # Categorize cell
             if is_center_horizontal or is_center_vertical:
                 center_cells.append(cell)
             else:
-                # Check if this is part of any 3-block path (even if not center)
                 horizontal_path = (left_cell in self.floors and left_cell not in self.walls and
                                    right_cell in self.floors and right_cell not in self.walls)
                 vertical_path = (up_cell in self.floors and up_cell not in self.walls and
@@ -590,24 +563,18 @@ class GameCore:
                 else:
                     isolated_cells.append(cell)
 
-        # Sort cells for systematic distribution
         center_cells.sort()
         edge_cells.sort()
         isolated_cells.sort()
 
-        # Calculate coin allocation - prioritize center and isolated cells
         total_coins = self.coins_required
 
-        # Prioritize center cells first, then isolated (good middle positions), then edges
-        center_coins = min(
-            total_coins // 2, len(center_cells))  # 50% in center
+        center_coins = min(total_coins // 2, len(center_cells))
         remaining_coins = total_coins - center_coins
 
-        isolated_coins = min(remaining_coins // 2,
-                             len(isolated_cells))  # 25% in isolated
-        edge_coins = remaining_coins - isolated_coins  # 25% in edges
+        isolated_coins = min(remaining_coins // 2, len(isolated_cells))
+        edge_coins = remaining_coins - isolated_coins
 
-        # Select coins from different categories
         selected_coins: List[Tuple[int, int]] = []
 
         def pick_spaced(candidates: List[Tuple[int, int]], count: int, min_sep: float, rng: random.Random) -> List[Tuple[int, int]]:
@@ -629,24 +596,19 @@ class GameCore:
 
         rng = random.Random(1337)
 
-        # Try a different approach: select all coins from all categories at once
         all_candidates = center_cells + isolated_cells + edge_cells
 
-        # Calculate coins needed AFTER accounting for jail coin
         coins_to_spawn = total_coins - (1 if jail_coin_forced else 0)
 
         if all_candidates and coins_to_spawn > 0:
             selected_coins.extend(pick_spaced(
                 all_candidates, coins_to_spawn, min_sep=4.0, rng=rng))
 
-        # Ensure we have exactly the required number of coins
         selected_coins = selected_coins[:total_coins]
 
-        # Add jail coin at the beginning of the list (highest priority)
         if jail_coin_forced and jail_coin_pos:
             selected_coins.insert(0, jail_coin_pos)
 
-        # Create coin objects
         self.coins = {cell: Coin(cell=cell, taken=False)
                       for cell in selected_coins}
 
@@ -738,11 +700,9 @@ class GameCore:
         if jail_group:
             self.gates['jail'] = Gate(id='jail', cells=jail_group, locked=True)
         if best_exit:
-            # Start locked, drop when requirements met
             self.gates['exit'] = Gate(id='exit', cells=best_exit, locked=True)
 
     def _init_spikes(self) -> None:
-        # test2-style spikes: individual spike tiles with independent timers.
         self.spikes = []
         if not self._spike_seed_cells:
             return
@@ -761,9 +721,7 @@ class GameCore:
                         )
 
     def _init_ghosts(self) -> None:
-        # Per-ghost speeds (reduced for slower movement)
-        # Reduced from 3.0, 3.5, 2.8, 3.2, 3.8
-        speeds = {1: 2.0, 2: 2.5, 3: 1.8, 4: 2.2, 5: 2.8}
+        speeds = {1: 2.0, 2: 3.0, 3: 1.8, 4: 7.0, 5: 3.25}
         for gid, path in self.ghost_paths.items():
             if gid not in set(self.enabled_ghost_ids):
                 continue
@@ -771,8 +729,6 @@ class GameCore:
                 continue
             abilities = self.ghost_abilities.get(gid, {})
 
-            # Filter to walkable cells only (prevents routing through walls if overlay is misaligned).
-            # If the ghost can phase walls, allow wall cells as waypoints too.
             if bool(abilities.get('can_phase_walls', False)):
                 filtered = list(path)
             else:
@@ -797,7 +753,6 @@ class GameCore:
                 forward=True,
                 target_index=1 if len(path_sorted) > 1 else 0,
                 size_scale=float(abilities.get('size_scale', 1.0) or 1.0),
-                speed_mult=float(abilities.get('speed_mult', 1.0) or 1.0),
                 collision_radius=float(abilities.get(
                     'collision_radius', 0.75) or 0.75),
                 can_phase_walls=bool(abilities.get('can_phase_walls', False)),
@@ -888,11 +843,6 @@ class GameCore:
         return seen
 
     def _order_adjacent_path(self, cells: List[Tuple[int, int]], loop: bool) -> List[Tuple[int, int]]:
-        """Order a set of grid cells into a contiguous path by following 4-neighbor adjacency.
-
-        - For loop paths: start at lexicographically smallest cell and walk until we return.
-        - For non-loop paths: start at an endpoint (degree==1) and walk to the other end.
-        """
         cell_set = set(cells)
         if not cell_set:
             return []
@@ -916,38 +866,30 @@ class GameCore:
         prev: Optional[Tuple[int, int]] = None
         current = start
 
-        # Walk until we cannot continue or we visited all cells.
         while len(ordered) < len(cell_set):
             nbs = neighbors(current)
-            # Prefer continuing forward (not going back to prev)
             candidates = [nb for nb in nbs if nb != prev]
             if not candidates:
                 break
-            # In rare intersections (degree>2), pick a deterministic next cell
             nxt = min(candidates)
             prev = current
             current = nxt
             ordered.append(current)
 
-        # If loop, ensure path is cyclic by keeping it as-is; movement logic wraps.
         return ordered
 
     def _update_checkpoint_arrow(self, dt: float) -> None:
-        """Update checkpoint arrow bobbing animation and check hitbox"""
         if self.checkpoint_arrow and self.checkpoint_arrow.visible:
-            # Update bobbing animation
-            self.checkpoint_arrow.bob_phase += dt * 2.0  # Bob speed
+            self.checkpoint_arrow.bob_phase += dt * 2.0
             self.checkpoint_arrow.bob_offset = math.sin(
                 self.checkpoint_arrow.bob_phase) * 0.1
 
-            # Check if player is in arrow hitbox (more forgiving)
             arrow_r, arrow_c = self.checkpoint_arrow.cell
             player_r, player_c = int(self.player.z), int(self.player.x)
 
-            # Check if player is at or near arrow cell (within 1.5 block radius)
             distance = math.sqrt((player_r - arrow_r) **
                                  2 + (player_c - arrow_c)**2)
-            if distance <= 1.5:  # Within 1.5 block radius (more forgiving)
+            if distance <= 1.5:
                 if not self.game_completed and not self.screen_closing:
                     self.game_completed = True
                     self.screen_closing = True
@@ -1088,16 +1030,10 @@ class GameCore:
                     gate.raising = False
 
     def _check_jail_gate_proximity(self, dt: float) -> None:
-        """Jail gate control.
-
-        Keep the jail gate open until the player has crossed to the other side.
-        This prevents soft-locking the player inside the jail area.
-        """
         jail_gate = self.gates.get('jail')
         if not jail_gate:
             return
 
-        # Only manage auto-close when gate is fully open (lowered).
         if jail_gate.locked or jail_gate.raising or jail_gate.lowering:
             jail_gate.opened_from_inside = None
             jail_gate.opened_timer = 0.0
@@ -1105,14 +1041,12 @@ class GameCore:
 
         player_cell = (int(self.player.z), int(self.player.x))
 
-        # Determine which side the player started on when the gate opened.
         if jail_gate.opened_from_inside is None:
             jail_gate.opened_from_inside = player_cell in self.jail_inside_cells
             jail_gate.opened_timer = 0.0
 
         jail_gate.opened_timer += dt
 
-        # If the gate was opened while the player was inside, keep it open until they reach the outside.
         if jail_gate.opened_from_inside:
             if player_cell in self.jail_outside_cells:
                 self.close_gate('jail')
@@ -1120,7 +1054,6 @@ class GameCore:
                 jail_gate.opened_timer = 0.0
             return
 
-        # If opened from outside, close it once the player leaves the immediate gate area.
         near_gate = any(
             abs(player_cell[0] - gate_cell[0]
                 ) <= 1 and abs(player_cell[1] - gate_cell[1]) <= 1
@@ -1132,37 +1065,29 @@ class GameCore:
             jail_gate.opened_timer = 0.0
 
     def _update_platforms(self, dt: float) -> None:
-        """Update all elevator platforms"""
         player_on_any_platform = False
 
         for platform in self.platforms:
             platform.update(dt)
 
-            # Check if player is on this platform and move them with it
             player_cell = (int(self.player.z), int(self.player.x))
             if player_cell == platform.cell:
-                # Player is on the platform cell, check if they're at the right height
                 player_y = self.player.y
-                platform_top = platform.y_offset + 0.1  # Small platform thickness
+                platform_top = platform.y_offset + 0.1
 
-                # Check if player is actually standing on platform surface
                 px, pz = self.player.x, self.player.z
                 platform_center_x = platform.cell[1] + 0.5
                 platform_center_z = platform.cell[0] + 0.5
-                platform_radius = 0.4  # Platform radius
+                platform_radius = 0.4
 
-                # Only stick to platform if player is within platform bounds
                 if (abs(px - platform_center_x) < platform_radius and
                         abs(pz - platform_center_z) < platform_radius):
-                    # Player is on platform surface, stick them to it
                     if abs(player_y - platform_top) < 0.3:
                         self.player.y = platform_top
                         player_on_any_platform = True
                 else:
-                    # Player walked off platform, reset to ground level
                     self.player.y = 0.0
 
-        # If player is not on any platform but has height > 0, reset to ground
         if not player_on_any_platform and self.player.y > 0.1:
             self.player.y = 0.0
 
@@ -1196,7 +1121,7 @@ class GameCore:
             dist = math.hypot(dx, dz)
             if dist < 1e-6:
                 dist = 1e-6
-            step = (ghost.speed * ghost.speed_mult) * dt
+            step = ghost.speed * dt
             if dist <= step:
                 ghost.x = tx
                 ghost.z = tz
@@ -1223,7 +1148,14 @@ class GameCore:
                     self.elapsed_s += penalty
                     self._trigger_event(
                         'time_penalty', {'seconds': int(round(penalty))})
-                self._send_to_jail('ghost')
+                # Ghost 3 sends player back to spawn instead of jail
+                if ghost.id == 3:
+                    self._send_to_spawn('ghost_3')
+                elif ghost.id == 4:
+                    # Ghost 4 sends to jail but with harder silhouette minigame
+                    self._send_to_jail('ghost_4')
+                else:
+                    self._send_to_jail('ghost')
 
     def _advance_ghost_target(self, ghost: Ghost) -> None:
         n = len(ghost.path_cells)
@@ -1279,7 +1211,6 @@ class GameCore:
             coin.taken = True
             self.coins_collected += 1
 
-            # Track coin collection time
             current_time = self.elapsed_s
             if self.last_coin_time > 0:
                 collection_time = current_time - self.last_coin_time
@@ -1288,7 +1219,6 @@ class GameCore:
 
             self._trigger_event('coin_picked', {'count': self.coins_collected})
 
-        # Key fragments: auto-trigger minigame on touch (test2-style). The UI decides success.
         if self._pending_key_fragment_id is None:
             for frag in self.key_fragments.values():
                 if frag.taken:
@@ -1304,33 +1234,23 @@ class GameCore:
                 fx = c + 0.5
                 fz = r + 0.5
 
-                # Check distance to fragment
-                # KP should only trigger when you're actually near the platform/fragment, not from below.
                 pickup_r = 0.50 if frag.kind == 'KP' else 0.55
                 if self._distance_xz(self.player.x, self.player.z, fx, fz) < pickup_r:
-                    # For KP fragments, only trigger if platform is moving AND player is standing on platform
                     if frag.kind == 'KP':
-                        # Find the platform at this location
                         player_on_platform = False
                         platform_near_top = False
                         for platform in self.platforms:
                             if platform.cell == (r, c):
-                                # Check if player is standing on platform (within platform bounds)
                                 px, pz = self.player.x, self.player.z
                                 platform_center_x = c + 0.5
                                 platform_center_z = r + 0.5
-                                # Platform radius (for pickup comfort)
                                 platform_radius = 0.55
 
-                                # Check if player is within platform bounds (standing on it)
                                 if (abs(px - platform_center_x) < platform_radius and
                                     abs(pz - platform_center_z) < platform_radius and
-                                        # Require being near platform height
                                         abs(self.player.y - platform.y_offset) < 0.75):
                                     player_on_platform = True
 
-                                # Beginner-friendly: the fragment should only trigger when the platform is near its top.
-                                # This prevents instant trigger when you first step on (platform is usually at the bottom).
                                 platform_near_top = platform.y_offset >= (
                                     platform.top_height - 0.45)
                                 break
@@ -1338,7 +1258,6 @@ class GameCore:
                         if (not player_on_platform) or (not platform_near_top):
                             continue
 
-                    # Trigger the fragment
                     self._pending_key_fragment_id = frag.id
                     self._trigger_event(
                         'key_fragment_encountered', {'id': frag.id})
@@ -1364,16 +1283,10 @@ class GameCore:
                 self.open_gate('exit')
                 self._trigger_event('exit_unlocked', {})
 
-                # Create checkpoint arrow at exit area when all items collected
                 if self.exit_cells:
-                    # Place arrow between middle 'd' and 'E' for better visibility
-                    # Exit cells are at the end, gate cells are before them
-                    # Position arrow halfway between middle gate and first exit cell
                     if len(self.exit_cells) >= 2:
-                        # Use middle exit cell
                         middle_exit_idx = len(self.exit_cells) // 2
                         middle_exit_cell = self.exit_cells[middle_exit_idx]
-                        # Move arrow one block back from middle exit
                         adjusted_arrow_cell = (
                             middle_exit_cell[0], middle_exit_cell[1] - 1)
                     else:
@@ -1518,6 +1431,14 @@ class GameCore:
         self._refresh_sector_state(show_popup=True)
         self._trigger_event('sent_to_jail', {'reason': reason})
 
+    def _send_to_spawn(self, reason: str) -> None:
+        """Send player back to spawn point (used by ghost 3 instead of jail)."""
+        spawn_cell = self.start_cells[0] if self.start_cells else (1, 1)
+        self.player.x = spawn_cell[1] + 0.5
+        self.player.z = spawn_cell[0] + 0.5
+        self._refresh_sector_state(show_popup=True)
+        self._trigger_event('sent_to_spawn', {'reason': reason})
+
     def _find_jail_cell(self) -> Optional[Tuple[int, int]]:
         # Direct search for 'J' character in the layout
         if hasattr(self, 'layout') and self.layout:
@@ -1564,8 +1485,6 @@ class GameCore:
         self.player.yaw = (self.player.yaw + yaw_delta) % (2 * math.pi)
 
     def tilt_camera(self, pitch_delta: float) -> None:
-        # Avoid exactly +/- 90 degrees: when looking perfectly straight up/down,
-        # the look direction becomes collinear with the up vector and the view can go unstable.
         limit = (math.pi / 2) - 0.05
         self.player.pitch = max(-limit, min(limit,
                                 self.player.pitch + pitch_delta))
@@ -1602,15 +1521,12 @@ class GameCore:
         return False
 
     def _can_move_to(self, x: float, z: float) -> bool:
-        # Keep some margin from the outer border.
         if x < 0.25 or z < 0.25 or x > self.width - 0.25 or z > self.height - 0.25:
             return False
         cell_r = int(z)
         cell_c = int(x)
         if (cell_r, cell_c) not in self.floors:
             return False
-        # Prevent getting too close to walls. If the camera clips into a wall quad,
-        # the near plane will cut it and you'll see "inside" the tile.
         radius = 0.30
         for rr in range(cell_r - 1, cell_r + 2):
             for cc in range(cell_c - 1, cell_c + 2):
@@ -1634,14 +1550,12 @@ class GameCore:
                     return False
 
         cell = (cell_r, cell_c)
-        # Block closed gates
         for gate in self.gates.values():
             if gate.locked and cell in set(gate.cells):
                 return False
         return True
 
     def iter_visible_tiles(self) -> Iterable[Tuple[int, int, str]]:
-        # Return full map tiles (r, c, type)
         for r in range(self.height):
             for c in range(self.width):
                 if (r, c) in self.walls:

@@ -16,11 +16,13 @@ from PySide6.QtWidgets import (
 
 
 class SilhouetteMatchDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, hard_mode: bool = False):
         super().__init__(parent)
         self.setWindowTitle('Silhouette Matching')
         self.setModal(True)
         self.setMinimumSize(720, 420)
+
+        self._hard_mode = hard_mode
 
         self.setStyleSheet("""
             QDialog {
@@ -57,11 +59,24 @@ class SilhouetteMatchDialog(QDialog):
 
         self._size = 6
         self._patterns = self._build_patterns(self._size)
-        self._target = random.choice(self._patterns)
+        if self._hard_mode:
+            # Ghost 4 hard pattern - specific challenging layout
+            self._target = [
+                [0, 1, 0, 0, 0, 1],
+                [1, 0, 1, 0, 1, 0],
+                [0, 1, 0, 1, 0, 1],
+                [0, 0, 1, 0, 1, 0],
+                [0, 1, 0, 1, 0, 1],
+                [1, 0, 1, 0, 1, 0],
+            ]
+        else:
+            self._target = random.choice(self._patterns)
 
         root = QVBoxLayout(self)
 
         title = QLabel('Match the silhouette to unlock the jail gate')
+        if self._hard_mode:
+            title.setText('GHOST 4 CHALLENGE - Match this harder silhouette!')
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("""
             QLabel {
