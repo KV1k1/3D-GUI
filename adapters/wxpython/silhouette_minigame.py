@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 import random
 
@@ -228,7 +227,7 @@ class SilhouetteMatchDialog(wx.Dialog):
         self._size = 6
         self._patterns = self._build_patterns(self._size)
         if self._hard_mode:
-            # Ghost 4 hard pattern - specific challenging layout
+            # Ghost 4 pattern
             self._target = [
                 [0, 1, 0, 0, 0, 1],
                 [1, 0, 1, 0, 1, 0],

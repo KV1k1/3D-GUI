@@ -1,14 +1,3 @@
-"""
-assembly3d_minigame.py  –  wxPython, OpenGL 3.3 core profile.
-
-_AsmGLCanvas is a full rewrite using VAOs/VBOs + GLSL shaders (same approach as
-kivy_assembly3d.py).  All legacy fixed-function calls (glBegin/glEnd,
-glMatrixMode, glFrustum, gluLookAt, glColor4f …) are gone.
-
-The rest of the file – _StyledButton, _StyledFeedback, Assembly3DMinigame – is
-unchanged from the previous wxPython version.
-"""
-
 import ctypes
 import math
 import time
@@ -18,10 +7,6 @@ import OpenGL.GL as GL
 import wx
 from wx import glcanvas
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Styled button / feedback widgets  (unchanged from original)
-# ─────────────────────────────────────────────────────────────────────────────
 
 class _StyledButton(wx.Control):
     def __init__(
@@ -275,10 +260,6 @@ class _StyledFeedback(wx.Panel):
                     max(float(pad), float((h - th) / 2.0)))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GLSL shader (shared, lazily compiled once per GL context)
-# ─────────────────────────────────────────────────────────────────────────────
-
 _VERT = b"""
 #version 330 core
 layout(location=0) in vec3 aPos;
@@ -293,7 +274,6 @@ in vec4 vColor; out vec4 FragColor;
 void main(){ FragColor=vColor; }
 """
 
-# Per-canvas program handle (keyed by GLContext id so multi-window apps work)
 _prog_cache: dict[int, int] = {}
 
 
@@ -318,10 +298,6 @@ def _get_prog(ctx_id: int) -> int:
     _prog_cache[ctx_id] = p
     return p
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Math helpers  (column-major, identical to kivy_assembly3d.py)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _mul(a: List[float], b: List[float]) -> List[float]:
     o = [0.0] * 16
@@ -376,7 +352,7 @@ def _camera_vp(w: int, h: int,
                elev_deg: float = 20.0,
                azim_deg: float = 30.0,
                fov: float = 60.0) -> List[float]:
-    """Build VP matrix.  Z is up, camera orbits in azimuth around Z-up world."""
+    # build VP matrix,  Z is up
     elev = math.radians(elev_deg)
     azim = math.radians(azim_deg)
     ex = dist * math.cos(elev) * math.cos(azim)
@@ -386,10 +362,6 @@ def _camera_vp(w: int, h: int,
     view = _lookat(ex, ey, ez,  0, 0, 0,  0, 0, 1)   # Z is up
     return _mul(proj, view)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Geometry helpers  (identical to kivy_assembly3d.py)
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _cube(col: Tuple[float, float, float, float]) -> List[float]:
     r, g, b, a = col
@@ -424,20 +396,17 @@ def _pyramid(col: Tuple[float, float, float, float]) -> List[float]:
 
 
 def _grid_verts() -> List[float]:
-    """
-    X-Y plane grid at Z=0 with half-integer offsets.
-    Grid lines at half-integers so pieces at integer positions sit IN cells.
-    """
+    # X-Y plane grid at Z=0
     v: List[float] = []
     GREY = (0.30, 0.30, 0.30, 0.22)
     GOLD = (1.0,  0.84, 0.0,  0.32)
     for x in range(-4, 5):
         c = GOLD if x == 0 else GREY
-        xf = float(x) - 0.5  # Half-integer offset for centered grid cells
+        xf = float(x) - 0.5  # half int offset for centered grid cells
         v.extend([xf, -1.5, 0, *c,  xf, 2.5, 0, *c])
     for y in range(-1, 4):
         c = GOLD if y == 0 else GREY
-        yf = float(y) - 0.5  # Half-integer offset for centered grid cells
+        yf = float(y) - 0.5  # half int offset for centered grid cells
         v.extend([-4, yf, 0, *c,  4, yf, 0, *c])
     return v
 
@@ -464,10 +433,6 @@ def _upload(raw: List[float]) -> Tuple[int, int]:
     GL.glBindVertexArray(0)
     return int(vao), n
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Piece / target data  (plain lists, no numpy – matches kivy_assembly3d.py)
-# ─────────────────────────────────────────────────────────────────────────────
 
 _Y_COL = (1.0, 0.875, 0.0, 1.0)   # yellow
 _B_COL = (0.0, 0.584, 1.0, 1.0)   # blue
@@ -517,12 +482,9 @@ def _make_target(kind: str) -> List[dict]:
             'type': 'pyramid', 'pos': [1, 1, 0]},
     ]
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # _AsmGLCanvas  –  core-profile GL canvas
-# ─────────────────────────────────────────────────────────────────────────────
 
-
-# GL context attributes for core profile (matching main renderer)
 _GL_ATTRS = [
     wx.glcanvas.WX_GL_RGBA,
     wx.glcanvas.WX_GL_DOUBLEBUFFER,
@@ -735,10 +697,6 @@ class _AsmGLCanvas(wx.glcanvas.GLCanvas):
             pass
         return super().Destroy()
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Assembly3DMinigame  –  wx.Dialog wrapping the two GL canvases
-# ─────────────────────────────────────────────────────────────────────────────
 
 class Assembly3DMinigame(wx.Dialog):
     """

@@ -125,13 +125,11 @@ def _rot_y(a):
 
 
 def _camera_vp(w, h, rot_z_extra=0.0):
-    # Camera matching pyqtgraph GLViewWidget: distance=8, elevation=20°, azimuth=30°
-    # Match our mesh orientation (Y-up):
     # - eye_x = dist * cos(elev) * cos(azim)
-    # - eye_y = dist * cos(elev) * sin(azim)  (Y is depth)
-    # - eye_z = dist * sin(elev)  (Z is height)
-    # up vector = (0, 0, 1)  (Z is up)
-    # FOV = 60° (pyqtgraph GLViewWidget default)
+    # - eye_y = dist * cos(elev) * sin(azim)  (Y depth)
+    # - eye_z = dist * sin(elev)  (Z height)
+    # up vector = (0, 0, 1)  (Z up)
+    # FOV = 60°
     dist = 8.0
     elev = math.radians(20)
     azim = math.radians(30) + rot_z_extra
@@ -186,21 +184,16 @@ def _pyramid(col):
 
 
 def _grid_verts():
-    # X-Y plane grid at Z=0.
-    # X-lines: (x-0.5,y0,0)→(x-0.5,y1,0)  for x=-4..4, y=-1.5..2.5
-    # Y-lines: (x0,y-0.5,0)→(x1,y-0.5,0)  for y=-1..3
-    # Gold for axis lines (x=0, y=0), grey for others.
-    # Grid lines at half-integers for centered piece positions (matches wxPython).
     v = []
     GREY = (0.30, 0.30, 0.30, 0.22)
     GOLD = (1.0,  0.84, 0.0,  0.32)
     for x in range(-4, 5):
         c = GOLD if x == 0 else GREY
-        xf = float(x) - 0.5  # Half-integer offset for centered grid cells
+        xf = float(x) - 0.5
         v.extend([xf, -1.5, 0, *c,  xf, 2.5, 0, *c])
     for y in range(-1, 4):
         c = GOLD if y == 0 else GREY
-        yf = float(y) - 0.5  # Half-integer offset for centered grid cells
+        yf = float(y) - 0.5
         v.extend([-4, yf, 0, *c,  4, yf, 0, *c])
     return v
 
@@ -233,49 +226,33 @@ R_COL = (1, 0.271, 0, 1)
 
 
 def _make_pieces(kind):
-    """Initial piece positions. y=depth, z=height. Pieces at z=0.5 sit on grid."""
     k = (kind or 'KP').upper()
     if k == 'KP':
         return [
-            # Raised by 0.5 to sit on grid
             {'type': 'cube',   'color': Y_COL, 'pos': [2., 0., 0.5]},
-            # Raised by 0.5 to sit on grid
             {'type': 'cube',   'color': B_COL, 'pos': [-2., 0., 0.5]},
-            {'type': 'pyramid', 'color': R_COL, 'pos': [
-                0., 0., 0.5]},  # Raised by 0.5 to sit on grid
+            {'type': 'pyramid', 'color': R_COL, 'pos': [0., 0., 0.5]},
         ]
     if k == 'K':
         cs = [B_COL, Y_COL, R_COL, R_COL, B_COL]
-        # Raised by 0.5
         return [{'type': 'cube', 'color': c, 'pos': [-3.+i, 0., 0.5]} for i, c in enumerate(cs)]
     return [
-        # Raised by 0.5 to sit on grid
         {'type': 'cube',   'color': Y_COL, 'pos': [-2., 0., 0.5]},
-        # Raised by 0.5 to sit on grid
         {'type': 'cube',   'color': R_COL, 'pos': [-1., 0., 0.5]},
-        {'type': 'pyramid', 'color': B_COL, 'pos': [
-            0.,  0., 0.5]},  # Raised by 0.5 to sit on grid
-        {'type': 'pyramid', 'color': Y_COL, 'pos': [
-            1.,  0., 0.5]},  # Raised by 0.5 to sit on grid
+        {'type': 'pyramid', 'color': B_COL, 'pos': [0.,  0., 0.5]},
+        {'type': 'pyramid', 'color': Y_COL, 'pos': [1.,  0., 0.5]},
     ]
 
 
 def _make_target(kind):
-    """
-    Target structure. Positions are INTEGER grid coords [x, y_depth, z_height].
-    Adjacency check rounds piece positions to integers before comparing.
-    Stacking: z=1 means one unit above z=0. y=1 means one unit deeper.
-    """
     k = (kind or 'KP').upper()
     if k == 'KP':
-        # Exactly as PySide6: pieces at (0,0,0.5),(0,1,0.5),(0,2,0.5) — along Y(depth), raised by 0.5
         return [
             {'type': 'cube',    'pos': [0, 0, 0.5]},
             {'type': 'cube',    'pos': [0, 1, 0.5]},
             {'type': 'pyramid', 'pos': [0, 2, 0.5]},
         ]
     if k == 'K':
-        # Exactly as PySide6: base row x=0,1,2 at y=0; stack at y=1, raised by 0.5
         return [
             {'type': 'cube', 'pos': [0, 0, 0.5]}, {
                 'type': 'cube', 'pos': [1, 0, 0.5]},
@@ -432,8 +409,6 @@ class _GL3DView(Widget):
 
 # congratulations overlay
 class _CongratsOverlay(FloatLayout):
-    # Simulated popup congratulations.
-    # Dark bg, green title 'Congratulations!', white body, gold fragment text, OK button.
     def __init__(self, on_ok, **kw):
         kw.setdefault('size_hint', (1, 1))
         kw.setdefault('pos', (0, 0))
@@ -480,13 +455,13 @@ class _CongratsOverlay(FloatLayout):
     def _draw_border(self, w):
         w.canvas.after.clear()
         with w.canvas.after:
-            Color(0.302, 0.678, 0.502, 1)   # green border like #4ade80
+            Color(0.302, 0.678, 0.502, 1)   # 4ade80
             Line(rectangle=(w.x, w.y, w.width, w.height), width=1.5)
 
 
 # minigame
 class KivyAssembly3DMinigame(ModalView):
-    # Modal view for 3D assembly minigame.
+    # Modal view for 3D assembly minigame
 
     # Constants
     GRID_MIN = -4
@@ -520,7 +495,6 @@ class KivyAssembly3DMinigame(ModalView):
     def bind_result(self, cb): self._callback = cb
 
     def on_open(self):
-        # Reset state when opening to fix flashing issue on second open
         self.reset(self.kind)
         self._gl_built = False
         Clock.schedule_once(self._build_gl, 0.15)
@@ -539,7 +513,6 @@ class KivyAssembly3DMinigame(ModalView):
 
     # UI
     def _build_ui(self):
-        # ModalView already has dim overlay, no need for manual background
         dlg = BoxLayout(orientation='vertical',
                         size_hint=(1, 1),  # Fill the ModalView
                         spacing=0)
@@ -565,11 +538,9 @@ class KivyAssembly3DMinigame(ModalView):
         tb.add_widget(xb)
         dlg.add_widget(tb)
 
-        # content: left (ref) + right (asm + controls)
         ct = BoxLayout(orientation='horizontal',
                        size_hint=(1, 1), padding=6, spacing=6)
 
-        # LEFT
         lft = BoxLayout(orientation='vertical', size_hint_x=0.38, spacing=4)
         with lft.canvas.before:
             Color(0.22, 0.22, 0.24, 1)
@@ -622,11 +593,6 @@ class KivyAssembly3DMinigame(ModalView):
         self._rebuild_piece_btns()
         rgt.add_widget(self._piece_row)
 
-        # arrow pad layout:
-        # row0: [  ] [↑] [  ] [Z+]
-        # row1: [←] [  ] [→] [  ]
-        # row2: [  ] [↓] [  ] [Z-]
-        # ↑↓ = Y(depth) axis  ←→ = X axis  Z+/Z- = Z(height) axis
         abg = BoxLayout(orientation='horizontal', size_hint=(1, None), height=120,
                         padding=6, spacing=8)
         with abg.canvas.before:
@@ -649,17 +615,14 @@ class KivyAssembly3DMinigame(ModalView):
             b.bind(on_press=lambda inst, z=dz: self._move(0, 0, z))
             return b
 
-        # row 0: ^ moves +Y (forward/deeper), Z+ raises +Z
         ag.add_widget(Widget())
         ag.add_widget(_a('^', 0, 1, 0))
         ag.add_widget(Widget())
         ag.add_widget(_z('Z+', 1))
-        # row 1: <> move ±X
         ag.add_widget(_a('<', -1, 0, 0))
         ag.add_widget(Widget())
         ag.add_widget(_a('>', 1, 0, 0))
         ag.add_widget(Widget())
-        # row 2: v moves -Y, Z- lowers -Z
         ag.add_widget(Widget())
         ag.add_widget(_a('v', 0, -1, 0))
         ag.add_widget(Widget())
@@ -745,13 +708,11 @@ class KivyAssembly3DMinigame(ModalView):
     def _flash_selected(self):
         i = self._selected
         if i is None or i >= len(self._placed) or self._placed[i]:
-            # Reset selection if piece is already placed
             if i is not None and i < len(self._placed) and self._placed[i]:
                 self._selected = None
             return
         if i >= len(self._asm_vaos):
             return
-        # Smooth flash between original colour and green, period=1s
         phase = (self._flash_t % 1.0)/1.0
         w = 0.5-0.5*math.cos(phase*2*math.pi)
         orig = self._pieces[i]['color']
@@ -814,14 +775,8 @@ class KivyAssembly3DMinigame(ModalView):
         self._update_views()
 
     def _check(self):
-        """
-        Exact port of PySide6 _check_assembly_3d:
-        1. type/color match by index
-        2. adjacency graph (integer-rounded positions, exactly 1 axis differs by 1)
-        """
         def adj(positions):
             a = {i: set() for i in range(len(positions))}
-            # Round to integers exactly as PySide6 np.round().astype(int)
             ip = [[round(v) for v in pos] for pos in positions]
             for i in range(len(ip)):
                 for j in range(i+1, len(ip)):
@@ -849,7 +804,6 @@ class KivyAssembly3DMinigame(ModalView):
                 self._fbbg = Rectangle(
                     pos=self._feedback.pos, size=self._feedback.size)
             self._placed = [True]*len(self._pieces)
-            # Show congratulations overlay
             Clock.schedule_once(self._show_congrats, 0.3)
         else:
             self._feedback.text = '[color=ff4444]X Incorrect - Keep Trying![/color]'
@@ -860,7 +814,6 @@ class KivyAssembly3DMinigame(ModalView):
 
     def _show_congrats(self, *_):
         def _ok():
-            # Remove congrats overlay and finish successfully
             try:
                 self.remove_widget(self._congrats)
             except Exception:
@@ -890,7 +843,6 @@ class KivyAssembly3DMinigame(ModalView):
             self._feedback.text = f'Selected: [b]{nm}[/b] — Use arrows to move → Z+/- for height'
         else:
             self._feedback.text = 'Select piece -> Use arrows to move -> Z+/- for height'
-        # Reset feedback bg to default
         with self._feedback.canvas.before:
             Color(*_BTN_BG)
             self._fbbg = Rectangle(

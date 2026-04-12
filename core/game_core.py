@@ -407,7 +407,6 @@ class GameCore:
 
             def wall_run_margins(wr: int, wc: int, facing: str) -> Tuple[int, int]:
                 # Returns how many contiguous wall cells exist on each side of (wr,wc)
-                # along the wall direction.
                 neg = 0
                 pos = 0
                 if facing in ('N', 'S'):
@@ -437,8 +436,6 @@ class GameCore:
                         continue
                     facing = facing_for_offset(dr, dc)
 
-                    # Avoid placing the painting near corners by requiring a long enough
-                    # continuous wall segment and a little margin from its endpoints.
                     neg, pos = wall_run_margins(wr, wc, facing)
                     run_len = 1 + neg + pos
                     if run_len < 4:
@@ -460,7 +457,7 @@ class GameCore:
             (pr, pc), pf = self.jail_painting
             self.jail_painting = ((pr, pc - 2), pf)
 
-        # Initialize current sector from player spawn.
+        # Initialize current sector from player spawn
         self.current_sector_id = self.sector_id_for_cell(
             (int(self.player.z), int(self.player.x)))
         self._sector_popup_id = self.current_sector_id
@@ -635,7 +632,7 @@ class GameCore:
             spawned += 1
 
     def _init_gates(self) -> None:
-        # Group contiguous 'd' into gate spans.
+        # Group contiguous 'd' into gate spans
         remaining = set(self.gate_cells)
         groups: List[List[Tuple[int, int]]] = []
         while remaining:
@@ -658,7 +655,7 @@ class GameCore:
             c = sum(y for _, y in cells) / len(cells)
             return r, c
 
-        # Identify start/exit gates by proximity.
+        # Identify start/exit gates by proximity
         start_ref = self.start_cells[0] if self.start_cells else (0, 0)
         if self.exit_cells:
             exit_ref = self.exit_cells[len(self.exit_cells) // 2]
@@ -682,11 +679,7 @@ class GameCore:
                 best_exit_d = de
                 best_exit = g
 
-        # Note: previously we tried to aggregate "all gate cells near the exit".
-        # That caused the exit gate to be composed of multiple separated parts.
-        # For stable layout behavior, pick a single contiguous group as the exit gate.
-
-        # Jail gate is the remaining group with the largest span (ddd at jail corridor).
+        # Jail gate is the remaining group
         jail_group = None
         for g in groups:
             if g is best_start or g is best_exit:
@@ -768,8 +761,6 @@ class GameCore:
         outside = self._reachable_from_start_with_locked_gates()
         self.jail_outside_cells = set(outside)
 
-        # Classify "inside jail" as floors that are not reachable from start with gates locked.
-        # This is intentionally conservative and only used for gate auto-close behavior.
         self.jail_inside_cells = {
             cell for cell in self.floors if cell not in self.walls and cell not in outside}
 
@@ -789,20 +780,6 @@ class GameCore:
             if best_inside:
                 break
 
-        # Fall back if we can't classify: still pick something near gate.
-        if best_inside is None:
-            for rad in range(1, 30):
-                for r in range(gr - rad, gr + rad + 1):
-                    for c in range(gc - rad, gc + rad + 1):
-                        cell = (r, c)
-                        if cell in self.floors and cell not in self.walls and cell not in self.gate_cells:
-                            best_inside = cell
-                            break
-                    if best_inside:
-                        break
-                if best_inside:
-                    break
-
         self.jail_spawn_cell = best_inside
 
         if best_inside:
@@ -815,7 +792,6 @@ class GameCore:
                 self.jail_book_cell = best_inside
 
     def _reachable_from_start_with_locked_gates(self) -> Set[Tuple[int, int]]:
-        """Cells reachable from the start area assuming currently locked gates are blocked."""
         start = self._pick_spawn_cell()
         if start not in self.floors or start in self.walls:
             return set()
@@ -924,7 +900,6 @@ class GameCore:
         self._check_collectibles()
         self._check_hazards()
         self._check_exit_condition()
-        # Simple proximity-based jail gate control
         self._check_jail_gate_proximity(dt)
         self._update_platforms(dt)
         self._update_checkpoint_arrow(dt)
@@ -996,7 +971,6 @@ class GameCore:
         for fid, frag in self.key_fragments.items():
             frag.taken = fid in frags_taken
 
-        # Derive counters from taken flags to avoid over-counting and inconsistent saves.
         self.coins_collected = sum(
             1 for coin in self.coins.values() if coin.taken)
         self.keys_collected = sum(
@@ -1017,7 +991,7 @@ class GameCore:
         return True
 
     def _update_gates(self, dt: float) -> None:
-        speed = 1.5  # Reduced from 3.0 for much slower gate movement
+        speed = 2.5
         for gate in self.gates.values():
             if gate.lowering:
                 gate.y_offset = max(-self.wall_height,
@@ -1130,7 +1104,6 @@ class GameCore:
                 ghost.x += (dx / dist) * step
                 ghost.z += (dz / dist) * step
 
-            # Face actual movement direction (or next waypoint if we snapped)
             ntr, ntc = ghost.path_cells[ghost.target_index]
             ntx = ntc + 0.5
             ntz = ntr + 0.5
@@ -1148,11 +1121,11 @@ class GameCore:
                     self.elapsed_s += penalty
                     self._trigger_event(
                         'time_penalty', {'seconds': int(round(penalty))})
-                # Ghost 3 sends player back to spawn instead of jail
+                # Ghost 3
                 if ghost.id == 3:
                     self._send_to_spawn('ghost_3')
                 elif ghost.id == 4:
-                    # Ghost 4 sends to jail but with harder silhouette minigame
+                    # Ghost 4
                     self._send_to_jail('ghost_4')
                 else:
                     self._send_to_jail('ghost')
@@ -1302,7 +1275,6 @@ class GameCore:
                     )
                     self._trigger_event('checkpoint_spawned', {})
 
-        # Win when player reaches exit cell and gate is open
         cell = (int(self.player.z), int(self.player.x))
         if cell in self.exit_cells:
             gate = self.gates.get('exit')
@@ -1314,31 +1286,18 @@ class GameCore:
                     self._trigger_event('game_won', {'time_s': self.elapsed_s})
 
     def interact(self) -> Optional[str]:
-        # Used by adapter for E
-        # In jail: interact with book to start puzzle
+        # In jail E
         if self.in_jail:
             if self.jail_book_cell:
                 br, bc = self.jail_book_cell
                 if abs(int(self.player.z) - br) <= 1 and abs(int(self.player.x) - bc) <= 1:
-                    # Check if jail gate is up before allowing minigame
                     jail_gate = self.gates.get('jail')
                     if jail_gate and jail_gate.y_offset >= -1e-3:  # Gate is up
                         return 'jail_book'
-            # Allow interaction with the jail gate to leave (if already unlocked)
             near_gate = self.get_nearby_gate()
             if near_gate and near_gate.id == 'jail':
                 return 'gate_jail'
             return None
-
-        # Interact with gates near player
-        near_gate = self.get_nearby_gate()
-        if near_gate:
-            gid = near_gate.id
-            if gid == 'exit' and near_gate.locked:
-                return 'exit_locked'
-            if gid == 'jail' and near_gate.locked:
-                return 'jail_locked'
-            return f'gate_{gid}'
 
         frag = self.get_nearby_key_fragment()
         if frag:
@@ -1386,7 +1345,6 @@ class GameCore:
         if gate.locked:
             return False
         self.in_jail = False
-        # Teleport to start area after leaving jail
         spawn = self._pick_spawn_cell()
         self.player.x = spawn[1] + 0.5
         self.player.z = spawn[0] + 0.5
@@ -1397,30 +1355,24 @@ class GameCore:
 
     def mark_jail_puzzle_success(self) -> None:
         self.open_gate('jail')
-        # Reset jail state so player can be sent to jail again later
         self.in_jail = False
 
     def _send_to_jail(self, reason: str) -> None:
-        # Always allow sending to jail, but check if player is already in jail position
         current_cell = (int(self.player.z), int(self.player.x))
         jail_cell = self.jail_spawn_cell or self._find_jail_cell() or (
             self.start_cells[0] if self.start_cells else (1, 1))
 
-        # Only count as jail entry if not already in jail
         if not self.in_jail:
             self.jail_entries += 1
 
         self.in_jail = True
-        # Only send to jail if not already at jail location
         if current_cell == jail_cell:
             return
 
-        # If jail gate is open or lowering, instantly close it to prevent escape
         jail_gate = self.gates.get('jail')
         if jail_gate and not jail_gate.locked:
-            # Instantly close the gate - no animation, immediate lock
             jail_gate.locked = True
-            jail_gate.y_offset = 0.0  # Fully up immediately
+            jail_gate.y_offset = 0.0
             jail_gate.lowering = False
             jail_gate.raising = False
             jail_gate.close_delay_timer = 0.0
@@ -1432,7 +1384,6 @@ class GameCore:
         self._trigger_event('sent_to_jail', {'reason': reason})
 
     def _send_to_spawn(self, reason: str) -> None:
-        """Send player back to spawn point (used by ghost 3 instead of jail)."""
         spawn_cell = self.start_cells[0] if self.start_cells else (1, 1)
         self.player.x = spawn_cell[1] + 0.5
         self.player.z = spawn_cell[0] + 0.5
@@ -1440,7 +1391,6 @@ class GameCore:
         self._trigger_event('sent_to_spawn', {'reason': reason})
 
     def _find_jail_cell(self) -> Optional[Tuple[int, int]]:
-        # Direct search for 'J' character in the layout
         if hasattr(self, 'layout') and self.layout:
             for r, row in enumerate(self.layout):
                 for c, char in enumerate(row):
@@ -1450,13 +1400,6 @@ class GameCore:
 
     def _distance_xz(self, ax: float, az: float, bx: float, bz: float) -> float:
         return math.hypot(ax - bx, az - bz)
-
-    @property
-    def avg_coin_time(self) -> float:
-        """Calculate average time between coin collections"""
-        if not self.coin_collection_times:
-            return 0.0
-        return sum(self.coin_collection_times) / len(self.coin_collection_times)
 
     def register_event_callback(self, event_name: str, callback: Callable[[dict], None]) -> None:
         if event_name not in self._event_callbacks:
@@ -1507,7 +1450,6 @@ class GameCore:
             self.player.z = nz
             self._trigger_event('player_move', {'x': nx, 'z': nz})
 
-            # Track movement for performance monitor if available
             try:
                 if hasattr(self, '_performance_monitor'):
                     self._performance_monitor.record_movement(

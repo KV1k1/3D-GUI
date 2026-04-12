@@ -7,7 +7,7 @@ from typing import Optional, Set
 from PySide6.QtCore import Qt, Signal, QPointF, QTimer, QUrl
 from PySide6.QtGui import (
     QKeyEvent, QMouseEvent, QPainter, QColor, QFont, QImage,
-    QPen, QPolygonF, QRadialGradient, QSurfaceFormat,
+    QPen, QPolygonF, QRadialGradient, QSurfaceFormat, QPainterPath,
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtMultimedia import QSoundEffect
@@ -52,6 +52,11 @@ class GameGLWidget(QOpenGLWidget):
         self._minimap_until = 0.0
         self._minimap_cooldown_until = 0.0
 
+        self._minimap_static_pixmap: Optional[object] = None
+        self._minimap_static_layout_id: int = 0
+        self._minimap_static_size: tuple[int, int] = (0, 0)
+        self._minimap_static_cell_px: int = 0
+
         self._modal_visible = False
         self._modal_kind: str = ''
         self._modal_title: str = ''
@@ -83,6 +88,7 @@ class GameGLWidget(QOpenGLWidget):
 
         self._mouse_captured = False
         self._center_global = None
+        self._mouse_skip_next_delta = False
 
         self._render_timer = QTimer(self)
         self._render_timer.timeout.connect(self.update)
@@ -136,14 +142,42 @@ class GameGLWidget(QOpenGLWidget):
         progress = self.core.screen_close_progress
 
         if progress < 1.0:
-            bar_h = int(h * progress * 0.5)
-            painter.fillRect(0, 0, w, bar_h, QColor(0, 0, 0))
-            painter.fillRect(0, h - bar_h, w, bar_h, QColor(0, 0, 0))
+            cx = w * 0.5
+            cy = h * 0.5
+            max_r = math.sqrt(cx * cx + cy * cy) + 4
+            ease = progress * progress
+            inner_r = max_r * (1.0 - ease)
+            outer_r = max_r + 4
+            steps = 64
+
+            path = QPainterPath()
+            for i in range(steps):
+                a0 = (i / steps) * 2 * math.pi
+                a1 = ((i + 1) / steps) * 2 * math.pi
+                x0i = cx + math.cos(a0) * inner_r
+                y0i = cy + math.sin(a0) * inner_r
+                x1i = cx + math.cos(a1) * inner_r
+                y1i = cy + math.sin(a1) * inner_r
+                x0o = cx + math.cos(a0) * outer_r
+                y0o = cy + math.sin(a0) * outer_r
+                x1o = cx + math.cos(a1) * outer_r
+                y1o = cy + math.sin(a1) * outer_r
+                quad = QPainterPath()
+                quad.moveTo(x0i, y0i)
+                quad.lineTo(x0o, y0o)
+                quad.lineTo(x1o, y1o)
+                quad.lineTo(x1i, y1i)
+                quad.closeSubpath()
+                path += quad
+
+            painter.setBrush(QColor(0, 0, 0))
+            painter.setPen(Qt.NoPen)
+            painter.drawPath(path)
         else:
             painter.fillRect(0, 0, w, h, QColor(0, 0, 0))
 
             if self._show_the_end:
-                painter.setPen(QColor(255, 255, 255))
+                painter.setPen(QColor(255, 210, 60))
                 painter.setFont(QFont('Arial', 68, QFont.Bold))
                 painter.drawText(0, 0, w, h, Qt.AlignCenter, 'THE END')
                 painter.setPen(QColor(150, 150, 150))
@@ -156,50 +190,40 @@ class GameGLWidget(QOpenGLWidget):
                     lines = [ln.rstrip() for ln in stats.split('\n')]
                     while lines and not lines[0]:
                         lines.pop(0)
-                    while lines and not lines[-1]:
-                        lines.pop()
 
-                    usable_h = h - 80
-                    ideal_line_h = 26
+                    usable_h = max(1.0, h - 80.0)
+                    ideal_line_h = 26.0
                     line_h = min(ideal_line_h, max(
-                        14, usable_h // max(1, len(lines))))
-                    start_y = max(36, (h - len(lines) * line_h - 50) // 2)
-                    fs_body = max(10, min(14, line_h - 4))
+                        14.0, usable_h / max(1.0, float(len(lines)))))
+                    fs_body = int(max(10.0, min(14.0, line_h - 4.0)))
                     fs_header = fs_body + 1
 
-                    font = QFont('Arial', fs_body)
-                    for i, ln in enumerate(lines):
-                        y = start_y + i * line_h
-                        is_sep = ln.startswith('─')
-                        is_header = (ln.isupper() and len(ln) > 2
-                                     and not ln.startswith('•') and not is_sep)
+                    total_h = float(len(lines)) * float(line_h)
+                    start_y = max(36.0, (h - total_h - 50.0) / 2.0)
+
+                    y = int(start_y)
+                    for ln in lines:
+                        is_sep = str(ln).startswith('─')
+                        is_header = (str(ln).isupper() and len(str(ln)) > 2 and (
+                            not str(ln).startswith('•')) and (not is_sep))
+
                         if is_sep:
-                            color = QColor(100, 100, 100, 200)
-                            fs = fs_body
+                            painter.setPen(QColor(100, 100, 100, 200))
                         elif is_header:
-                            color = QColor(255, 220, 80, 255)
-                            fs = fs_header
+                            painter.setPen(QColor(255, 220, 80))
                         else:
-                            color = QColor(230, 230, 230, 255)
-                            fs = fs_body
-                        font.setPointSize(fs)
-                        font.setBold(is_header)
-                        painter.setFont(font)
-                        painter.setPen(color)
-                        painter.drawText(0, y, w, line_h, Qt.AlignCenter, ln)
-                else:
-                    painter.setPen(QColor(255, 255, 255))
-                    painter.setFont(QFont('Arial', 48, QFont.Bold))
-                    painter.drawText(
-                        0, 0, w, h, Qt.AlignCenter, 'LEVEL COMPLETE')
+                            painter.setPen(QColor(230, 230, 230))
 
-                painter.setPen(QColor(160, 160, 160))
-                painter.setFont(QFont('Arial', 13))
-                painter.drawText(0, h - 46, w, 30,
-                                 Qt.AlignCenter, 'Press ESC to continue')
+                        painter.setFont(QFont(
+                            'Arial', fs_header if is_header else fs_body, QFont.Bold if is_header else QFont.Normal))
+                        painter.drawText(0, y, w, int(
+                            line_h), Qt.AlignCenter, ln)
+                        y += int(line_h)
 
-        if self._modal_visible:
-            self._draw_modal(painter)
+                    painter.setPen(QColor(160, 160, 160))
+                    painter.setFont(QFont('Arial', 13))
+                    painter.drawText(0, h - 46, w, 30,
+                                     Qt.AlignCenter, 'Press ESC to continue')
 
         painter.end()
 
@@ -235,6 +259,17 @@ class GameGLWidget(QOpenGLWidget):
 
             w = self.width()
             h = self.height()
+
+            now = time.perf_counter()
+            if now < self._flash_until:
+                remaining = self._flash_until - now
+                total_flash = 0.3  # 300ms default
+                fade = max(0.0, min(1.0, remaining / total_flash))
+                alpha = int(self._flash_color.alpha() * fade)
+                painter.fillRect(0, 0, w, h, QColor(self._flash_color.red(),
+                                                    self._flash_color.green(),
+                                                    self._flash_color.blue(),
+                                                    alpha))
 
             pad = 10
             box_w = 320
@@ -407,6 +442,64 @@ class GameGLWidget(QOpenGLWidget):
         painter.setPen(QColor(255, 255, 255, alpha))
         painter.drawText(bx, by, tw, th + 4, Qt.AlignCenter, text)
 
+    def _ensure_minimap_static_pixmap(self, mw: int, mh: int, cell_px: int) -> Optional[object]:
+        layout = self.core.layout
+        current_layout_id = id(layout)
+        current_size = (mw, mh)
+
+        needs_rebuild = (
+            self._minimap_static_pixmap is None or
+            self._minimap_static_layout_id != current_layout_id or
+            self._minimap_static_size != current_size
+        )
+
+        if not needs_rebuild:
+            return self._minimap_static_pixmap
+
+        from PySide6.QtGui import QPixmap
+        pixmap = QPixmap(mw, mh)
+        pixmap.fill(QColor(10, 10, 12, 210))
+
+        p = QPainter(pixmap)
+        p.setPen(QPen(QColor(230, 230, 230), 1))
+        p.drawRect(0, 0, mw - 1, mh - 1)
+
+        maze_rows = len(layout)
+        maze_cols = len(layout[0]) if maze_rows else 0
+        walls = self.core.walls
+        floors = self.core.floors
+
+        p.setPen(Qt.NoPen)
+
+        p.setBrush(QColor(45, 45, 55))
+        for r in range(maze_rows):
+            for c in range(maze_cols):
+                if (r, c) in walls:
+                    p.drawRect(c * cell_px, r * cell_px,
+                               cell_px + 1, cell_px + 1)
+
+        p.setBrush(QColor(125, 125, 135))
+        for r in range(maze_rows):
+            for c in range(maze_cols):
+                if (r, c) in floors and (r, c) not in walls:
+                    p.drawRect(c * cell_px, r * cell_px,
+                               cell_px + 1, cell_px + 1)
+
+        p.setBrush(QColor(15, 15, 18))
+        for r in range(maze_rows):
+            for c in range(maze_cols):
+                if (r, c) not in walls and (r, c) not in floors:
+                    p.drawRect(c * cell_px, r * cell_px,
+                               cell_px + 1, cell_px + 1)
+
+        p.end()
+
+        self._minimap_static_pixmap = pixmap
+        self._minimap_static_layout_id = current_layout_id
+        self._minimap_static_size = current_size
+        self._minimap_static_cell_px = cell_px
+        return pixmap
+
     def _draw_minimap_overlay(self, painter: QPainter) -> None:
         maze_rows = len(self.core.layout)
         maze_cols = len(self.core.layout[0]) if maze_rows > 0 else 0
@@ -424,26 +517,12 @@ class GameGLWidget(QOpenGLWidget):
         x0 = (self.width() - mw) // 2
         y0 = 20 + ((self.height() - 40) - mh) // 2
 
-        painter.fillRect(x0, y0, mw, mh, QColor(10, 10, 12, 210))
-        painter.setPen(QColor(230, 230, 230))
-        painter.drawRect(x0, y0, mw, mh)
+        static_pixmap = self._ensure_minimap_static_pixmap(mw, mh, cell_px)
+        if static_pixmap:
+            painter.drawPixmap(x0, y0, static_pixmap)
 
         def to_screen(r: float, c: float) -> tuple[float, float]:
             return x0 + c * cell_px, y0 + r * cell_px
-
-        for r in range(maze_rows):
-            for c in range(maze_cols):
-                rx, ry = to_screen(r, c)
-                sz = int(cell_px + 1)
-                if (r, c) in self.core.walls:
-                    painter.fillRect(int(rx), int(ry), sz,
-                                     sz, QColor(45, 45, 55))
-                elif (r, c) in self.core.floors:
-                    painter.fillRect(int(rx), int(ry), sz, sz,
-                                     QColor(125, 125, 135))
-                else:
-                    painter.fillRect(int(rx), int(ry), sz,
-                                     sz, QColor(15, 15, 18))
 
         pr, pc = int(self.core.player.z), int(self.core.player.x)
         px, py = to_screen(pr + 0.5, pc + 0.5)
@@ -572,6 +651,9 @@ class GameGLWidget(QOpenGLWidget):
         painter.drawText(x0 + 24, y0 + 44, panel_w - 48, 28,
                          Qt.AlignLeft, self._modal_title)
 
+        painter.setPen(QColor(235, 235, 235, 100))
+        painter.drawLine(x0 + 24, y0 + 96, x0 + panel_w - 24, y0 + 96)
+
         close_size = 32
         close_x = x0 + panel_w - 24 - close_size
         close_y = y0 + 22
@@ -587,7 +669,7 @@ class GameGLWidget(QOpenGLWidget):
 
         painter.setFont(QFont('Arial', 14))
         painter.setPen(QColor(220, 220, 220))
-        painter.drawText(x0 + 24, y0 + 84, panel_w - 48, panel_h - 150,
+        painter.drawText(x0 + 24, y0 + 120, panel_w - 48, panel_h - 186,
                          Qt.AlignLeft | Qt.TextWordWrap, self._modal_body)
 
     def _draw_level_select_overlay(self, painter: QPainter) -> None:
@@ -741,24 +823,24 @@ class GameGLWidget(QOpenGLWidget):
             center_global = self.mapToGlobal(self.rect().center())
             self._fps_camera_start(center_global)
 
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.LeftButton:
-            self._fps_camera_stop()
-
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if getattr(self.core, 'paused', False):
             return
         if not self._mouse_captured or not self._center_global:
             return
+        if self._mouse_skip_next_delta:
+            self._mouse_skip_next_delta = False
+            return
         current_global = self.mapToGlobal(event.pos())
         dx = current_global.x() - self._center_global.x()
         dy = current_global.y() - self._center_global.y()
         if abs(dx) > 1 or abs(dy) > 1:
-            self.mouse_moved.emit(float(dx), float(dy))
+            self._fps_camera_update(float(dx), float(dy))
             self.cursor().setPos(self._center_global)
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        event.ignore()
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            self._fps_camera_stop()
 
     def keyReleaseEvent(self, event: QKeyEvent) -> None:
         event.ignore()
@@ -793,14 +875,11 @@ class GameGLWidget(QOpenGLWidget):
     def hide_modal(self) -> None:
         self._modal_visible = False
         self._modal_kind = ''
-        self._modal_title = ''
-        self._modal_body = ''
-        self._modal_btn_rects.clear()
-        self._safe_update()
 
     def _fps_camera_start(self, center_global) -> None:
         self._mouse_captured = True
         self._center_global = center_global
+        self._mouse_skip_next_delta = True
         self.setCursor(Qt.BlankCursor)
         self.cursor().setPos(center_global)
 
@@ -819,8 +898,6 @@ class PySide6GameWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        # This mirrors Kivy's approach: _startup_begin is stamped here,
-        # so startup_time_ms reflects the full cost from app launch to first frame.
         self._perf = PerformanceMonitor(framework='PySide6')
 
         self._progress_path = os.path.abspath('progression.json')
@@ -839,7 +916,6 @@ class PySide6GameWindow(QMainWindow):
 
         self.core = GameCore(level_id=last_level)
 
-        # ── Audio (loaded after monitor, so audio I/O is included in startup) ─
         self._asset_dir = os.path.abspath('assets')
         _LOOPS = 999999999
         self._sfx_footsteps = QSoundEffect(self)
@@ -881,9 +957,6 @@ class PySide6GameWindow(QMainWindow):
 
         self.keys_pressed: set[int] = set()
 
-        # ── GL widget receives the already-created monitor ──────────────────
-        # Connect monitor to core BEFORE creating GL widget so texture loading
-        # time can be recorded during renderer initialization
         self.core._performance_monitor = self._perf
         self.gl = GameGLWidget(self.core, self._perf)
         self.setCentralWidget(self.gl)
@@ -904,9 +977,6 @@ class PySide6GameWindow(QMainWindow):
         self.setFocusPolicy(Qt.StrongFocus)
         self.startTimer(16)
 
-        # ── Deferred level start (same pattern as Kivy) ──────────────────────
-        # No eager GL init here — initializeGL() fires automatically when the
-        # widget is first shown, which happens before _deferred_start runs.
         QTimer.singleShot(100, self._deferred_start)
 
     def _deferred_start(self) -> None:
@@ -941,8 +1011,6 @@ class PySide6GameWindow(QMainWindow):
         self.gl._stats_text = ''
         self.gl._stats_visible = False
 
-        # Fresh monitor for every level — preserve startup time across restarts
-        # (same logic as Kivy's _start_level)
         old_startup_time = self._perf.startup_time_ms
         old_texture_load_time = self._perf.texture_load_time_ms
         self._perf = PerformanceMonitor(framework='PySide6')
@@ -995,8 +1063,6 @@ class PySide6GameWindow(QMainWindow):
                 self._show_lore_line('This place feels inhabited.')
 
         self._safe_gl_update()
-
-    # ── progression / save ───────────────────────────────────────────────────
 
     def _load_progression(self) -> dict:
         if not os.path.exists(self._progress_path):
@@ -1052,8 +1118,6 @@ class PySide6GameWindow(QMainWindow):
         except Exception as e:
             print(f'[load] failed: {e}')
 
-    # ── core registration ─────────────────────────────────────────────────────
-
     def _register_core_callbacks(self) -> None:
         ev = self.core.register_event_callback
         ev('coin_picked',              self._on_coin_picked)
@@ -1070,8 +1134,6 @@ class PySide6GameWindow(QMainWindow):
         ev('left_jail',                self._on_left_jail)
         ev('key_picked',               self._on_key_picked)
         ev('player_move', lambda d: None)
-
-    # ── level-end flow ────────────────────────────────────────────────────────
 
     def _handle_level_end(self) -> None:
         self._level_end_triggered = True
@@ -1147,7 +1209,7 @@ class PySide6GameWindow(QMainWindow):
             self._show_the_end_from_stats()
         else:
             self._level_complete = False
-            self._open_level_select_modal(startup=False)
+            self._open_level_select_modal(startup=False, allow_close=False)
 
     def _show_the_end_from_stats(self) -> None:
         self.gl._stats_text = ''
@@ -1183,8 +1245,6 @@ class PySide6GameWindow(QMainWindow):
         if self.core.screen_closing or self.core.game_completed or self.core.game_won:
             return
         self._set_paused(not bool(getattr(self.core, 'paused', False)))
-
-    # ── main update loop ──────────────────────────────────────────────────────
 
     def _update_game(self) -> None:
         now = time.perf_counter()
@@ -1230,16 +1290,24 @@ class PySide6GameWindow(QMainWindow):
         if getattr(self.gl, '_modal_visible', False):
             return
 
-        move_speed = 0.12 if self._current_level_id == 'level1' else 0.18
+        move_speed = 0.09 if self._current_level_id == 'level1' else 0.11
         dx = dz = 0.0
         if Qt.Key_W in self.keys_pressed:
-            dz += move_speed
+            dz += 1.0
         if Qt.Key_S in self.keys_pressed:
-            dz -= move_speed
+            dz -= 1.0
         if Qt.Key_A in self.keys_pressed:
-            dx -= move_speed
+            dx -= 1.0
         if Qt.Key_D in self.keys_pressed:
-            dx += move_speed
+            dx += 1.0
+
+        if dx != 0.0 and dz != 0.0:
+            length = math.sqrt(dx * dx + dz * dz)
+            dx /= length
+            dz /= length
+
+        dx *= move_speed
+        dz *= move_speed
 
         if dx != 0.0 or dz != 0.0:
             moved = self.core.move_player(dx, dz)
@@ -1248,8 +1316,6 @@ class PySide6GameWindow(QMainWindow):
             self._set_footsteps_playing(moved)
         else:
             self._set_footsteps_playing(False)
-
-    # ── keyboard ──────────────────────────────────────────────────────────────
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         self._perf.record_input_event()
@@ -1260,6 +1326,9 @@ class PySide6GameWindow(QMainWindow):
             return
 
         if event.key() == Qt.Key_Escape:
+            if getattr(self.gl, '_show_the_end', False):
+                self.close()
+                return
             if self._level_complete and (self.core.screen_closing or self.core.game_completed):
                 self._on_stats_screen_esc()
                 return
@@ -1278,14 +1347,10 @@ class PySide6GameWindow(QMainWindow):
     def keyReleaseEvent(self, event: QKeyEvent) -> None:
         self.keys_pressed.discard(event.key())
 
-    # ── mouse look ────────────────────────────────────────────────────────────
-
     def _on_mouse_look(self, dx: float, dy: float) -> None:
         sensitivity = 0.002
         self.core.rotate_player(-dx * sensitivity)
         self.core.tilt_camera(-dy * sensitivity)
-
-    # ── audio helpers ─────────────────────────────────────────────────────────
 
     def _play_sfx(self, sfx: QSoundEffect) -> None:
         sfx.stop()
@@ -1320,8 +1385,6 @@ class PySide6GameWindow(QMainWindow):
         self._sfx_ghost.setVolume(0.06 + 0.55 * t)
         self._play_sfx(self._sfx_ghost)
 
-    # ── interact ──────────────────────────────────────────────────────────────
-
     def _handle_interact(self) -> None:
         if getattr(self.core, 'paused', False):
             return
@@ -1338,7 +1401,6 @@ class PySide6GameWindow(QMainWindow):
             self.core.simulation_frozen = True
             ok = False
             try:
-                # Use hard mode if ghost 4 caught us
                 hard_mode = (self._last_ghost_id == 4)
                 ok = bool(SilhouetteMatchDialog(
                     self, hard_mode=hard_mode).exec())
@@ -1367,8 +1429,6 @@ class PySide6GameWindow(QMainWindow):
         except Exception:
             pass
 
-    # ── modal close ───────────────────────────────────────────────────────────
-
     def _on_modal_close_clicked(self) -> None:
         if not getattr(self.gl, '_modal_visible', False):
             return
@@ -1382,8 +1442,6 @@ class PySide6GameWindow(QMainWindow):
             return
         self.gl.hide_modal()
         self._set_paused(False)
-
-    # ── pause actions ─────────────────────────────────────────────────────────
 
     def _on_pause_action(self, action: str) -> None:
         if action == 'resume':
@@ -1446,8 +1504,6 @@ class PySide6GameWindow(QMainWindow):
         self._play_sfx(self._sfx_gate)
         self._safe_gl_update()
 
-    # ── lore / tutorial ───────────────────────────────────────────────────────
-
     def _show_lore_line(self, text: str) -> None:
         s = str(text or '').strip()
         if s:
@@ -1488,8 +1544,6 @@ class PySide6GameWindow(QMainWindow):
         except Exception:
             pass
 
-    # ── core event callbacks ──────────────────────────────────────────────────
-
     def _on_coin_picked(self, data: dict) -> None:
         self._play_sfx(self._sfx_coin)
         try:
@@ -1524,7 +1578,6 @@ class PySide6GameWindow(QMainWindow):
                 self._show_lore_line('A dream... Far too lucid.')
 
     def _on_sent_to_jail(self, data: dict) -> None:
-        # Track which ghost sent us to jail (ghost 4 triggers hard minigame)
         reason = str(data.get('reason', ''))
         if reason == 'ghost_4':
             self._last_ghost_id = 4
@@ -1538,12 +1591,12 @@ class PySide6GameWindow(QMainWindow):
             self._persist_seen['tutorial_jail'] = True
             self._show_tutorial_modal(
                 'Jail',
-                'You were caught and sent to jail.\n\n'
+                'This is not death.\n'
+                'To escape, find the table and press E to interact with the glowing book.\n\n'
                 'A sector map is displayed here. Use it to orient yourself before returning to the maze.',
             )
 
     def _on_sent_to_spawn(self, data: dict) -> None:
-        """Ghost 3 sends player to spawn instead of jail - show lore and flash screen."""
         self._show_lore_line('Be safe.')
         self.gl.trigger_flash(300, QColor(20, 20, 25, 180))
 
@@ -1630,8 +1683,6 @@ class PySide6GameWindow(QMainWindow):
         self._key_minigame_open = False
         self.keys_pressed.clear()
 
-    # ── timer (keeps ticking through modal dialogs) ───────────────────────────
-
     def timerEvent(self, event) -> None:
         self._update_game()
 
@@ -1641,18 +1692,18 @@ class PySide6GameWindow(QMainWindow):
         except Exception:
             pass
 
-    # ── level selection ───────────────────────────────────────────────────────
-
-    def _open_level_select_modal(self, *, startup: bool) -> None:
+    def _open_level_select_modal(self, *, startup: bool, allow_close: bool | None = None) -> None:
         unlocked = set(self._progress.get('unlocked_levels') or [])
         self._set_paused(True)
         try:
             self.gl.hide_mouse_capture()
         except Exception:
             pass
+        if allow_close is None:
+            allow_close = not startup
         self.gl.show_level_select_modal(
             unlocked=unlocked,
-            allow_close=(not startup),
+            allow_close=allow_close,
             return_to_pause=(not startup),
         )
 
@@ -1661,17 +1712,9 @@ class PySide6GameWindow(QMainWindow):
         self._set_paused(False)
         try:
             self._progress['last_level'] = str(level_id)
-            unlocked = set(self._progress.get('unlocked_levels', []))
-            if level_id == 'level1' and 'level2' not in unlocked:
-                unlocked.add('level2')
-                self._progress['unlocked_levels'] = sorted(unlocked)
-            self._save_progression()
-        except Exception as e:
-            print(f'Error saving progression: {e}')
-        self._start_level(level_id, load_save=False)
+        except Exception:
+            pass
 
-
-# ---------------------------------------------------------------------------
 
 def run() -> int:
     app = QApplication.instance() or QApplication([])

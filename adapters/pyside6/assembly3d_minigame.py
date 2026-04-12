@@ -676,7 +676,7 @@ class Assembly3DMinigame(QDialog):
 
         kind = str(kind or 'KP').upper()
 
-        # KP: 2 cubes + 1 pyramid.
+        # KP
 
         if kind == 'KP':
 
@@ -693,7 +693,7 @@ class Assembly3DMinigame(QDialog):
 
             ]
 
-        # K: 3 base cubes, plus 2 cubes stacked on the first two.
+        # K
 
         if kind == 'K':
 
@@ -708,7 +708,7 @@ class Assembly3DMinigame(QDialog):
 
             return pieces
 
-        # KH: simplified (4 pieces): 2 cubes base + 2 pyramids on top.
+        # KH
 
         colors = [yellow, red, blue, yellow]
 
@@ -744,12 +744,6 @@ class Assembly3DMinigame(QDialog):
 
         if kind == 'K':
 
-            # Simplified per diagram:
-
-            # Base line of 3 cubes at y=0: x = 0..2
-
-            # Stack: cubes at (0,1) and (1,1)
-
             return [
 
                 {'type': 'cube', 'pos': np.array(
@@ -768,10 +762,6 @@ class Assembly3DMinigame(QDialog):
                     [1, 1, 0], dtype=float), 'rot': [0, 0, 0]},
 
             ]
-
-        # KH: simplified per diagram:
-
-        # Two base cubes at y=0 (x=0..1), with two pyramids at y=1.
 
         return [
 
@@ -970,7 +960,6 @@ class Assembly3DMinigame(QDialog):
 
                 c = self.pieces[i]['color']
 
-                # Smooth flash between original color and green (~1.0s period).
                 t = float(time.perf_counter())
                 period = 1.0
                 phase = (t % period) / period
@@ -1121,14 +1110,6 @@ class Assembly3DMinigame(QDialog):
                         adj[j].add(i)
 
             return adj
-
-        # Build a target adjacency graph from the reference structure.
-
-        # We match pieces by index: the i-th piece must be the i-th target's type/color.
-
-        # Placement is considered correct if the touching/connection graph matches, regardless
-
-        # of whether connections are vertical or side-by-side.
 
         color_type_ok = True
 

@@ -7,7 +7,6 @@ if __name__ == '__main__':
         QCoreApplication.setAttribute(Qt.AA_UseDesktopOpenGL)
         fmt = QSurfaceFormat()
         fmt.setVersion(3, 3)
-        # fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
         fmt.setProfile(QSurfaceFormat.CoreProfile)
         fmt.setDepthBufferSize(24)
         fmt.setStencilBufferSize(8)

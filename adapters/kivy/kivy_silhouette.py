@@ -1,4 +1,3 @@
-from __future__ import annotations
 import random
 from typing import List
 
@@ -132,7 +131,6 @@ class _CellButton(Button):
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
-            # Visual feedback on press
             if self._on:
                 self.background_color = (0.9, 0.76, 0.0, 1.0)
             else:
@@ -157,7 +155,7 @@ class KivySilhouetteMinigame(ModalView):
         self._size = 6
         patterns = _build_patterns(self._size)
         if self._hard_mode:
-            # Ghost 4 hard pattern - specific challenging layout
+            # Ghost 4 pattern
             self._target = [
                 [0, 1, 0, 0, 0, 1],
                 [1, 0, 1, 0, 1, 0],
@@ -178,9 +176,7 @@ class KivySilhouetteMinigame(ModalView):
         self._callback = callback
 
     def on_open(self):
-        # Reset state when opening
         self._reset()
-        # Choose new random pattern if not hard mode
         if self._hard_mode:
             self._target = [
                 [0, 1, 0, 0, 0, 1],
@@ -200,7 +196,6 @@ class KivySilhouetteMinigame(ModalView):
         self._target_display.set_pattern(self._target)
 
     def _build_ui(self):
-        # ModalView already has dim overlay, no need for manual background
         root = BoxLayout(
             orientation='vertical', padding=0, spacing=0,
             size_hint=(1, 1),  # Fill the ModalView
@@ -221,7 +216,6 @@ class KivySilhouetteMinigame(ModalView):
                 Line(rectangle=(w.x, w.y, w.width, w.height), width=1.25)
         root.bind(pos=_upd_panel_bg, size=_upd_panel_bg)
 
-        # Header bar - window title bar
         header = BoxLayout(orientation='horizontal',
                            size_hint_y=None, height=35, spacing=8, padding=8)
         header.background_color = (0.25, 0.25, 0.26, 1.0)
@@ -238,9 +232,8 @@ class KivySilhouetteMinigame(ModalView):
             size_hint_x=1,
         )
 
-        # Close button in header
         close_btn = Button(
-            text='✕', font_size=14,
+            text='X', font_size=14,
             size_hint=(None, 1), width=30,
             background_normal='', background_color=(0.60, 0.15, 0.15, 1.0),
             color=(1.0, 1.0, 1.0, 1.0),
@@ -287,7 +280,6 @@ class KivySilhouetteMinigame(ModalView):
         grid_container = BoxLayout(orientation='vertical', padding=12)
         grid_container.background_color = (0.25, 0.25, 0.26, 1.0)
 
-        # Simple grid container
         grid = GridLayout(cols=self._size, spacing=6, size_hint=(1, 1))
         self._cells = []
         for r in range(self._size):
@@ -303,7 +295,6 @@ class KivySilhouetteMinigame(ModalView):
         body.add_widget(right)
         content.add_widget(body)
 
-        # Status with PySide-style background
         self._status = Label(
             text='Click the squares to draw the silhouette',
             font_size=14,
@@ -353,7 +344,6 @@ class KivySilhouetteMinigame(ModalView):
         self.add_widget(root)
 
     def on_touch_down(self, touch):
-        # Let ModalView handle touch outside dismissal if needed
         return super().on_touch_down(touch)
 
     def _reset(self, *_):

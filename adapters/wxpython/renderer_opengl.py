@@ -1,6 +1,4 @@
-"""OpenGL renderer for wxPython with modern core profile."""
 
-from __future__ import annotations
 
 import ctypes
 import math
@@ -27,15 +25,13 @@ _ENTITY_R2 = 18.0 ** 2
 _GLOW_R2 = 12.0 ** 2
 
 
-# ---------------------------------------------------------------------------
-# GLSL shaders — identical to pyside6/renderer_opengl.py
-# ---------------------------------------------------------------------------
 _TEXTURED_VERT = b"""
 #version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec2 aUV;
 out vec2 vUV;
 out float vFogFactor;
+out vec3 vWorldPos;
 uniform mat4 uMVP;
 uniform float uFogStart;
 uniform float uFogEnd;
@@ -45,6 +41,7 @@ void main(){
     float dist = abs(world.z);
     vFogFactor = clamp((uFogEnd - dist) / (uFogEnd - uFogStart), 0.0, 1.0);
     vUV = aUV;
+    vWorldPos = aPos;
 }
 """
 
@@ -52,12 +49,40 @@ _TEXTURED_FRAG = b"""
 #version 330 core
 in vec2 vUV;
 in float vFogFactor;
+in vec3 vWorldPos;
 out vec4 FragColor;
 uniform sampler2D uTex;
 uniform vec4 uFogColor;
+uniform vec3 uPlayerPos;
+uniform float uTime;
+uniform bool uEnableDynamicLight;
 void main(){
     vec4 texColor = texture(uTex, vUV);
-    FragColor = mix(uFogColor, texColor, vFogFactor);
+    
+    if (uEnableDynamicLight) {
+        // Dynamic player light - softer effect with ambient darkening outside radius
+        float lightDist = distance(vWorldPos, uPlayerPos);
+        float lightRadius = 8.0;
+        float lightIntensity = smoothstep(lightRadius, 0.0, lightDist);
+        
+        // Ambient level: 70% at edge, 100% at center
+        float ambientLevel = 0.7 + lightIntensity * 0.3;
+        vec3 baseColor = texColor.rgb * ambientLevel;
+        
+        // Add warm light near player (subtle, not harsh)
+        vec3 lightColor = vec3(1.0, 0.95, 0.85);
+        vec3 litColor = baseColor + lightColor * lightIntensity * 0.15;
+        
+        // Pulsing light effect - very subtle
+        float pulse = 0.98 + 0.02 * sin(uTime * 2.0);
+        litColor *= pulse;
+        
+        vec4 finalColor = vec4(litColor, texColor.a);
+        FragColor = mix(uFogColor, finalColor, vFogFactor);
+    } else {
+        // No dynamic lighting - use base color at full brightness
+        FragColor = mix(uFogColor, texColor, vFogFactor);
+    }
 }
 """
 
@@ -67,6 +92,7 @@ layout(location=0) in vec3 aPos;
 layout(location=1) in vec4 aColor;
 out vec4 vColor;
 out float vFogFactor;
+out vec3 vWorldPos;
 uniform mat4 uMVP;
 uniform float uFogStart;
 uniform float uFogEnd;
@@ -76,6 +102,7 @@ void main(){
     float dist = abs(world.z);
     vFogFactor = clamp((uFogEnd - dist) / (uFogEnd - uFogStart), 0.0, 1.0);
     vColor = aColor;
+    vWorldPos = aPos;
 }
 """
 
@@ -83,17 +110,41 @@ _COLORED_FRAG = b"""
 #version 330 core
 in vec4 vColor;
 in float vFogFactor;
+in vec3 vWorldPos;
 out vec4 FragColor;
 uniform vec4 uFogColor;
+uniform vec3 uPlayerPos;
+uniform float uTime;
+uniform bool uEnableFlicker;
 void main(){
-    FragColor = mix(uFogColor, vColor, vFogFactor);
+    vec4 finalColor = vColor;
+    
+    if (uEnableFlicker) {
+        // Lamp flickering effect when player is close
+        // Use vertical position for lamp glow detection (lamps are at ceiling height)
+        float lampHeight = 2.0; // Approximate lamp height
+        vec3 lampPos = vec3(vWorldPos.x, lampHeight, vWorldPos.z);
+        float lightDist = distance(lampPos, uPlayerPos);
+        float flickerRadius = 6.0;
+        float flickerIntensity = smoothstep(flickerRadius, 0.0, lightDist);
+        
+        if (flickerIntensity > 0.0) {
+            // Flicker every 2.5 seconds
+            float flickerCycle = mod(uTime, 2.5);
+            float flicker = 1.0;
+            if (flickerCycle < 0.15) {
+                // Quick flicker off during the 2.5 second cycle
+                flicker = 0.3 + 0.7 * sin(flickerCycle * 40.0);
+            }
+            finalColor.rgb *= flicker;
+        }
+    }
+    
+    FragColor = mix(uFogColor, finalColor, vFogFactor);
 }
 """
 
 
-# ---------------------------------------------------------------------------
-# Matrix helpers (column-major) — identical to pyside6/renderer_opengl.py
-# ---------------------------------------------------------------------------
 def _mat_mul(a: List[float], b: List[float]) -> List[float]:
     out = [0.0] * 16
     for col in range(4):
@@ -158,9 +209,6 @@ def _rot_pt_z(x, y, z, a):
     return (x*c-y*s, x*s+y*c, z)
 
 
-# ---------------------------------------------------------------------------
-# Low-level GL helpers
-# ---------------------------------------------------------------------------
 def _compile_shader(src: bytes, kind: int) -> int:
     sh = glCreateShader(kind)
     glShaderSource(sh, src)
@@ -255,9 +303,6 @@ def _delete_vao(vao: int) -> None:
             pass
 
 
-# ---------------------------------------------------------------------------
-# Geometry builder — identical to pyside6/renderer_opengl.py
-# ---------------------------------------------------------------------------
 class _GeoBuilder:
     def __init__(self, textured: bool):
         self._tex = textured
@@ -305,6 +350,29 @@ class _GeoBuilder:
                       (x1, y1, z0), (x0, y1, z0), c)
         self.quad_col((x0, y0, z0), (x1, y0, z0),
                       (x1, y0, z1), (x0, y0, z1), c)
+
+    def cube_tex(self, cx, cy, cz, sx, sy, sz, uv_scale=1.0):
+        x0, x1 = cx-sx, cx+sx
+        y0, y1 = cy-sy, cy+sy
+        z0, z1 = cz-sz, cz+sz
+        # Front
+        self.quad_tex((x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1),
+                      (0.0, 0.0), (uv_scale, 0.0), (uv_scale, uv_scale), (0.0, uv_scale))
+        # Back
+        self.quad_tex((x1, y0, z0), (x0, y0, z0), (x0, y1, z0), (x1, y1, z0),
+                      (0.0, 0.0), (uv_scale, 0.0), (uv_scale, uv_scale), (0.0, uv_scale))
+        # Left
+        self.quad_tex((x0, y0, z0), (x0, y0, z1), (x0, y1, z1), (x0, y1, z0),
+                      (0.0, 0.0), (uv_scale, 0.0), (uv_scale, uv_scale), (0.0, uv_scale))
+        # Right
+        self.quad_tex((x1, y0, z1), (x1, y0, z0), (x1, y1, z0), (x1, y1, z1),
+                      (0.0, 0.0), (uv_scale, 0.0), (uv_scale, uv_scale), (0.0, uv_scale))
+        # Top
+        self.quad_tex((x0, y1, z1), (x1, y1, z1), (x1, y1, z0), (x0, y1, z0),
+                      (0.0, 0.0), (uv_scale, 0.0), (uv_scale, uv_scale), (0.0, uv_scale))
+        # Bottom
+        self.quad_tex((x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1),
+                      (0.0, 0.0), (uv_scale, 0.0), (uv_scale, uv_scale), (0.0, uv_scale))
 
     def disc_fan_col(self, cx, cy, cz, radius, segments, c, normal_up=True):
         TWO_PI = math.pi*2.0
@@ -510,6 +578,21 @@ class _GeoBuilder:
         else:
             self.cube_col(gx, bar_yc+bar_h*0.42, gz, 0.08, 0.06, 0.47, cb)
 
+    def gate_bars_tex(self, gx, gy_center, gz, wall_h, y_offset, is_jail):
+        bar_h = wall_h
+        bar_yc = gy_center+y_offset
+        for i in range(-2, 3):
+            bx = gx+i*0.18 if is_jail else gx
+            bz = gz if is_jail else gz+i*0.18
+            self.cube_tex(bx, bar_yc, bz, 0.035, bar_h*0.5, 0.06, uv_scale=1.0)
+        cb = (0.65, 0.65, 0.70, 1.0)
+        if is_jail:
+            self.cube_tex(gx, bar_yc+bar_h*0.42, gz,
+                          0.47, 0.06, 0.08, uv_scale=1.0)
+        else:
+            self.cube_tex(gx, bar_yc+bar_h*0.42, gz,
+                          0.08, 0.06, 0.47, uv_scale=1.0)
+
     def platform_col(self, cx, cy, cz):
         BROWN = (0.6, 0.4, 0.2, 1.0)
         DARK = (0.4, 0.3, 0.15, 1.0)
@@ -518,6 +601,14 @@ class _GeoBuilder:
         self.cube_col(cx, cy+0.15, cz-0.35, 0.41, 0.10, 0.025, DARK)
         self.cube_col(cx+0.35, cy+0.15, cz, 0.025, 0.10, 0.41, DARK)
         self.cube_col(cx-0.35, cy+0.15, cz, 0.025, 0.10, 0.41, DARK)
+
+    def platform_tex(self, cx, cy, cz):
+        # Textured moving platform
+        self.cube_tex(cx, cy+0.05, cz, 0.4, 0.05, 0.4, uv_scale=1.0)
+        self.cube_tex(cx, cy+0.15, cz+0.35, 0.41, 0.10, 0.025, uv_scale=1.0)
+        self.cube_tex(cx, cy+0.15, cz-0.35, 0.41, 0.10, 0.025, uv_scale=1.0)
+        self.cube_tex(cx+0.35, cy+0.15, cz, 0.025, 0.10, 0.41, uv_scale=1.0)
+        self.cube_tex(cx-0.35, cy+0.15, cz, 0.025, 0.10, 0.41, uv_scale=1.0)
 
     def table_book_col(self, cx, cy, cz, glow_pulse):
         BROWN = (0.35, 0.22, 0.10, 1.0)
@@ -529,6 +620,17 @@ class _GeoBuilder:
         self.cube_col(cx, cy+0.48, cz, 0.14, 0.02, 0.10, BOOK)
         GLOW = (0.95, 0.85, 0.35, min(0.6, glow_pulse))
         self.disc_fan_col(cx, cy+0.01, cz, 0.55, 16, GLOW)
+
+    def table_tex_book_col(self, cx, cy, cz, glow_pulse):
+        self.cube_tex(cx, cy+0.40, cz, 0.425, 0.04, 0.30, uv_scale=1.0)
+        for lx in (-0.35, 0.35):
+            for lz in (-0.22, 0.22):
+                self.cube_tex(cx+lx, cy+0.20, cz+lz, 0.04,
+                              0.20, 0.04, uv_scale=1.0)
+
+    def table_book_col_glow(self, cx, cy, cz, glow_pulse):
+        BOOK = (0.12, 0.12, 0.14, 1.0)
+        self.cube_col(cx, cy+0.48, cz, 0.14, 0.02, 0.10, BOOK)
 
     def lamp_col(self, cx, cz, ceil_h):
         DARK = (0.10, 0.10, 0.12, 1.0)
@@ -583,9 +685,6 @@ class _GeoBuilder:
                           (x, cy+h, cz+w), (x, cy+h, cz-w), DARK)
 
 
-# ---------------------------------------------------------------------------
-# Main renderer class
-# ---------------------------------------------------------------------------
 class OpenGLRenderer:
     def __init__(self, core: GameCore):
         self.core = core
@@ -615,18 +714,24 @@ class OpenGLRenderer:
         self._dyn_tex_vtx: int = 0
         self._dyn_tex_vbo: int = 0
 
-        # Text texture cache — keyed by (text, font_family, font_size, bold, color, pad)
+        # Text texture cache
         self._text_tex_cache: Dict[tuple, Tuple[int, int, int]] = {}
 
         self._lamp_vao: int = 0
         self._lamp_vtx: int = 0
         self._lamps: List[Tuple[int, int]] = []
 
+        from collections import deque as _deque
+        self._ghost_trails: Dict[int, Any] = {}
+        self._ghost_trail_deque = _deque  # keep reference for later use
+        self._ghost_trail_last_sample: Dict[int, float] = {}
+        _TRAIL_SAMPLE_INTERVAL = 0.05  # seconds between trail position samples
+        self._TRAIL_SAMPLE_INTERVAL = _TRAIL_SAMPLE_INTERVAL
+        self._TRAIL_MAX_POINTS = 60    # max positions stored per ghost
+
         self._gl_ready = False
 
-    # ------------------------------------------------------------------
-    # Initialise — call once with GL context current
-    # ------------------------------------------------------------------
+    # Initialise - call once with GL context current
 
     def initialize(self) -> None:
         t0 = time.perf_counter()
@@ -643,10 +748,24 @@ class OpenGLRenderer:
             os.path.join('assets', 'path.png'))
         self._tex_coin = self._load_texture(
             os.path.join('assets', 'JEMA GER 1640-11.png'))
-        t2 = time.perf_counter()
+        self._tex_gate = self._load_texture(os.path.join('assets', 'jail.jpg'))
+        self._tex_platform = self._load_texture(
+            os.path.join('assets', 'wood.jpg'))
 
         if self._tex_coin:
             glBindTexture(GL_TEXTURE_2D, self._tex_coin)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            glBindTexture(GL_TEXTURE_2D, 0)
+
+        if self._tex_gate:
+            glBindTexture(GL_TEXTURE_2D, self._tex_gate)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+            glBindTexture(GL_TEXTURE_2D, 0)
+
+        if self._tex_platform:
+            glBindTexture(GL_TEXTURE_2D, self._tex_platform)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
             glBindTexture(GL_TEXTURE_2D, 0)
@@ -656,6 +775,7 @@ class OpenGLRenderer:
         if not self._tex_floor:
             self._tex_floor = self._make_fallback_texture((80, 80, 100, 255))
 
+        t2 = time.perf_counter()
         self._build_world_vao()
         t3 = time.perf_counter()
         self._build_lamp_vao()
@@ -674,7 +794,7 @@ class OpenGLRenderer:
         t5 = time.perf_counter()
 
         # Record texture loading time to PerformanceMonitor
-        tex_load_ms = (t2 - t1) * 1000  # Texture loading time in ms
+        tex_load_ms = (t2 - t1) * 1000
         try:
             perf = getattr(self.core, '_performance_monitor', None)
             if perf:
@@ -713,9 +833,7 @@ class OpenGLRenderer:
                 pass
         self._text_tex_cache.clear()
 
-    # ------------------------------------------------------------------
-    # Texture loading — wx.Image (pure wxPython, no PySide6)
-    # ------------------------------------------------------------------
+    # Texture loading - wx.Image
 
     def _load_texture(self, path: str) -> Optional[int]:
         if not os.path.exists(path):
@@ -726,7 +844,7 @@ class OpenGLRenderer:
         if not img.HasAlpha():
             img.InitAlpha()
 
-        # Vertical flip for OpenGL bottom-left origin
+        # Vertical flip for OpenGL bottom-left
         img = img.Mirror(horizontally=False)
 
         w, h = img.GetWidth(), img.GetHeight()
@@ -734,7 +852,7 @@ class OpenGLRenderer:
         alpha = bytes(img.GetAlpha()) if img.GetAlpha(
         ) is not None else bytes([255]) * (w * h)
 
-        # Fast numpy vectorized RGB→RGBA conversion (was: slow Python loop)
+        # numpy vectorized RGB->RGBA
         rgb_arr = np.frombuffer(rgb, dtype=np.uint8).reshape(h, w, 3)
         alpha_arr = np.frombuffer(alpha, dtype=np.uint8).reshape(h, w, 1)
         rgba = np.concatenate([rgb_arr, alpha_arr], axis=2).tobytes()
@@ -771,11 +889,8 @@ class OpenGLRenderer:
         color: Tuple[int, int, int, int] = (255, 235, 120, 255),
         pad: int = 10,
     ) -> Tuple[int, int, int]:
-        """Return (tex_id, w_px, h_px). Renders text with wx.MemoryDC.
+        # Return (tex_id, w_px, h_px) - ňrRenders text with wx.MemoryDC
 
-        Key fix vs old code: the image is flipped vertically before upload
-        so OpenGL (bottom-left origin) shows text the right way up.
-        """
         t = str(text or '')
         if not t:
             return 0, 0, 0
@@ -785,7 +900,7 @@ class OpenGLRenderer:
         if cached:
             return cached
 
-        # Evict oldest 50 entries when cache is full
+        # - oldest 50 entries when cache is full
         if len(self._text_tex_cache) >= 200:
             for k in list(self._text_tex_cache.keys())[:50]:
                 tid, _, _ = self._text_tex_cache.pop(k)
@@ -795,7 +910,7 @@ class OpenGLRenderer:
                 except Exception:
                     pass
 
-        # Time the text texture generation
+        # Time text texture generation
         tex_start = time.perf_counter()
 
         weight = wx.FONTWEIGHT_BOLD if bold else wx.FONTWEIGHT_NORMAL
@@ -812,7 +927,6 @@ class OpenGLRenderer:
         w = max(tw + pad * 2, 64)
         h = max(th + pad * 2, 32)
 
-        # Render white glyphs on black background
         bmp = wx.Bitmap(w, h, 32)
         mdc = wx.MemoryDC(bmp)
         mdc.SetBackground(wx.Brush(wx.Colour(0, 0, 0)))
@@ -824,14 +938,13 @@ class OpenGLRenderer:
 
         img = bmp.ConvertToImage()
 
-        # ---- Vertical flip for OpenGL bottom-left origin ----
-        img = img.Mirror(horizontally=False)   # Mirror(False) = vertical flip
+        img = img.Mirror(horizontally=False)
 
         rgb = bytes(img.GetData())
         cr, cg, cb_, ca = int(color[0]), int(
             color[1]), int(color[2]), int(color[3])
 
-        # Fast numpy vectorized tinting (was: slow Python loop)
+        # numpy vectorized tinting
         rgb_arr = np.frombuffer(rgb, dtype=np.uint8).reshape(h, w, 3)
         cov = rgb_arr[:, :, 0]  # Red channel = coverage (white-on-black)
         alpha_arr = (cov.astype(np.uint16) * ca // 255).astype(np.uint8)
@@ -862,7 +975,6 @@ class OpenGLRenderer:
         self._text_tex_cache[key] = out
         return out
 
-    # Keep _get_text_texture as an alias used internally by entity rendering
     def _get_text_texture(self, text: str) -> Optional[Tuple[int, int, int]]:
         result = self.get_text_texture(text)
         return result if result[0] else None
@@ -887,7 +999,6 @@ class OpenGLRenderer:
             'H': (150, 150, 150),
         }
 
-        # Fixed size like PySide6 for crisp rendering
         iw, ih = 640, 420
         margin = 28
         cell = min((iw - margin * 2) / grid_w, (ih - margin * 2) / grid_h)
@@ -919,7 +1030,6 @@ class OpenGLRenderer:
                     h = int(cell + 1)
                     mdc.DrawRectangle(x, y, w, h)
 
-        # Calculate sector centers for labels
         acc: Dict[str, list] = {}
         if callable(sid_for):
             for rr in range(grid_h):
@@ -933,7 +1043,6 @@ class OpenGLRenderer:
                         acc[sid][1] += cc
                         acc[sid][2] += 1
 
-        # Draw sector labels (A, B, C, etc.)
         font_big = wx.Font(52, wx.FONTFAMILY_SWISS,
                            wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
         mdc.SetFont(font_big)
@@ -955,7 +1064,6 @@ class OpenGLRenderer:
             font_small = wx.Font(22, wx.FONTFAMILY_SWISS,
                                  wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
             mdc.SetFont(font_small)
-            # Draw background rect for exit label
             mdc.SetBrush(wx.Brush(wx.Colour(210, 190, 175, 200)))
             mdc.SetPen(wx.Pen(wx.Colour(210, 190, 175, 200), 1))
             tw, th = mdc.GetTextExtent("exit")
@@ -970,16 +1078,13 @@ class OpenGLRenderer:
 
         mdc.SelectObject(wx.NullBitmap)
 
-        # Convert to image - NO mirroring needed (matches PySide6)
-        # OpenGL textures expect bottom-left origin, wx.Image.GetData() provides that
+        # Convert to image
         img = bmp.ConvertToImage()
 
         w, h = img.GetWidth(), img.GetHeight()
         rgb = bytes(img.GetData())
 
-        # Build RGBA data directly (no separate alpha handling needed for jail map)
         rgb_arr = np.frombuffer(rgb, dtype=np.uint8).reshape(h, w, 3)
-        # Add full opacity alpha channel
         alpha_arr = np.full((h, w, 1), 255, dtype=np.uint8)
         rgba = np.concatenate([rgb_arr, alpha_arr], axis=2).tobytes()
 
@@ -997,9 +1102,7 @@ class OpenGLRenderer:
         self._jail_map_texture = int(tex)
         return int(tex)
 
-    # ------------------------------------------------------------------
-    # World VAO — identical to pyside6/renderer_opengl.py
-    # ------------------------------------------------------------------
+    # World VAO
 
     def _build_world_vao(self) -> None:
         _delete_vao(self._wall_vao)
@@ -1020,18 +1123,19 @@ class OpenGLRenderer:
             cx, cz = c+0.5, r+0.5
             for dr, dc, face in [(-1, 0, 'N'), (1, 0, 'S'), (0, -1, 'W'), (0, 1, 'E')]:
                 if not solid(r+dr, c+dc):
+                    # UV tiling: horizontal wraps once (0-1), vertical tiles by wall height (0-wall_h)
                     if face == 'N':
-                        wb.quad_tex((cx-0.5, 0, cz-0.5), (cx+0.5, 0, cz-0.5), (cx+0.5, wall_h,
-                                    cz-0.5), (cx-0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                        wb.quad_tex((cx-0.5, 0, cz-0.5), (cx+0.5, 0, cz-0.5), (cx+0.5, wall_h, cz-0.5),
+                                    (cx-0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, wall_h), (0, wall_h))
                     elif face == 'S':
-                        wb.quad_tex((cx+0.5, 0, cz+0.5), (cx-0.5, 0, cz+0.5), (cx-0.5, wall_h,
-                                    cz+0.5), (cx+0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                        wb.quad_tex((cx+0.5, 0, cz+0.5), (cx-0.5, 0, cz+0.5), (cx-0.5, wall_h, cz+0.5),
+                                    (cx+0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, wall_h), (0, wall_h))
                     elif face == 'W':
-                        wb.quad_tex((cx-0.5, 0, cz+0.5), (cx-0.5, 0, cz-0.5), (cx-0.5, wall_h,
-                                    cz-0.5), (cx-0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                        wb.quad_tex((cx-0.5, 0, cz+0.5), (cx-0.5, 0, cz-0.5), (cx-0.5, wall_h, cz-0.5),
+                                    (cx-0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, wall_h), (0, wall_h))
                     else:
-                        wb.quad_tex((cx+0.5, 0, cz-0.5), (cx+0.5, 0, cz+0.5), (cx+0.5, wall_h,
-                                    cz+0.5), (cx+0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                        wb.quad_tex((cx+0.5, 0, cz-0.5), (cx+0.5, 0, cz+0.5), (cx+0.5, wall_h, cz+0.5),
+                                    (cx+0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, wall_h), (0, wall_h))
             exposed = any(not solid(r+dr, c+dc)
                           for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)))
             if exposed and wall_h < ceil_h:
@@ -1042,18 +1146,19 @@ class OpenGLRenderer:
             cx, cz = c+0.5, r+0.5
             for dr, dc, face in [(-1, 0, 'N'), (1, 0, 'S'), (0, -1, 'W'), (0, 1, 'E')]:
                 if not inside(r+dr, c+dc):
+                    # UV tiling: horizontal wraps once (0-1), vertical tiles by wall height (0-wall_h)
                     if face == 'N':
-                        wb.quad_tex((cx-0.5, 0, cz-0.5), (cx+0.5, 0, cz-0.5), (cx+0.5, wall_h,
-                                    cz-0.5), (cx-0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                        wb.quad_tex((cx-0.5, 0, cz-0.5), (cx+0.5, 0, cz-0.5), (cx+0.5, wall_h, cz-0.5),
+                                    (cx-0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, wall_h), (0, wall_h))
                     elif face == 'S':
-                        wb.quad_tex((cx+0.5, 0, cz+0.5), (cx-0.5, 0, cz+0.5), (cx-0.5, wall_h,
-                                    cz+0.5), (cx+0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                        wb.quad_tex((cx+0.5, 0, cz+0.5), (cx-0.5, 0, cz+0.5), (cx-0.5, wall_h, cz+0.5),
+                                    (cx+0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, wall_h), (0, wall_h))
                     elif face == 'W':
-                        wb.quad_tex((cx-0.5, 0, cz+0.5), (cx-0.5, 0, cz-0.5), (cx-0.5, wall_h,
-                                    cz-0.5), (cx-0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                        wb.quad_tex((cx-0.5, 0, cz+0.5), (cx-0.5, 0, cz-0.5), (cx-0.5, wall_h, cz-0.5),
+                                    (cx-0.5, wall_h, cz+0.5), (0, 0), (1, 0), (1, wall_h), (0, wall_h))
                     else:
-                        wb.quad_tex((cx+0.5, 0, cz-0.5), (cx+0.5, 0, cz+0.5), (cx+0.5, wall_h,
-                                    cz+0.5), (cx+0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, 1), (0, 1))
+                        wb.quad_tex((cx+0.5, 0, cz-0.5), (cx+0.5, 0, cz+0.5), (cx+0.5, wall_h, cz+0.5),
+                                    (cx+0.5, wall_h, cz-0.5), (0, 0), (1, 0), (1, wall_h), (0, wall_h))
         self._wall_vao, self._wall_vtx = _upload_vao_textured(wb.data)
 
         fb = _GeoBuilder(textured=True)
@@ -1122,14 +1227,21 @@ class OpenGLRenderer:
             gb.lamp_col(c+0.5, r+0.5, ceil_h)
         self._lamp_vao, self._lamp_vtx = _upload_vao_colored(gb.data)
 
-    # ------------------------------------------------------------------
     # Shader / draw helpers
-    # ------------------------------------------------------------------
 
     def _set_fog_uniforms(self, prog: int) -> None:
         glUniform1f(glGetUniformLocation(prog, b"uFogStart"), _FOG_START)
         glUniform1f(glGetUniformLocation(prog, b"uFogEnd"),   _FOG_END)
         glUniform4f(glGetUniformLocation(prog, b"uFogColor"), *_SKY_COLOR)
+        player = self.core.player
+        glUniform3f(glGetUniformLocation(prog, b"uPlayerPos"),
+                    float(player.x), float(player.y), float(player.z))
+        glUniform1f(glGetUniformLocation(prog, b"uTime"), self._anim_t)
+        if prog == self._tex_prog:
+            glUniform1i(glGetUniformLocation(prog, b"uEnableDynamicLight"), 1)
+        # Disable flickering
+        if prog == self._col_prog:
+            glUniform1i(glGetUniformLocation(prog, b"uEnableFlicker"), 0)
 
     def _set_no_fog_uniforms(self, prog: int) -> None:
         glUniform1f(glGetUniformLocation(prog, b"uFogStart"), 0.0)
@@ -1171,6 +1283,41 @@ class OpenGLRenderer:
         glBindVertexArray(0)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
+    def _draw_dynamic_col_with_flicker(self, raw: _array, mvp: List[float]) -> None:
+        if not raw:
+            return
+        vtx = len(raw) // 7
+        data = raw.tobytes()
+        stride = 7 * 4
+        glUseProgram(self._col_prog)
+        self._set_mvp(self._col_prog, mvp)
+        glUniform1f(glGetUniformLocation(
+            self._col_prog, b"uFogStart"), _FOG_START)
+        glUniform1f(glGetUniformLocation(
+            self._col_prog, b"uFogEnd"),   _FOG_END)
+        glUniform4f(glGetUniformLocation(
+            self._col_prog, b"uFogColor"), *_SKY_COLOR)
+        player = self.core.player
+        glUniform3f(glGetUniformLocation(self._col_prog, b"uPlayerPos"),
+                    float(player.x), float(player.y), float(player.z))
+        glUniform1f(glGetUniformLocation(
+            self._col_prog, b"uTime"), self._anim_t)
+        glUniform1i(glGetUniformLocation(self._col_prog, b"uEnableFlicker"), 1)
+        if self._dyn_vao == 0:
+            self._dyn_vao = glGenVertexArrays(1)
+        glBindVertexArray(self._dyn_vao)
+        glBindBuffer(GL_ARRAY_BUFFER, self._dyn_vbo)
+        glBufferData(GL_ARRAY_BUFFER, len(data), data, GL_STREAM_DRAW)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                              stride, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE,
+                              stride, ctypes.c_void_p(12))
+        glEnableVertexAttribArray(1)
+        glDrawArrays(GL_TRIANGLES, 0, vtx)
+        glBindVertexArray(0)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+
     def _draw_dynamic_tex(self, raw: _array, mvp: List[float], tex_id: int) -> None:
         if not raw or not tex_id:
             return
@@ -1186,9 +1333,7 @@ class OpenGLRenderer:
         self._draw_vao(self._dyn_tex_vao, self._dyn_tex_vtx)
         glBindTexture(GL_TEXTURE_2D, 0)
 
-    # ------------------------------------------------------------------
-    # Main render — identical structure to pyside6/renderer_opengl.py
-    # ------------------------------------------------------------------
+    # Main render
 
     def render(self) -> None:
         if not self._gl_ready:
@@ -1221,6 +1366,21 @@ class OpenGLRenderer:
         pz = float(player.z)
         yaw = float(player.yaw)
         pitch = float(player.pitch)
+
+        # Camera sway
+        sway_time = self._anim_t * 3.0
+        sway_offset_x = 0.0
+        sway_offset_y = 0.0
+        if not hasattr(self, '_prev_player_pos'):
+            self._prev_player_pos = (px, pz)
+        prev_px, prev_pz = self._prev_player_pos
+        moved = math.sqrt((px - prev_px)**2 + (pz - prev_pz)**2) > 0.001
+        self._prev_player_pos = (px, pz)
+        if moved:
+            sway_offset_y = math.sin(sway_time * 2.0) * 0.08
+            sway_offset_x = math.cos(sway_time) * 0.04
+        py += sway_offset_y
+        px += sway_offset_x
 
         lx = px + math.sin(yaw)*math.cos(pitch)
         ly = py + math.sin(pitch)
@@ -1256,7 +1416,9 @@ class OpenGLRenderer:
         glUseProgram(self._col_prog)
         self._set_fog_uniforms(self._col_prog)
         self._set_mvp(self._col_prog, vp)
+        glUniform1i(glGetUniformLocation(self._col_prog, b"uEnableFlicker"), 1)
         self._draw_vao(self._lamp_vao, self._lamp_vtx)
+        glUniform1i(glGetUniformLocation(self._col_prog, b"uEnableFlicker"), 0)
 
         # Dynamic entities
         self._draw_entities(vp)
@@ -1265,9 +1427,7 @@ class OpenGLRenderer:
         glDisable(GL_DEPTH_TEST)
         glBindTexture(GL_TEXTURE_2D, 0)
 
-    # ------------------------------------------------------------------
-    # Entity rendering — identical to pyside6/renderer_opengl.py
-    # ------------------------------------------------------------------
+    # Entity rendering
 
     def _draw_entities(self, vp: List[float]) -> None:
         ghost_segments = 26 if self._fast_mode else 40
@@ -1275,10 +1435,14 @@ class OpenGLRenderer:
         gb_bg = _GeoBuilder(textured=False)
         gb_fg = _GeoBuilder(textured=False)
         gb_coin_tex = _GeoBuilder(textured=True)
+        gb_gate_tex = _GeoBuilder(textured=True)
+        gb_platform_tex = _GeoBuilder(textured=True)
+        gb_table_tex = _GeoBuilder(textured=True)
         gb_sign_tex: Dict[int, _array] = {}
         gb_glow = _GeoBuilder(textured=False)
         gb_ghost = _GeoBuilder(textured=False)
         gb_arrow = _GeoBuilder(textured=False)
+        gb_dust = _GeoBuilder(textured=False)
 
         anim = self._anim_t
         TWO_PI = math.pi * 2.0
@@ -1429,6 +1593,48 @@ class OpenGLRenderer:
         # --- Ghosts ---
         ghost_colors = {1: (1.0, 0.35, 0.20, 0.82), 2: (0.30, 1.0, 0.55, 0.82),
                         3: (0.45, 0.65, 1.0, 0.82), 4: (1.0, 0.85, 0.25, 0.82), 5: (0.95, 0.35, 1.0, 0.82)}
+
+        # Trail constants
+        _TRAIL_FADE_DIST = 4.0
+        _TRAIL_START_DIST = 1.0
+        _TRAIL_FULL_DIST = 1.8
+        _TRAIL_BASE_ALPHA = 0.55
+
+        def _sparkle_star(bx, by, bz, size, cr, cg, cb, alpha):
+            if alpha <= 0.005 or size <= 0.0:
+                return
+            h = size * 0.5
+            phase = (bx * 7.3 + bz * 13.7 + by * 3.1 + anim * 2.5)
+            ca0 = math.cos(phase)
+            sa0 = math.sin(phase)
+            ca1 = math.cos(phase + 1.047)
+            sa1 = math.sin(phase + 1.047)
+            ca2 = math.cos(phase + 2.094)
+            sa2 = math.sin(phase + 2.094)
+            twinkle = 0.65 + 0.35 * math.sin(anim * 8.0 + bx * 5.1 + bz * 3.7)
+            a = alpha * twinkle
+            col_c = (cr, cg, cb, a)
+            col_e = (cr, cg, cb, 0.0)  # transparent edges for soft look
+            # Arm 0 (XZ plane by phase)
+            p0 = (bx - ca0*h, by,      bz - sa0*h)
+            p1 = (bx + ca0*h, by,      bz + sa0*h)
+            p2 = (bx,         by + h,  bz)
+            p3 = (bx,         by - h,  bz)
+            gb_glow.tri_col_vc(p0, col_e, p2, col_c, p1, col_e)
+            gb_glow.tri_col_vc(p0, col_e, p1, col_e, p3, col_c)
+            # Arm 1 (rotated 60)
+            q0 = (bx - ca1*h, by,      bz - sa1*h)
+            q1 = (bx + ca1*h, by,      bz + sa1*h)
+            gb_glow.tri_col_vc(q0, col_e, p2, col_c, q1, col_e)
+            gb_glow.tri_col_vc(q0, col_e, q1, col_e, p3, col_c)
+            # Arm 2 (rotated 120)
+            r0 = (bx - ca2*h, by,      bz - sa2*h)
+            r1 = (bx + ca2*h, by,      bz + sa2*h)
+            gb_glow.tri_col_vc(r0, col_e, p2, col_c, r1, col_e)
+            gb_glow.tri_col_vc(r0, col_e, r1, col_e, p3, col_c)
+
+        now_t = time.perf_counter()
+
         for g in self.core.ghosts.values():
             gx = float(g.x)
             gz = float(g.z)
@@ -1454,6 +1660,60 @@ class OpenGLRenderer:
                 x, y, z = _rot_pt_y(x, y, z, yaw_g)
                 gb_ghost.data.extend(
                     [x+gx, y+gy, z+gz, tmp.data[i+3], tmp.data[i+4], tmp.data[i+5], tmp.data[i+6]])
+            glow_y = 1.15+y_raise+bob+0.08
+            radial_sprite_glow_col(
+                gx, glow_y, gz, 0.55*s, (col[0], col[1], col[2]), 0.12)
+            radial_sprite_glow_col(
+                gx, glow_y, gz, 0.95*s, (col[0], col[1], col[2]), 0.05)
+
+            # --- Ghost particle trail ---
+            gid = g.id
+            if gid not in self._ghost_trails:
+                from collections import deque as _dq
+                self._ghost_trails[gid] = _dq(maxlen=self._TRAIL_MAX_POINTS)
+                self._ghost_trail_last_sample[gid] = now_t
+
+            trail = self._ghost_trails[gid]
+            last_t = self._ghost_trail_last_sample.get(gid, now_t)
+
+            if now_t - last_t >= self._TRAIL_SAMPLE_INTERVAL:
+                trail.append((gx, gy, gz, now_t))
+                self._ghost_trail_last_sample[gid] = now_t
+
+            cr, cg, cb = base_col[0], base_col[1], base_col[2]
+            for tx, ty, tz, _ts in trail:
+                dist = math.sqrt((tx - gx)**2 + (tz - gz)**2)
+                if dist < _TRAIL_START_DIST or dist > _TRAIL_FADE_DIST:
+                    continue
+                if dist <= _TRAIL_FULL_DIST:
+                    fade = (dist - _TRAIL_START_DIST) / \
+                        (_TRAIL_FULL_DIST - _TRAIL_START_DIST)
+                else:
+                    fade = 1.0 - (dist - _TRAIL_FULL_DIST) / \
+                        (_TRAIL_FADE_DIST - _TRAIL_FULL_DIST)
+                fade = max(0.0, min(1.0, fade))
+
+                skip_thresh = fade  # 1.0 = always draw, 0.0 = never
+                hash_val = (tx * 31.7 + tz * 17.3 + gid * 7.1) % 1.0
+                if hash_val > skip_thresh:
+                    continue
+
+                alpha = _TRAIL_BASE_ALPHA * fade
+                p_size = 0.04 + 0.10 * fade * s
+
+                jitter_x = math.sin(tx * 11.3 + tz * 7.9 + gid) * 0.18 * s
+                jitter_z = math.cos(tx * 7.1 + tz * 13.1 + gid) * 0.18 * s
+                jitter_y = math.sin(tx * 5.7 + tz * 9.3) * 0.06 * s
+                particle_y = ty - 0.75 + jitter_y
+
+                _sparkle_star(tx + jitter_x, particle_y, tz + jitter_z,
+                              p_size, cr, cg, cb, alpha)
+
+                if fade > 0.5:
+                    jx2 = math.cos(tx * 13.9 + tz * 5.7 + gid * 2) * 0.12 * s
+                    jz2 = math.sin(tx * 9.3 + tz * 11.1 + gid * 3) * 0.12 * s
+                    _sparkle_star(tx + jx2, particle_y * 0.5 + ty * 0.5, tz + jz2,
+                                  p_size * 0.55, cr, cg, cb, alpha * 0.7)
 
         # --- Ceiling lamp glow ---
         for r, c in (self._lamps or []):
@@ -1466,6 +1726,33 @@ class OpenGLRenderer:
             for scale, a in ((1.0, 0.08), (1.4, 0.05), (1.9, 0.03), (2.6, 0.015)):
                 billboard_quad_col(lx, ay, lz, base*scale,
                                    base*scale, (0.98, 0.95, 0.82, a))
+
+        # --- Floating dust particles ---
+        dust_count = 50
+        dust_radius = 8.0
+        dust_height_range = 2.5
+        dust_color = (0.8, 0.8, 0.85, 0.4)
+        for i in range(dust_count):
+            seed = i * 73.7
+            angle = (seed + anim * 0.3) % TWO_PI
+            radius = 2.0 + (seed * 0.1 % (dust_radius - 2.0))
+            dx = px + math.cos(angle) * radius
+            dz = pz + math.sin(angle) * radius
+            dy = 0.5 + (seed * 0.5 % dust_height_range) + \
+                math.sin(anim * 0.5 + seed) * 0.3
+
+            size = 0.008 + (seed * 0.01 % 0.01)
+            alpha = 0.2 + 0.3 * math.sin(anim * 1.5 + seed)
+            particle_color = (
+                dust_color[0], dust_color[1], dust_color[2], alpha)
+
+            gb_dust.quad_col(
+                (dx - size, dy - size, dz),
+                (dx + size, dy - size, dz),
+                (dx + size, dy + size, dz),
+                (dx - size, dy + size, dz),
+                particle_color
+            )
 
         # --- Spikes ---
         spikes = getattr(self.core, 'spikes', None) or []
@@ -1480,19 +1767,32 @@ class OpenGLRenderer:
         wall_h = float(self.core.wall_height)
         for gate in self.core.gates.values():
             for (r, c) in gate.cells:
-                gb_bg.gate_bars_col(c+0.5, wall_h/2.0, r+0.5,
-                                    wall_h, gate.y_offset, gate.id == 'jail')
+                if self._tex_gate:
+                    gb_gate_tex.gate_bars_tex(
+                        c+0.5, wall_h/2.0, r+0.5, wall_h, gate.y_offset, gate.id == 'jail')
+                else:
+                    gb_bg.gate_bars_col(
+                        c+0.5, wall_h/2.0, r+0.5, wall_h, gate.y_offset, gate.id == 'jail')
 
-        # --- Moving platforms ---
+        # --- Moving platform ---
         for plat in getattr(self.core, 'platforms', []):
             r, c = plat.cell
-            gb_bg.platform_col(c+0.5, plat.y_offset, r+0.5)
+            if self._tex_platform:
+                gb_platform_tex.platform_tex(c+0.5, plat.y_offset, r+0.5)
+            else:
+                gb_bg.platform_col(c+0.5, plat.y_offset, r+0.5)
 
         # --- Jail table + book ---
         if getattr(self.core, 'jail_book_cell', None):
             jr, jc = self.core.jail_book_cell
+            cx, cz = jc+0.5, jr+0.5
             pulse = 0.16+0.06*math.sin(anim*2.2)
-            gb_bg.table_book_col(jc+0.5, 0.0, jr+0.5, pulse)
+            radial_sprite_glow_col(cx, 0.6, cz, 0.9, (1.0, 0.9, 0.4), 0.5)
+            if self._tex_platform:
+                gb_table_tex.table_tex_book_col(cx, 0.0, cz, pulse)
+            else:
+                gb_bg.table_book_col(cx, 0.0, cz, pulse)
+            gb_bg.table_book_col_glow(cx, 0.0, cz, pulse)
 
         # --- Checkpoint arrow ---
         arrow = getattr(self.core, 'checkpoint_arrow', None)
@@ -1628,7 +1928,7 @@ class OpenGLRenderer:
                 arr.extend([x0, y0, z0, u0, v0, x1, y1, z1, u1, v1, x2, y2, z2, u2, v2,
                             x0, y0, z0, u0, v0, x2, y2, z2, u2, v2, x3, y3, z3, u3, v3])
 
-        # --- Flush draw calls (same order as pyside6/renderer_opengl.py) ---
+        # --- Flush draw calls ---
         self._draw_dynamic_col(gb_bg.data, vp)
 
         if gb_sign_tex:
@@ -1646,6 +1946,27 @@ class OpenGLRenderer:
             glEnable(GL_DEPTH_TEST)
             self._set_fog_uniforms(self._col_prog)
 
+        # Render coins
+        if self._tex_coin and gb_coin_tex.data:
+            glUseProgram(self._tex_prog)
+            self._draw_dynamic_tex(gb_coin_tex.data, vp, self._tex_coin)
+
+        # Render textured gate bars
+        if self._tex_gate and gb_gate_tex.data:
+            glUseProgram(self._tex_prog)
+            self._draw_dynamic_tex(gb_gate_tex.data, vp, self._tex_gate)
+
+        # Render textured platform
+        if self._tex_platform and gb_platform_tex.data:
+            glUseProgram(self._tex_prog)
+            self._draw_dynamic_tex(gb_platform_tex.data,
+                                   vp, self._tex_platform)
+
+        # Render textured jail table
+        if self._tex_platform and gb_table_tex.data:
+            glUseProgram(self._tex_prog)
+            self._draw_dynamic_tex(gb_table_tex.data, vp, self._tex_platform)
+
         if gb_ghost.data:
             glDepthMask(False)
             self._draw_dynamic_col(gb_ghost.data, vp)
@@ -1654,17 +1975,21 @@ class OpenGLRenderer:
         if gb_glow.data:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE)
             glDepthMask(False)
-            self._draw_dynamic_col(gb_glow.data, vp)
+            self._draw_dynamic_col_with_flicker(gb_glow.data, vp)
             glDepthMask(True)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        if self._tex_coin and gb_coin_tex.data:
-            glUseProgram(self._tex_prog)
-            self._draw_dynamic_tex(gb_coin_tex.data, vp, self._tex_coin)
+        # Render dust particles
+        if gb_dust.data:
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            glDepthMask(False)
+            glDisable(GL_DEPTH_TEST)
+            self._draw_dynamic_col(gb_dust.data, vp)
+            glEnable(GL_DEPTH_TEST)
+            glDepthMask(True)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-    # ------------------------------------------------------------------
     # Cleanup
-    # ------------------------------------------------------------------
 
     def cleanup(self) -> None:
         _delete_vao(self._wall_vao)

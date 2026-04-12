@@ -1,4 +1,3 @@
-"""FPS camera controller for Kivy (no mouse warping)."""
 from .kivy_assembly3d import KivyAssembly3DMinigame
 from .kivy_silhouette import KivySilhouetteMinigame
 from .kivy_renderer import KivyRenderer
@@ -10,7 +9,7 @@ from kivy.uix.label import Label
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.widget import Widget
-from kivy.graphics import Callback, Color, Ellipse, Rectangle, Line, Triangle
+from kivy.graphics import Callback, Canvas, Color, Ellipse, Rectangle, Line, Triangle
 from kivy.core.audio import SoundLoader
 from kivy.core.window import Window
 from kivy.clock import Clock
@@ -29,24 +28,15 @@ Config.set('input', 'mouse', 'mouse,disable_multitouch')
 FPS_CAMERA_SENSITIVITY = 0.002
 
 
-# colours
-# QColor(18,18,22,235)   panel bg
 _PANEL_BG = (18/255, 18/255, 22/255, 235/255)
-# QColor(220,220,220)    panel border / button border
 _BORDER = (220/255, 220/255, 220/255, 1)
-# QColor(32,32,40,235)   button bg
 _BTN_BG = (32/255, 32/255, 40/255, 235/255)
-# QColor(255,255,255)    button text
 _BTN_FG = (1, 1, 1, 1)
-# QColor(255,220,110)    "PAUSED" yellow
 _PAUSED_COL = (1, 220/255, 110/255, 1)
-# QColor(0,0,0,160)      overlay
 _OVERLAY = (0, 0, 0, 160/255)
-# QColor(0,0,0,255)      level-select full black
 _BLACK = (0, 0, 0, 1)
 
 
-# helper: create a styled button
 def _make_btn(text, on_press, **kw):
     b = Button(
         text=text,
@@ -57,7 +47,6 @@ def _make_btn(text, on_press, **kw):
         **kw,
     )
     b.bind(on_press=lambda *_: on_press())
-    # Draw border manually (Kivy buttons have no border by default)
 
     def _draw_border(widget, *_):
         widget.canvas.after.clear()
@@ -67,8 +56,6 @@ def _make_btn(text, on_press, **kw):
     b.bind(pos=_draw_border, size=_draw_border)
     return b
 
-
-# GL scene widget
 
 class _GameGLWidget(Widget):
     def __init__(self, renderer, **kwargs):
@@ -80,16 +67,12 @@ class _GameGLWidget(Widget):
         with self.canvas:
             Callback(self._draw_scene)
 
-        # Add explicit canvas update to match wxPython's Refresh() behavior
         Clock.schedule_interval(lambda dt: self.canvas.ask_update(), 1/60.)
 
     def _measure_actual_fps(self, instr):
-        """Measure actual frame rendering time for FPS calculation."""
         if not hasattr(self, '_parent_widget'):
             return
 
-        # Record startup time on first frame (only once _parent_widget and performance_monitor are available)
-        # Check monitor's state instead of widget flag to handle level restarts correctly
         if hasattr(self, 'performance_monitor') and self.performance_monitor:
             if self.performance_monitor.startup_time_ms is None:
                 startup_ms = (time.perf_counter() -
@@ -106,7 +89,6 @@ class _GameGLWidget(Widget):
             if hasattr(self, 'performance_monitor') and self.performance_monitor:
                 self.performance_monitor.record_frame()
         else:
-            # Still record to display_fps_history for HUD (but not to metrics)
             if hasattr(self, 'performance_monitor') and self.performance_monitor:
                 self.performance_monitor.record_frame(is_pause_frame=True)
 
@@ -120,7 +102,6 @@ class _GameGLWidget(Widget):
                                           int(Window.height))
                 except Exception:
                     pass
-                # FPS recording moved to canvas callback
             self.renderer.render(max(1, int(Window.width)),
                                  max(1, int(Window.height)))
         except Exception:
@@ -230,7 +211,6 @@ class _KivyAudioEngine:
 
 
 class _ClosingAnimWidget(Widget):
-    # Screen closing animation - PySide6 parity: horizontal bars from top/bottom.
     def __init__(self, gw, **kwargs):
         super().__init__(**kwargs)
         self._gw = gw
@@ -253,17 +233,13 @@ class _ClosingAnimWidget(Widget):
 
         with self.canvas:
             if prog < 1.0:
-                # Draw black bars from top and bottom (PySide6 style)
                 bar_h = h * prog * 0.5
                 Color(0, 0, 0, 1)
                 Rectangle(pos=(0, h - bar_h), size=(w, bar_h))  # Top bar
                 Rectangle(pos=(0, 0), size=(w, bar_h))  # Bottom bar
             else:
-                # Full black screen
                 Color(0, 0, 0, 1)
                 Rectangle(pos=(0, 0), size=(w, h))
-
-# Cam icon widget (bottom-right, loads assets/cam.jpg)
 
 
 class _CamIconWidget(Button):
@@ -303,19 +279,16 @@ class _CamIconWidget(Button):
             else:
                 Color(120/255, 120/255, 120/255, 1)
                 Rectangle(pos=(x, y), size=(sz, sz))
-        # Draw cooldown text as a child Label drawn at correct position
         self._draw_cd_overlay()
 
     def _draw_cd_overlay(self):
         self.canvas.after.clear()
         if not self._cd_text:
             return
-        # Draw a dark overlay + centered label over the icon
         x, y, sz = self.x, self.y, self.width
         with self.canvas.after:
             Color(0, 0, 0, 0.6)
             Rectangle(pos=(x, y), size=(sz, sz))
-        # Use a temporary Label to get the texture and blit it
         from kivy.core.text import Label as CoreLabel
         lbl = CoreLabel(text=self._cd_text, font_size=14,
                         color=(1, 210/255, 90/255, 1))
@@ -333,88 +306,81 @@ class _CamIconWidget(Button):
         if now < self._cooldown_until:
             rem = int(math.ceil(self._cooldown_until - now))
             self._cd_text = f'{rem}s'
-        else:
-            self._cd_text = ''
-        self._redraw()
 
-
-# Minimap widget
-
-class _MinimapWidget(Widget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.core = None
         self._until = 0.0
-        self._last_until = 0.0
-        self._cached_layout = None
-        self._cached_size = None
-        self._needs_redraw = True
-        self._last_player_pos = None
-        self._last_ghost_positions = {}
-        self._last_coin_states = {}
-        self._update_counter = 0  # Throttle updates
+
+        self._static_layout_id = None
+        self._static_size = None
+        self._static_cell = 0
+        self._static_ox = 0
+        self._static_oy = 0
+        self._static_mw = 0
+        self._static_mh = 0
+        self._static_rows = 0
+        self._static_cols = 0
+
+        self._static_canvas = None
+        self._dynamic_canvas = None  # Will hold entities
 
     def on_touch_down(self, touch):
         return False if self.opacity == 0 else super().on_touch_down(touch)
 
-    def redraw(self):
+    def _ensure_static_layer(self):
         if not self.core:
-            return
+            return False
 
-        # Check if we need to redraw (layout or size changed)
-        current_layout = id(self.core.layout)
-        current_size = (Window.width, Window.height)
-
-        # Check for real-time changes
-        player_pos = (int(self.core.player.x), int(self.core.player.z))
-        ghost_positions = {g.id: (int(g.x), int(g.z))
-                           for g in self.core.ghosts.values()}
-        coin_states = {cell: coin.taken for cell,
-                       coin in self.core.coins.items()}
-
-        needs_redraw = (
-            self._cached_layout != current_layout or
-            self._cached_size != current_size or
-            self._needs_redraw or
-            self._last_player_pos != player_pos or
-            self._last_ghost_positions != ghost_positions or
-            self._last_coin_states != coin_states
-        )
-
-        if not needs_redraw:
-            return  # Skip redraw if nothing changed
-
-        self._cached_layout = current_layout
-        self._cached_size = current_size
-        self._needs_redraw = False
-        self._last_player_pos = player_pos
-        self._last_ghost_positions = ghost_positions
-        self._last_coin_states = coin_states
-
-        # Batch all drawing operations
-        self.canvas.clear()
         layout = self.core.layout
         rows = len(layout)
         cols = len(layout[0]) if rows else 0
+        if rows == 0 or cols == 0:
+            return False
+
         W, H = Window.width, Window.height
         cell = max(1, min(int(W * 0.85 / max(cols, 1)),
                           int((H - 40) / max(rows, 1))))
         mw, mh = cols*cell, rows*cell
         ox = (W - mw)//2
         oy = 20 + ((H - 40) - mh)//2
+
+        current_layout_id = id(layout)
+        current_size = (W, H)
+
+        needs_rebuild = (
+            self._static_layout_id != current_layout_id or
+            self._static_size != current_size or
+            self._static_canvas is None
+        )
+
+        if not needs_rebuild:
+            return True  # Static layer is still valid
+
+        self._static_layout_id = current_layout_id
+        self._static_size = current_size
+        self._static_cell = cell
+        self._static_ox = ox
+        self._static_oy = oy
+        self._static_mw = mw
+        self._static_mh = mh
+        self._static_rows = rows
+        self._static_cols = cols
+
+        if self._static_canvas:
+            self.canvas.remove(self._static_canvas)
+        self._static_canvas = Canvas()
+
         walls = self.core.walls
         floors = self.core.floors
 
-        with self.canvas:
-            # Background
+        with self._static_canvas:
             Color(10/255, 10/255, 12/255, 210/255)
             Rectangle(pos=(ox, oy), size=(mw, mh))
 
-            # Border
             Color(230/255, 230/255, 230/255, 1)
             Line(rectangle=(ox, oy, mw, mh), width=1.5)
 
-            # Batch render all cells by type for better performance
             wall_positions = []
             floor_positions = []
             other_positions = []
@@ -432,28 +398,44 @@ class _MinimapWidget(Widget):
                     else:
                         other_positions.append(pos_size)
 
-            # Render all walls in one batch
             if wall_positions:
                 Color(45/255, 45/255, 55/255, 1)
                 for pos_size in wall_positions:
                     Rectangle(pos=(pos_size[0], pos_size[1]), size=(
                         pos_size[2], pos_size[3]))
 
-            # Render all floors in one batch
             if floor_positions:
                 Color(125/255, 125/255, 135/255, 1)
                 for pos_size in floor_positions:
                     Rectangle(pos=(pos_size[0], pos_size[1]), size=(
                         pos_size[2], pos_size[3]))
 
-            # Render others in one batch
             if other_positions:
                 Color(15/255, 15/255, 18/255, 1)
                 for pos_size in other_positions:
                     Rectangle(pos=(pos_size[0], pos_size[1]), size=(
                         pos_size[2], pos_size[3]))
 
-            # Coins
+        self.canvas.add(self._static_canvas)
+        return True
+
+    def redraw(self):
+        if not self.core:
+            return
+
+        if not self._ensure_static_layer():
+            return
+
+        ox, oy = self._static_ox, self._static_oy
+        cell = self._static_cell
+        rows = self._static_rows
+        mw, mh = self._static_mw, self._static_mh
+
+        if self._dynamic_canvas:
+            self.canvas.remove(self._dynamic_canvas)
+        self._dynamic_canvas = Canvas()
+
+        with self._dynamic_canvas:
             csz = max(6, int(cell*0.35))
             Color(255/255, 215/255, 0, 1)
             for coin in self.core.coins.values():
@@ -463,42 +445,32 @@ class _MinimapWidget(Widget):
                 Ellipse(pos=(ox+cc*cell+cell//2-csz//2,
                              oy+(rows-1-cr)*cell+cell//2-csz//2), size=(csz, csz))
 
-            # Ghosts
             GCOLS = {1: (1, .314, .235, 1), 2: (.314, 1, .549, 1), 3: (.431, .667, 1, 1),
                      4: (1, .863, .314, 1), 5: (1, .353, 1, 1)}
             gsz = max(10, int(cell*0.6))
             for g in self.core.ghosts.values():
+                s = float(getattr(g, 'size_scale', 1.0) or 1.0)
+                gsz_scaled = int(max(8, gsz * s))
                 Color(*GCOLS.get(g.id, (1, .471, .118, 1)))
-                Ellipse(pos=(ox+int(g.x*cell)+cell//2-gsz//2,
-                             oy+(rows-1-int(g.z))*cell+cell//2-gsz//2), size=(gsz, gsz))
+                Ellipse(pos=(ox+int(g.x*cell)+cell//2-gsz_scaled//2,
+                             oy+(rows-1-int(g.z))*cell+cell//2-gsz_scaled//2), size=(gsz_scaled, gsz_scaled))
 
-                # Add eyes to ghosts (like PySide6)
-                eye_size = max(2, int(gsz * 0.15))
-                eye_ox = gsz * 0.25
-                eye_oy = gsz * 0.1
+                eye_size = max(2, int(gsz_scaled * 0.15))
+                eye_ox = gsz_scaled * 0.25
+                eye_oy = gsz_scaled * 0.1
                 gx = ox+int(g.x*cell)+cell//2
                 gy = oy+(rows-1-int(g.z))*cell+cell//2
 
                 for ex in (gx - eye_ox, gx + eye_ox):
                     ey = gy - eye_oy
-                    # Black outline
-                    Color(0, 0, 0, 1)
+                    Color(1, 1, 1, 1)
                     Ellipse(pos=(ex - eye_size//2, ey - eye_size//2),
                             size=(eye_size, eye_size))
-
-                    # White eye
-                    white_sz = max(1, int(eye_size * 0.85))
-                    Color(1, 1, 1, 1)
-                    Ellipse(pos=(ex - white_sz//2, ey - white_sz//2),
-                            size=(white_sz, white_sz))
-
-                    # Black pupil
                     pupil = max(1, int(eye_size * 0.5))
                     Color(0, 0, 0, 1)
                     Ellipse(pos=(ex - pupil//2, ey - pupil//2),
                             size=(pupil, pupil))
 
-            # Player: filled green diamond + white dot
             pr = int(self.core.player.z)
             pc = int(self.core.player.x)
             px = ox + pc*cell + cell//2
@@ -506,29 +478,22 @@ class _MinimapWidget(Widget):
             psz = max(12, int(cell*0.7))
             half = psz//2
 
-            # Filled diamond using two triangles
             Color(50/255, 255/255, 50/255, 1)
             Triangle(points=[px, py-half, px+half, py, px, py+half])
             Triangle(points=[px, py-half, px, py+half, px-half, py])
 
-            # White centre dot
             dot = max(4, psz//3)
             Color(1, 1, 1, 1)
             Ellipse(pos=(px-dot//2, py-dot//2), size=(dot, dot))
 
-            # Directional pointer (like wxPython)
             yaw = float(getattr(self.core.player, 'yaw', 0.0))
-            # Note: Kivy minimap has Y flipped, so we need to adjust direction
             fx = math.sin(yaw)
             fz = -math.cos(yaw)  # Negative because Y is flipped in minimap
             line_len = max(6, int(cell * 0.75))
-
-            # Facing line
             Color(255/255, 220/255, 110/255, 1)
             Line(points=[px, py, px+int(fx*line_len),
                  py+int(fz*line_len)], width=2)
 
-            # Countdown label (PySide6 parity)
             rem = max(0.0, float(self._until) - time.perf_counter())
             ctext = f'MAP: {int(rem + 0.5)}s'
             from kivy.core.text import Label as CoreLabel
@@ -544,21 +509,18 @@ class _MinimapWidget(Widget):
             Color(1, 1, 1, 1)
             Rectangle(pos=(tx, ty), size=(tw, th), texture=tex)
 
+        self.canvas.add(self._dynamic_canvas)
+
     def force_redraw(self):
-        # Force a redraw on next update
-        self._needs_redraw = True
+        self._static_layout_id = None
 
-
-# Pause panel
 
 class _PausePanel(FloatLayout):
-    # Pause panel — 560×610 centred, exact PySide6 styling, BoxLayout buttons.
 
     def __init__(self, gw, **kwargs):
         super().__init__(**kwargs)
         self._gw = gw
 
-        # Full-screen semi-transparent overlay
         with self.canvas.before:
             Color(*_OVERLAY)
             self._bg = Rectangle(size=self.size, pos=self.pos)
@@ -568,7 +530,6 @@ class _PausePanel(FloatLayout):
             pos=lambda w, v: setattr(self._bg, 'pos', v),
         )
 
-        # Panel — BoxLayout does all the sizing
         panel = BoxLayout(
             orientation='vertical',
             spacing=16,
@@ -588,7 +549,6 @@ class _PausePanel(FloatLayout):
                                self._draw_panel_border(w)),
         )
 
-        # Title
         panel.add_widget(Label(
             text='PAUSED', bold=True, font_size='22sp',
             color=_PAUSED_COL,
@@ -596,7 +556,6 @@ class _PausePanel(FloatLayout):
             halign='center', valign='middle',
         ))
 
-        # Stats
         self._stats = Label(
             text='', font_size='11sp',
             color=(235/255, 235/255, 235/255, 1),
@@ -606,7 +565,6 @@ class _PausePanel(FloatLayout):
         self._stats.bind(size=self._stats.setter('text_size'))
         panel.add_widget(self._stats)
 
-        # Buttons (all same colour — QColor(32,32,40,235))
         perf_data = [
             ['Average FPS:', 'N/A'],
             ['Minimum FPS:', 'N/A'],
@@ -650,10 +608,7 @@ class _PausePanel(FloatLayout):
         )
 
 
-# Level-select panel
-
 class _LevelSelectPanel(FloatLayout):
-    # Level selection — full-screen black overlay with centred BoxLayout stack.
 
     def __init__(self, gw, **kwargs):
         super().__init__(**kwargs)
@@ -661,7 +616,6 @@ class _LevelSelectPanel(FloatLayout):
         self.return_to_pause = False
         self._gw = gw
 
-        # Full black background
         with self.canvas.before:
             Color(*_BLACK)
             self._bg = Rectangle(size=self.size, pos=self.pos)
@@ -671,7 +625,6 @@ class _LevelSelectPanel(FloatLayout):
             pos=lambda w, v: setattr(self._bg, 'pos', v),
         )
 
-        # Centred column (BoxLayout does all the layout work)
         col = BoxLayout(
             orientation='vertical',
             spacing=22,
@@ -682,7 +635,6 @@ class _LevelSelectPanel(FloatLayout):
             pos_hint={'center_x': .5, 'center_y': .52},
         )
 
-        # Title
         self._title_lbl = Label(
             text='SELECT LEVEL', bold=True, font_size='28sp',
             color=(240/255, 240/255, 240/255, 1),
@@ -692,7 +644,6 @@ class _LevelSelectPanel(FloatLayout):
         self._title_lbl.bind(size=self._title_lbl.setter('text_size'))
         col.add_widget(self._title_lbl)
 
-        # Subtitle
         self._sub_lbl = Label(
             text=('Level 2 is locked until you complete Level 1.\n'
                   'Entering a level always starts fresh.'),
@@ -704,7 +655,6 @@ class _LevelSelectPanel(FloatLayout):
         self._sub_lbl.bind(size=self._sub_lbl.setter('text_size'))
         col.add_widget(self._sub_lbl)
 
-        # Level 1 button
         self._l1_btn = Button(
             text='Level 1', font_size='18sp', bold=True,
             background_normal='',
@@ -717,7 +667,6 @@ class _LevelSelectPanel(FloatLayout):
                           size=self._draw_btn_border)
         col.add_widget(self._l1_btn)
 
-        # Level 2 button
         self._l2_btn = Button(
             text='Level 2 (Locked)', font_size='18sp', bold=True,
             background_normal='',
@@ -733,7 +682,6 @@ class _LevelSelectPanel(FloatLayout):
 
         self.add_widget(col)
 
-        # Close ✕ button (top-right corner of window, hidden until allow_close)
         self._close_btn = Button(
             text='',
             background_normal='', background_color=(0, 0, 0, 0),
@@ -745,8 +693,6 @@ class _LevelSelectPanel(FloatLayout):
         self._close_btn.bind(pos=self._draw_close_btn,
                              size=self._draw_close_btn)
         self.add_widget(self._close_btn)
-
-    # border helpers
 
     def _draw_btn_border(self, btn, *_):
         btn.canvas.after.clear()
@@ -766,12 +712,8 @@ class _LevelSelectPanel(FloatLayout):
             Line(points=[x + 9, y + 9, x + s - 9, y + s - 9], width=1.5)
             Line(points=[x + s - 9, y + 9, x + 9, y + s - 9], width=1.5)
 
-    # touch guard
-
     def on_touch_down(self, touch):
         return False if self.opacity == 0 else super().on_touch_down(touch)
-
-    # public API
 
     def set_unlocked(self, unlocked):
         lvl2 = 'level2' in set(unlocked or {'level1'})
@@ -784,10 +726,7 @@ class _LevelSelectPanel(FloatLayout):
         self._draw_close_btn(self._close_btn)
 
 
-# Tutorial modal
-
 class _TutorialPanel(FloatLayout):
-    # Tutorial panel — dark overlay + centred BoxLayout panel with X button.
 
     def __init__(self, gw, **kwargs):
         super().__init__(**kwargs)
@@ -802,17 +741,18 @@ class _TutorialPanel(FloatLayout):
             pos=lambda w, v: setattr(self._bg, 'pos', v),
         )
 
-        # Outer stack: positions the panel in the centre of the screen
-        # We use a single BoxLayout(vertical) that contains:
-        #   row1: title + X button (side by side)
-        #   row2: body text (expands)
         panel = BoxLayout(
             orientation='vertical',
-            spacing=12,
+            spacing=24,
             padding=24,
-            size_hint=(0.74, 0.56),
+            size_hint=(None, None),
             pos_hint={'center_x': .5, 'center_y': .5},
         )
+
+        def update_panel_size(instance, value):
+            panel.width = min(840, value[0] * 0.74)
+            panel.height = min(440, value[1] * 0.56)
+        self.bind(size=update_panel_size)
         with panel.canvas.before:
             Color(18/255, 18/255, 22/255, 245/255)
             self._pbg = Rectangle(pos=panel.pos, size=panel.size)
@@ -823,14 +763,13 @@ class _TutorialPanel(FloatLayout):
                                self._draw_panel_border(w)),
         )
 
-        # Title row: title label + X button
         title_row = BoxLayout(
             orientation='horizontal',
             size_hint=(1, None), height=36,
             spacing=8,
         )
         self._title_lbl = Label(
-            text='', bold=True, font_size='18sp',
+            text='', bold=True, font_name='Arial', font_size='22sp',
             color=(235/255, 235/255, 235/255, 1),
             halign='left', valign='middle',
         )
@@ -847,7 +786,6 @@ class _TutorialPanel(FloatLayout):
         title_row.add_widget(close_btn)
         panel.add_widget(title_row)
 
-        # Separator line
         sep = Widget(size_hint=(1, None), height=1)
         with sep.canvas:
             Color(235/255, 235/255, 235/255, 0.4)
@@ -856,9 +794,8 @@ class _TutorialPanel(FloatLayout):
                  size=lambda w, v: setattr(self._sep_line, 'size', v))
         panel.add_widget(sep)
 
-        # Body text
         self._body_lbl = Label(
-            text='', font_size='14sp',
+            text='', font_name='Arial', font_size='17sp',
             color=(220/255, 220/255, 220/255, 1),
             halign='left', valign='top',
         )
@@ -880,8 +817,6 @@ class _TutorialPanel(FloatLayout):
         self._title_lbl.text = title
         self._body_lbl.text = body
 
-
-# End screen
 
 class _EndPanel(FloatLayout):
     def __init__(self, **kwargs):
@@ -939,7 +874,6 @@ class _StatsScreenPanel(FloatLayout):
         if not lines:
             return
 
-        # wxPython logic: usable_h = h - 80; ideal_line_h=26; clamp line_h to 14..26
         try:
             h = float(self.height or 1.0)
             usable_h = max(1.0, h - 80.0)
@@ -953,7 +887,6 @@ class _StatsScreenPanel(FloatLayout):
             fs_body = 12
             fs_header = 13
 
-        # Layout positions - compute y from top, then flip for Kivy coordinates
         try:
             w = float(self.width or 1.0)
             h = float(self.height or 1.0)
@@ -964,7 +897,6 @@ class _StatsScreenPanel(FloatLayout):
             h = float(self.height or 1.0)
             start_y_wx = 36.0
 
-        # Colors
         if self._end_mode:
             col_sep = (100/255, 100/255, 100/255, 200/255)
             col_hdr = (255/255, 210/255, 60/255, 1)
@@ -994,7 +926,6 @@ class _StatsScreenPanel(FloatLayout):
                 color = col_txt
                 fs = fs_body
                 bold = False
-            # Convert wx y-down into Kivy y-up.
             y_wx = float(start_y_wx + i * float(line_h))
             y_kivy = float(h - y_wx - float(line_h))
             lbl = Label(text=str(ln), font_size=f'{fs}sp', bold=bold,
@@ -1012,7 +943,6 @@ class _StatsScreenPanel(FloatLayout):
         self.add_widget(hint)
 
     def on_touch_down(self, touch):
-        # Swallow all touches while visible.
         return True if self.opacity > 0 else super().on_touch_down(touch)
 
 
@@ -1023,7 +953,7 @@ class _TheEndPanel(FloatLayout):
             Color(0, 0, 0, 1)
             self._bg = Rectangle(size=self.size, pos=self.pos)
         self.bind(size=lambda w, v: (setattr(self._bg, 'size', v), setattr(self._bg, 'pos', w.pos)),
-                  pos=lambda w, v: setattr(self._bg, 'pos', w.pos))
+                  pos=lambda w, v: setattr(self._bg, 'pos', v))
         self._lbl = Label(text='THE END', font_size='68sp', bold=True,
                           size_hint=(1, 1), halign='center', valign='middle',
                           color=(1, 1, 1, 1))
@@ -1031,15 +961,12 @@ class _TheEndPanel(FloatLayout):
         self.add_widget(self._lbl)
 
 
-# HUD overlay (objective bar + lore + sector popup + all panels)
-
 class _HUDOverlay(FloatLayout):
     def __init__(self, gw, **kwargs):
         super().__init__(**kwargs)
         self._gw = gw
         self.core = None
 
-        # Objective bar: 320×56, black bg + border, two text rows
         self._bonus_until = 0.0
         self._obj_bar = BoxLayout(
             orientation='vertical',
@@ -1062,7 +989,6 @@ class _HUDOverlay(FloatLayout):
                 Line(rectangle=(w.x, w.y, w.width, w.height), width=1)
         self._obj_bar.bind(pos=_upd_obj_bar_bg, size=_upd_obj_bar_bg)
 
-        # Row 1: time + bonus
         row1 = BoxLayout(orientation='horizontal',
                          size_hint=(1, None), height=26)
         self._time_lbl = Label(
@@ -1072,9 +998,9 @@ class _HUDOverlay(FloatLayout):
         )
         self._time_lbl.bind(size=self._time_lbl.setter('text_size'))
         self._bonus_lbl = Label(
-            text='', font_size='14sp', markup=True,
+            text='', font_size='22sp', markup=True, bold=True,
             color=(1, 220/255, 60/255, 1),
-            size_hint_x=None, width=90,
+            size_hint_x=None, width=120,
             halign='left', valign='middle',
         )
         self._bonus_lbl.bind(size=self._bonus_lbl.setter('text_size'))
@@ -1082,7 +1008,6 @@ class _HUDOverlay(FloatLayout):
         row1.add_widget(self._bonus_lbl)
         self._obj_bar.add_widget(row1)
 
-        # Row 2: coins + keys
         self._coins_lbl = Label(
             text='Coins: 0/0   Keys: 0/0', font_size='11sp',
             color=(240/255, 240/255, 240/255, 1),
@@ -1093,19 +1018,32 @@ class _HUDOverlay(FloatLayout):
         self._obj_bar.add_widget(self._coins_lbl)
         self.add_widget(self._obj_bar)
 
-        # Minimap cam icon (bottom-right)
         self._map_btn = _CamIconWidget(
             size_hint=(None, None), size=(54, 54),
-            pos_hint={'right': 1.0, 'y': 0.0},
         )
+        Clock.schedule_once(self._position_map_icon, 0)
         self._map_btn.bind(on_press=lambda *_: gw._toggle_minimap())
         self.add_widget(self._map_btn)
 
-        # Minimap overlay
         self._minimap = _MinimapWidget(size_hint=(1, 1), opacity=0)
         self.add_widget(self._minimap)
 
-        # Lore text
+        self._lore_outlines = []
+        outline_offsets = [(-2, 0), (2, 0), (0, -2), (0, 2),
+                           (-2, -2), (2, 2), (-2, 2), (2, -2)]
+        for ox, oy in outline_offsets:
+            outline_lbl = Label(
+                text='', font_size='18sp', markup=True,
+                size_hint=(.7, None), height=40,
+                pos_hint={'center_x': .5, 'center_y': .44},
+                halign='center', valign='middle', opacity=0,
+                color=(0, 0, 0, 1),
+            )
+            outline_lbl.pos_hint = {}
+            outline_lbl.bind(size=outline_lbl.setter('text_size'))
+            self._lore_outlines.append((outline_lbl, ox, oy))
+            self.add_widget(outline_lbl)
+
         self._lore_lbl = Label(
             text='', font_size='18sp', markup=True,
             size_hint=(.7, None), height=40,
@@ -1119,7 +1057,6 @@ class _HUDOverlay(FloatLayout):
         self._lore_start = 0.0
         self._lore_end = 0.0
 
-        # Flash effect
         self._flash_until: float = 0.0
         self._flash_color: Tuple[float, float, float, float] = (
             20/255, 20/255, 25/255, 180/255)
@@ -1131,8 +1068,6 @@ class _HUDOverlay(FloatLayout):
                                 size=lambda w, v: setattr(self._flash_rect, 'size', v))
         self.add_widget(self._flash_widget)
 
-        # Sector popup
-        # Background rectangle (like PySide6/wxPython) - tight fit around text
         self._sector_bg = Widget(
             size_hint=(None, None), size=(80, 36),
             pos_hint={'center_x': .5, 'y': .03},
@@ -1155,8 +1090,6 @@ class _HUDOverlay(FloatLayout):
         self._sector_lbl.bind(size=self._sector_lbl.setter('text_size'))
         self.add_widget(self._sector_lbl)
 
-        # Panels (pause/tutorial/end)
-        # Note: _levels and _the_end are now at top level (above closing animation)
         self._pause = _PausePanel(gw, size_hint=(1, 1), opacity=0)
         self._tut = _TutorialPanel(gw, size_hint=(1, 1), opacity=0)
         self._end = _EndPanel(size_hint=(1, 1), opacity=0)
@@ -1166,7 +1099,6 @@ class _HUDOverlay(FloatLayout):
 
         Clock.schedule_interval(self._tick, 1/30.)
 
-    # tick
     def _tick(self, dt):
         if not self.core:
             return
@@ -1178,10 +1110,8 @@ class _HUDOverlay(FloatLayout):
         self._upd_flash()
 
     def _upd_flash(self):
-        # Update screen flash effect.
         now = time.perf_counter()
         if now < self._flash_until:
-            # Calculate fade out
             remaining = self._flash_until - now
             total_flash = 0.3  # 300ms default
             fade = max(0.0, min(1.0, remaining / total_flash))
@@ -1190,11 +1120,9 @@ class _HUDOverlay(FloatLayout):
             self._flash_widget.opacity = 0.0
 
     def trigger_flash(self, duration_ms: float = 300, color: Optional[Tuple[float, float, float, float]] = None) -> None:
-        # Trigger a screen flash effect.
         self._flash_until = time.perf_counter() + (duration_ms / 1000.0)
         if color:
             self._flash_color = color
-            # Update the canvas color
             self._flash_widget.canvas.before.clear()
             with self._flash_widget.canvas.before:
                 Color(*color)
@@ -1220,18 +1148,32 @@ class _HUDOverlay(FloatLayout):
             self._lore_end = now + 2.8
         if not self._lore_cur:
             self._lore_lbl.opacity = 0
+            for outline_lbl, _, _ in self._lore_outlines:
+                outline_lbl.opacity = 0
             return
         now = time.perf_counter()
         if now >= self._lore_end:
             self._lore_cur = ''
             self._lore_lbl.opacity = 0
+            for outline_lbl, _, _ in self._lore_outlines:
+                outline_lbl.opacity = 0
             return
         dur = max(0.01, self._lore_end - self._lore_start)
         t = (now - self._lore_start) / dur
         fade = 0.18
         a = t/fade if t < fade else (1-t)/fade if t > 1-fade else 1.0
-        self._lore_lbl.opacity = max(0, min(1, a))
+        opacity = max(0, min(1, a))
+
+        main_x = self.center_x - self._lore_lbl.width // 2
+        main_y = self.height * 0.44 - self._lore_lbl.height // 2
+
+        self._lore_lbl.opacity = opacity
         self._lore_lbl.text = f'[color=ffffff]{self._lore_cur}[/color]'
+
+        for outline_lbl, ox, oy in self._lore_outlines:
+            outline_lbl.opacity = opacity
+            outline_lbl.text = f'[color=000000]{self._lore_cur}[/color]'
+            outline_lbl.pos = (main_x + ox, main_y + oy)
 
     def _upd_sector(self):
         pt = float(getattr(self.core, '_sector_popup_timer', 0) or 0)
@@ -1255,11 +1197,7 @@ class _HUDOverlay(FloatLayout):
         if active:
             self._minimap.opacity = 1.0
             self._minimap.core = self.core
-            # Only redraw every 5 frames (12.5 FPS) to reduce lag
-            self._minimap._update_counter += 1
-            if self._minimap._update_counter >= 5:
-                self._minimap.redraw()
-                self._minimap._update_counter = 0
+            self._minimap.redraw()
         else:
             self._minimap.opacity = 0.0
 
@@ -1269,13 +1207,9 @@ class _HUDOverlay(FloatLayout):
             getattr(gw, '_stats_visible', False)) if gw else False
 
         self._stats.opacity = 1.0 if stats_visible else 0.0
-        # _the_end is now managed at top level
 
-        # wxPython parity: never show the legacy end panel. Level end uses
-        # closing animation -> stats overlay -> THE END.
         self._end.opacity = 0.0
 
-    # public API
     def enqueue_lore_lines(self, lines):
         for ln in (lines or []):
             s = str(ln or '').strip()
@@ -1344,6 +1278,17 @@ class _HUDOverlay(FloatLayout):
         self._bonus_lbl.text = f'[b][color=ffdc3c]{text}[/color][/b]'
         self._bonus_until = time.perf_counter() + dur
 
+    def _position_map_icon(self, *_):
+        margin = 16
+        icon_size = 54
+        self._map_btn.pos = (Window.width - icon_size - margin, margin)
+        Window.bind(on_resize=self._on_window_resize)
+
+    def _on_window_resize(self, instance, width, height):
+        margin = 16
+        icon_size = 54
+        self._map_btn.pos = (width - icon_size - margin, margin)
+
     def open_minimap(self, secs=10.0):
         self._minimap._until = time.perf_counter() + secs
 
@@ -1351,15 +1296,16 @@ class _HUDOverlay(FloatLayout):
         self._minimap._until = 0.0
 
 
-# Main game window
+class _MinimapWidget(FloatLayout):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._until = 0.0
+
 
 class KivyGameWindow(FloatLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        # Create performance monitor FIRST, before any I/O or setup
-        # This ensures startup_time_ms reflects the full cost from window init to first frame,
-        # matching PySide6's measurement approach for fair comparison.
         self._perf = PerformanceMonitor(framework='Kivy')
 
         self._progress_path = os.path.abspath('progression_kivy.json')
@@ -1373,40 +1319,33 @@ class KivyGameWindow(FloatLayout):
         self._current_level_id = last_level
         self.core = GameCore(level_id=last_level)
 
-        # GL widget (bottom layer)
         self._gl = _GameGLWidget(KivyRenderer(
             self.core), size_hint=(1, 1), pos=(0, 0))
         self._gl._parent_widget = self  # Set reference for FPS measurement
         self._gl.performance_monitor = self._perf  # Assign early so it's available
         self.add_widget(self._gl)
 
-        # HUD (middle layer)
         self._hud = _HUDOverlay(self, size_hint=(1, 1), pos=(0, 0))
         self._hud.core = self.core
         self.add_widget(self._hud)
 
-        # Closing animation overlay (below stats panels)
         self._closing_anim = _ClosingAnimWidget(
             self, size_hint=(1, 1), pos=(0, 0))
         self.add_widget(self._closing_anim)
 
-        # Level select and THE END panels need to be on top of closing animation
         self._levels = _LevelSelectPanel(self, size_hint=(1, 1), opacity=0)
         self._the_end = _TheEndPanel(size_hint=(1, 1), opacity=0)
         self.add_widget(self._levels)
         self.add_widget(self._the_end)
 
-        # Stats panel (on top of everything)
         self._stats_panel = _StatsScreenPanel(size_hint=(1, 1), opacity=0)
         self.add_widget(self._stats_panel)
 
-        # Connect performance monitor to game core for tracking
         self.core._performance_monitor = self._perf
 
         self._audio = _KivyAudioEngine(asset_dir=os.path.abspath('assets'))
         self._ghost_sfx_ev = Clock.schedule_interval(self._tick_ghost_sfx, 2.5)
 
-        # Stats / end-screen state (wxPython parity)
         self._level_end_triggered: bool = False
         self._level_complete: bool = False
         self._stats_visible: bool = False
@@ -1453,8 +1392,6 @@ class KivyGameWindow(FloatLayout):
             Clock.schedule_once(
                 lambda *_: self._open_level_select(startup=True), 0.1)
 
-    # keyboard
-
     def _kb_closed(self):
         if self._kb:
             self._kb.unbind(on_key_down=self._on_key_down,
@@ -1463,13 +1400,14 @@ class KivyGameWindow(FloatLayout):
 
     def _on_key_down(self, kb, keycode, text, mod):
         key = keycode[1]
-        # Record input event for latency measurement (framework event dispatch)
         self._perf.record_input_event()
+        if bool(getattr(self, '_show_the_end', False)):
+            if key in ('escape', 'esc'):
+                App.get_running_app().stop()
+            return True
         if bool(getattr(self, '_stats_visible', False)):
             if key in ('escape', 'esc'):
                 self._on_stats_screen_esc()
-            return True
-        if bool(getattr(self, '_show_the_end', False)):
             return True
         self.keys_pressed.add(key)
 
@@ -1477,18 +1415,15 @@ class KivyGameWindow(FloatLayout):
             self._handle_interact()
             return True
         if key == 'm':
-            self._try_open_minimap()
+            self._toggle_minimap()
             return True
         return False
 
     def _on_win_kb(self, window, key, *args):
-        # Record input event for latency measurement (framework event dispatch)
         self._perf.record_input_event()
-        if key == 27:  # ESC
-            # Don't react to ESC if level select is showing (only stats screen should respond)
+        if key == 27:
             if self._levels.opacity > 0:
                 return True
-            # Stats/end screen: ESC advances
             if self._level_complete and (self.core.screen_closing or self.core.game_completed):
                 self._on_stats_screen_esc()
                 return True
@@ -1502,30 +1437,21 @@ class KivyGameWindow(FloatLayout):
     def _on_key_up(self, kb, keycode):
         self.keys_pressed.discard(keycode[1])
 
-    # FPS Camera System
-    # NOTE: Kivy/SDL2 does not support mouse warping on Windows, so we use
-    # delta-from-last-position instead of the Lengyel warping technique.
-    # This means camera stops at screen edges (infinite rotation not possible).
-
     def _fps_camera_start(self, initial_pos) -> None:
-        # Start mouse capture for FPS camera. Hide cursor.
         self._mouse_captured = True
         self._last_mouse_pos = initial_pos
         Window.show_cursor = False
 
     def _fps_camera_stop(self) -> None:
-        # Stop mouse capture. Show cursor and reset state.
         self._mouse_captured = False
         self._last_mouse_pos = None
         Window.show_cursor = True
 
     def _fps_camera_update(self, dx: float, dy: float) -> None:
-        # Update camera rotation based on mouse delta.
         self.core.rotate_player(-dx * FPS_CAMERA_SENSITIVITY)
         self.core.tilt_camera(dy * FPS_CAMERA_SENSITIVITY)
 
     def _on_touch_down(self, win, touch):
-        # Handle touch down - start FPS camera capture on left click.
         if not hasattr(touch, 'button') or touch.button != 'left':
             return
         if self._hud._modal_visible:
@@ -1536,18 +1462,15 @@ class KivyGameWindow(FloatLayout):
             return
         if getattr(self.core, 'simulation_frozen', False):
             return
-        # Block camera during screen closing animation (PySide6 parity)
         if self.core.screen_closing or self.core.game_completed or self.core.game_won:
             return
         self._fps_camera_start(touch.pos)
 
     def _on_touch_up(self, win, touch):
-        # Handle touch up - stop FPS camera capture on left release.
         if hasattr(touch, 'button') and touch.button == 'left':
             self._fps_camera_stop()
 
     def _on_mouse_pos(self, win, pos):
-        # Handle mouse move - calculate delta from last position.
         if not self._mouse_captured:
             self._last_mouse_pos = pos
             return
@@ -1558,7 +1481,6 @@ class KivyGameWindow(FloatLayout):
         if bool(getattr(self, '_stats_visible', False)) or bool(getattr(self, '_show_the_end', False)):
             self._fps_camera_stop()
             return
-        # Block camera during screen closing animation (PySide6 parity)
         if self.core.screen_closing or self.core.game_completed or self.core.game_won:
             self._fps_camera_stop()
             return
@@ -1570,18 +1492,13 @@ class KivyGameWindow(FloatLayout):
             self._last_mouse_pos = pos
             return
 
-        # Calculate delta from last position (not from center - Kivy limitation)
         dx = pos[0] - self._last_mouse_pos[0]
         dy = pos[1] - self._last_mouse_pos[1]
 
-        # Apply camera rotation based on delta
         if abs(dx) > 1 or abs(dy) > 1:
             self._fps_camera_update(dx, dy)
 
-        # Update last position for next frame
         self._last_mouse_pos = pos
-
-    # update
 
     def _update(self, *_):
         now = time.perf_counter()
@@ -1589,19 +1506,15 @@ class KivyGameWindow(FloatLayout):
         self._last_update_t = now
         paused = bool(getattr(self.core, 'paused', False))
 
-        # Always update screen closing animation (even when paused/stats visible)
         if self.core.screen_closing and not self.core.game_won:
             self.core._update_screen_close(dt)
 
-        # If stats/end screen is visible, only update closing animation (no other updates)
         if bool(getattr(self, '_stats_visible', False)) or bool(getattr(self, '_show_the_end', False)):
             return
 
-        # Normal game update (only if not paused and not screen closing)
         if not paused and not self.core.screen_closing and not self.core.game_won:
             self.core.update(dt)
 
-        # Level-end: game_won fires once after animation completes
         try:
             game_won = bool(getattr(self.core, 'game_won', False))
             if game_won and (not bool(getattr(self, '_level_end_triggered', False))):
@@ -1630,23 +1543,30 @@ class KivyGameWindow(FloatLayout):
                 )
         moved = False
         if not paused and not getattr(self.core, 'simulation_frozen', False) and not self.core.screen_closing and not self.core.game_won:
-            spd = 0.12 if self._current_level_id == 'level1' else 0.18
+            spd = 0.09 if self._current_level_id == 'level1' else 0.11
             dx = dz = 0.0
             if 'w' in self.keys_pressed:
-                dz += spd
+                dz += 1.0
             if 's' in self.keys_pressed:
-                dz -= spd
+                dz -= 1.0
             if 'a' in self.keys_pressed:
-                dx -= spd
+                dx -= 1.0
             if 'd' in self.keys_pressed:
-                dx += spd
+                dx += 1.0
+
+            if dx != 0.0 and dz != 0.0:
+                length = math.sqrt(dx * dx + dz * dz)
+                dx /= length
+                dz /= length
+
+            dx *= spd
+            dz *= spd
             if dx or dz:
                 try:
                     moved = bool(self.core.move_player(dx, dz))
                 except Exception:
                     moved = False
                 if moved:
-                    # Record that input was processed (game loop latency measurement)
                     self._perf.record_input_processed()
         try:
             if paused or self._hud._modal_visible or getattr(self.core, 'simulation_frozen', False) or self.core.screen_closing or self.core.game_won:
@@ -1691,8 +1611,6 @@ class KivyGameWindow(FloatLayout):
         except Exception:
             return
 
-    # pause
-
     def _set_paused(self, v):
         self.core.paused = bool(v)
         if v:
@@ -1723,16 +1641,16 @@ class KivyGameWindow(FloatLayout):
         elif action == 'restart':
             self._restart()
 
-    # modals
-
-    def _open_level_select(self, *, startup):
+    def _open_level_select(self, *, startup, allow_close=None):
         un = set(self._progress.get('unlocked_levels') or ['level1'])
         self.core.paused = True
         self.keys_pressed.clear()
         self._mouse_captured = False
         self._hud.hide_pause()
+        if allow_close is None:
+            allow_close = not startup
         self._hud.show_level_select_modal(
-            unlocked=un, allow_close=(not startup),
+            unlocked=un, allow_close=allow_close,
             return_to_pause=(not startup))
 
     def _on_level_selected(self, lid):
@@ -1756,7 +1674,6 @@ class KivyGameWindow(FloatLayout):
         self._set_paused(False)
 
     def _show_tutorial(self, title, body):
-        # Freeze movement without showing the pause panel
         self.core.paused = True
         self.keys_pressed.clear()
         self._mouse_captured = False
@@ -1767,8 +1684,6 @@ class KivyGameWindow(FloatLayout):
         s = str(text or '').strip()
         if s:
             self._hud.enqueue_lore_lines([s])
-
-    # minimap
 
     def _try_open_minimap(self):
         now = time.perf_counter()
@@ -1784,8 +1699,6 @@ class KivyGameWindow(FloatLayout):
             return
         self._try_open_minimap()
 
-    # levels
-
     def _start_level(self, lid, *, load_save):
         lid = str(lid or 'level1')
         self.core = GameCore(level_id=lid)
@@ -1793,29 +1706,21 @@ class KivyGameWindow(FloatLayout):
         self._gl.renderer = KivyRenderer(self.core)
         self._hud.core = self.core
 
-        # Store reference to old perf monitor to preserve startup time
         old_perf = self._perf
 
-        # Fresh performance monitor for every level — this is the key fix.
-        # Without this, FPS/latency from the previous run carry over.
         self._perf = PerformanceMonitor(framework='Kivy')
         self._gl.performance_monitor = self._perf
 
-        # Preserve startup time from initial monitor (if it was recorded)
         old_startup_time = getattr(old_perf, 'startup_time_ms', None)
         if old_startup_time is not None:
             self._perf.startup_time_ms = old_startup_time
 
-        # Explicit cleanup to ensure no cached data persists
-        # This prevents minimum FPS and frame drop counts from carrying over
         self._perf.frozen_stats = None
         self._perf.fps_history.clear()
         self._perf.memory_samples.clear()
 
-        # Connect performance monitor to game core for tracking
         self.core._performance_monitor = self._perf
 
-        # Reset level-end state (wxPython parity)
         self._level_end_triggered = False
         self._level_complete = False
         self._stats_visible = False
@@ -1835,7 +1740,6 @@ class KivyGameWindow(FloatLayout):
         if load_save:
             self._load_save()
 
-        # Play gate sound when level starts from scratch
         if not load_save and self.core.elapsed_s <= 0.0001:
             if not self._persist_seen.get('l1_intro'):
                 self._persist_seen['l1_intro'] = True
@@ -1864,8 +1768,6 @@ class KivyGameWindow(FloatLayout):
         ev('key_picked',               self._on_key_picked)
         ev('player_move', lambda d: None)
 
-    # interact
-
     def _handle_interact(self):
         if getattr(self.core, 'paused', False):
             return
@@ -1875,7 +1777,6 @@ class KivyGameWindow(FloatLayout):
             self._mouse_captured = False
             prev = self.core.simulation_frozen
             self.core.simulation_frozen = True
-            # Use hard mode if ghost 4 caught us
             hard_mode = (self._last_ghost_id == 4)
             dlg = KivySilhouetteMinigame(hard_mode=hard_mode)
 
@@ -1930,8 +1831,6 @@ class KivyGameWindow(FloatLayout):
             self._mouse_captured = False
         asm.bind_result(_done)
         asm.open()
-
-    # ── core events ───────────────────────────────────────────────────────────
 
     def _on_coin_picked(self, data):
         try:
@@ -1988,17 +1887,16 @@ class KivyGameWindow(FloatLayout):
                 self._show_lore('A dream… Far too lucid.')
 
     def _on_exit_unlocked(self, data):
-        pass  # Exit unlocked message removed per user request
+        pass
 
     def _on_sent_to_jail(self, data):
-        # Track which ghost sent us to jail (ghost 4 triggers hard minigame)
         reason = str(data.get('reason', ''))
         if reason == 'ghost_4':
             self._last_ghost_id = 4
         elif reason.startswith('ghost'):
-            self._last_ghost_id = 1  # Normal ghost
+            self._last_ghost_id = 1
         else:
-            self._last_ghost_id = 0  # Spikes or other
+            self._last_ghost_id = 0
         if self._current_level_id != 'level1':
             return
         if not self._persist_seen.get('tutorial_jail'):
@@ -2010,7 +1908,6 @@ class KivyGameWindow(FloatLayout):
                 'A sector map is displayed here. Use it to orient yourself before returning to the maze.')
 
     def _on_sent_to_spawn(self, data):
-        """Ghost 3 sends player to spawn instead of jail - show lore and flash screen."""
         self._show_lore('Be safe.')
         self._hud.trigger_flash(300, (20/255, 20/255, 25/255, 180/255))
 
@@ -2026,8 +1923,6 @@ class KivyGameWindow(FloatLayout):
                 self._show_lore('The key is done… I am watched.')
         except Exception:
             pass
-
-    # ── lore ──────────────────────────────────────────────────────────────────
 
     def _trigger_lore(self, key):
         key = str(key or '').strip()
@@ -2056,16 +1951,8 @@ class KivyGameWindow(FloatLayout):
                         self._persist_seen[k] = True
                         self._trigger_lore('ON_GHOST_CLOSE')
 
-                # Track ghost encounter for performance monitor
-                try:
-                    # Ghost encounters removed from tracking
-                    pass
-                except Exception:
-                    pass
         except Exception:
             pass
-
-    # ── save / load ───────────────────────────────────────────────────────────
 
     def _load_progression(self):
         if not os.path.exists(self._progress_path):
@@ -2124,28 +2011,21 @@ class KivyGameWindow(FloatLayout):
         self._gl.renderer = KivyRenderer(self.core)
         self._hud.core = self.core
 
-        # Store reference to old perf monitor to preserve startup time
         old_perf = self._perf
 
-        # Fresh performance monitor on restart
         self._perf = PerformanceMonitor(framework='Kivy')
         self._gl.performance_monitor = self._perf
 
-        # Preserve startup time from initial monitor (if it was recorded)
         old_startup_time = getattr(old_perf, 'startup_time_ms', None)
         if old_startup_time is not None:
             self._perf.startup_time_ms = old_startup_time
 
-        # Explicit cleanup to ensure no cached data persists
-        # This prevents minimum FPS and frame drop counts from carrying over
         self._perf.frozen_stats = None
         self._perf.fps_history.clear()
         self._perf.memory_samples.clear()
 
-        # Connect performance monitor to game core for tracking
         self.core._performance_monitor = self._perf
 
-        # Reset level-end state (wxPython parity)
         self._level_end_triggered = False
         self._level_complete = False
         self._stats_visible = False
@@ -2163,7 +2043,6 @@ class KivyGameWindow(FloatLayout):
             self._set_paused(True)
         self._last_update_t = time.perf_counter()
 
-        # Restart always begins at 00:00
         try:
             self._audio.play_gate()
         except Exception:
@@ -2175,8 +2054,7 @@ class KivyGameWindow(FloatLayout):
             pass
 
     def _handle_level_end(self) -> None:
-        """Called once when game_won becomes True. Freezes gameplay, freezes stats,
-        then shows either the stats screen (level 1) or the end screen stats (level 2)."""
+
         self._level_complete = True
         try:
             self.core.simulation_frozen = True
@@ -2187,7 +2065,6 @@ class KivyGameWindow(FloatLayout):
         except Exception:
             pass
 
-        # Unlock level 2 if we just finished level 1
         if self._current_level_id == 'level1':
             try:
                 unlocked = set(self._progress.get(
@@ -2198,7 +2075,6 @@ class KivyGameWindow(FloatLayout):
             except Exception:
                 pass
 
-        # Freeze & build the summary text (use PerformanceMonitor)
         try:
             self._perf.update_scene_data(
                 walls_rendered=len(getattr(self.core, 'walls', set())),
@@ -2216,9 +2092,7 @@ class KivyGameWindow(FloatLayout):
             summary_text = f'Level complete!\n\nPress ESC to continue.\n\n({exc})'
 
         try:
-            # Export PDF only once per level completion
             if not self._perf_pdf_exported:
-                # Get performance data from the monitor
                 performance_data = self._perf.get_performance_summary()
 
                 from core.pdf_export import export_performance_pdf
@@ -2248,13 +2122,11 @@ class KivyGameWindow(FloatLayout):
         self._stats_visible = True
         self._end_screen_visible = False
         self._level_complete = True
-        # Use the top-level stats panel (above closing animation)
         try:
             self._stats_panel.set_text(self._stats_text, end_mode=False)
             self._stats_panel.opacity = 1.0
         except Exception:
             pass
-        # Also update HUD for consistency
         try:
             self._hud._stats.set_text(self._stats_text, end_mode=False)
         except Exception:
@@ -2265,13 +2137,11 @@ class KivyGameWindow(FloatLayout):
         self._stats_visible = True
         self._end_screen_visible = True
         self._level_complete = True
-        # Use the top-level stats panel (above closing animation)
         try:
             self._stats_panel.set_text(self._stats_text, end_mode=True)
             self._stats_panel.opacity = 1.0
         except Exception:
             pass
-        # Also update HUD for consistency
         try:
             self._hud._stats.set_text(self._stats_text, end_mode=True)
         except Exception:
@@ -2281,39 +2151,32 @@ class KivyGameWindow(FloatLayout):
         self._stats_visible = False
         self._end_screen_visible = False
         self._stats_text = ''
-        # Hide the top-level stats panel
         try:
             self._stats_panel.opacity = 0.0
         except Exception:
             pass
-        # Also update HUD for consistency
         try:
             self._hud._stats.set_text('')
         except Exception:
             pass
 
     def _on_stats_screen_esc(self) -> None:
-        """ESC pressed while stats screen is visible (wxPython parity)."""
         if not bool(getattr(self, '_level_complete', False)):
             return
 
         if str(getattr(self, '_current_level_id', '')) == 'level2':
-            # Level 2 complete: show THE END
             self.hide_stats_screen()
-            self._show_the_end = True
+            self.show_end_screen(self._stats_text)
             return
 
-        # Level 1 complete: hide stats and show level select
         self.hide_stats_screen()
         self._level_complete = False
-        self._open_level_select(startup=False)
+        self._open_level_select(startup=False, allow_close=False)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# App
-# ─────────────────────────────────────────────────────────────────────────────
 
 class KivyGameApp(App):
+    title = 'Within the Walls (Kivy)'
+
     def build(self):
         os.environ.setdefault('KIVY_GL_PROFILE', 'core')
         Window.clearcolor = (0.05, 0.05, 0.08, 1)

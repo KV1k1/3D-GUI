@@ -26,7 +26,6 @@ FPS_CAMERA_SENSITIVITY = 0.002
 
 
 class _SimpleAudio:
-    """Single-channel audio using wx.adv.Sound / winsound fallback."""
 
     def __init__(self, asset_dir: str):
         self._asset_dir = str(asset_dir or '')
@@ -130,19 +129,12 @@ class _SimpleAudio:
         self) -> None: self._play_priority_sfx(self._snd_ghost, self._ghost_path, 3.5)
 
 
-# ---------------------------------------------------------------------------
-# HUD constants
-# ---------------------------------------------------------------------------
 HUD_FS_SMALL = 14
 HUD_FS_MED = 16
 HUD_FS_PAUSE_TITLE = 30
 HUD_COL_WHITE = (240, 240, 240, 255)
 HUD_COL_YELLOW = (255, 220, 110, 255)
 
-
-# ---------------------------------------------------------------------------
-# GL canvas
-# ---------------------------------------------------------------------------
 
 class GameGLCanvas(glcanvas.GLCanvas):
 
@@ -177,7 +169,6 @@ class GameGLCanvas(glcanvas.GLCanvas):
 
         self._gl_initialized = False
 
-        # HUD GL state
         self._hud_prog_col:  int = 0
         self._hud_prog_tex:  int = 0
         self._hud_vao_col:   int = 0
@@ -190,16 +181,15 @@ class GameGLCanvas(glcanvas.GLCanvas):
 
         self._mouse_captured = False
         self._mouse_center: Optional[Tuple[int, int]] = None
+        self._mouse_skip_next_delta = False
 
-        self._assets_dir = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), '..', '..', 'assets'))
+        self._assets_dir = 'assets'
         self._cam_icon_tex: Optional[int] = None
 
         self._minimap_until = 0.0
         self._minimap_cooldown_until = 0.0
         self._cam_icon_rect = wx.Rect(0, 0, 0, 0)
 
-        # Minimap static-texture cache
         self._minimap_static_tex:       Optional[int] = None
         self._minimap_static_layout_id: int = 0
         self._minimap_static_size:      Tuple[int, int, int] = (0, 0, 0)
@@ -218,16 +208,17 @@ class GameGLCanvas(glcanvas.GLCanvas):
         self._lore_current_start: float = 0.0
         self._lore_current_end:   float = 0.0
 
+        self._time_bonus_text:   str = ''
+        self._time_bonus_until:  float = 0.0
+
         self._show_the_end = False
         self._pause_btn_rects: Dict[str, wx.Rect] = {}
         self.performance_monitor: Optional[PerformanceMonitor] = None
 
-        # Stats / end screen
         self._stats_visible = False
         self._stats_text = ''
         self._end_screen_visible = False
 
-        # Flash effect
         self._flash_until: float = 0.0
         self._flash_color: Tuple[float, float, float, float] = (
             20/255, 20/255, 25/255, 180/255)
@@ -246,15 +237,9 @@ class GameGLCanvas(glcanvas.GLCanvas):
         self.Bind(wx.EVT_MOUSE_CAPTURE_LOST, self._on_capture_lost)
         self.SetFocus()
 
-    # ------------------------------------------------------------------
-    # GL init
-    # ------------------------------------------------------------------
-
     def _ensure_gl(self) -> None:
         if self._gl_initialized:
             return
-        # Set flag FIRST to prevent race conditions if paint is called again
-        # during initialization (similar to PySide6's initializeGL pattern)
         self._gl_initialized = True
         self.SetCurrent(self._gl_context)
         self.renderer.initialize()
@@ -361,10 +346,6 @@ void main(){ FragColor=texture(uTex,vUV); }
         glBindVertexArray(0)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-    # ------------------------------------------------------------------
-    # Screen overlays (public API used by WxGameWindow)
-    # ------------------------------------------------------------------
-
     def show_stats_screen(self, text: str) -> None:
         self._stats_text = str(text or '')
         self._stats_visible = True
@@ -388,10 +369,6 @@ void main(){ FragColor=texture(uTex,vUV); }
             self._flash_color = color
         self.Refresh(False)
 
-    # ------------------------------------------------------------------
-    # Paint
-    # ------------------------------------------------------------------
-
     def _on_size(self, _evt: wx.SizeEvent) -> None:
         self.Refresh(False)
 
@@ -407,8 +384,6 @@ void main(){ FragColor=texture(uTex,vUV); }
         self.SwapBuffers()
 
         if self.performance_monitor:
-            # Only record to metrics when not paused and no stats/end screen showing (Kivy parity)
-            # Always record to display_fps_history for HUD display
             paused = bool(getattr(self.core, 'paused', False))
             stats_visible = bool(getattr(self, '_stats_visible', False)) or bool(
                 getattr(self, '_show_the_end', False))
@@ -421,10 +396,6 @@ void main(){ FragColor=texture(uTex,vUV); }
                 ms = (time.perf_counter() -
                       self.performance_monitor._startup_begin) * 1000
                 self.performance_monitor.record_startup_time(ms)
-
-    # ------------------------------------------------------------------
-    # HUD GL helpers
-    # ------------------------------------------------------------------
 
     def _hud_mvp(self, w: int, h: int) -> List[float]:
         sx = 2.0 / max(1, w)
@@ -485,10 +456,6 @@ void main(){ FragColor=texture(uTex,vUV); }
         glBindTexture(GL_TEXTURE_2D, 0)
         glUseProgram(0)
 
-    # ------------------------------------------------------------------
-    # HUD draw primitives
-    # ------------------------------------------------------------------
-
     def _gl_rect(self, x, y, ww, hh, r, g, b, a) -> None:
         x0, y0, x1, y1 = float(x), float(y), float(x + ww), float(y + hh)
         v = [x0, y0, r, g, b, a,  x1, y0, r, g, b, a,  x1, y1, r, g, b, a,
@@ -508,7 +475,8 @@ void main(){ FragColor=texture(uTex,vUV); }
                           color[2]/255, color[3]/255)
         dx, dy = float(x2) - float(x1), float(y2) - float(y1)
         inv = 1.0 / (math.sqrt(dx * dx + dy * dy) or 1e-9)
-        nx, ny = -dy * inv * 0.75, dx * inv * 0.75
+        # 1px width (0.5 each side) to match PySide6/Kivy
+        nx, ny = -dy * inv * 0.5, dx * inv * 0.5
         ax, ay = float(x1) + nx, float(y1) + ny
         bx, by = float(x1) - nx, float(y1) - ny
         cx2, cy2 = float(x2) - nx, float(y2) - ny
@@ -571,10 +539,6 @@ void main(){ FragColor=texture(uTex,vUV); }
                 out.append(line)
         return out
 
-    # ------------------------------------------------------------------
-    # Main HUD draw
-    # ------------------------------------------------------------------
-
     def _draw_hud_gl(self, w: int, h: int) -> None:
         if w <= 1 or h <= 1:
             return
@@ -583,25 +547,18 @@ void main(){ FragColor=texture(uTex,vUV); }
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        # Stats / end screen — drawn FIRST (full-screen), then return
         if self._stats_visible:
             if self._end_screen_visible:
                 self._draw_end_screen_gl(w, h)
             else:
                 self._draw_stats_screen_gl(w, h)
-            # Draw modal on top of stats if needed
             if self._modal_visible:
                 self._draw_modal_gl(w, h)
-            # Also draw lore on top
             self._draw_lore_fade_gl(w, h)
             return
 
-        # ── Normal gameplay HUD ──────────────────────────────────────────────
-
-        # Draw flash effect if active
         now = time.perf_counter()
         if now < self._flash_until:
-            # Calculate fade out
             remaining = self._flash_until - now
             total_flash = 0.3  # 300ms default
             fade = max(0.0, min(1.0, remaining / total_flash))
@@ -609,7 +566,6 @@ void main(){ FragColor=texture(uTex,vUV); }
             alpha = a * fade
             self._gl_rect(0, 0, float(w), float(h), r, g, b, alpha)
 
-        # Objective HUD box
         pad = 10
         box_w = 320
         box_h = 56
@@ -620,9 +576,18 @@ void main(){ FragColor=texture(uTex,vUV); }
         self._gl_outline_rect(float(x), float(y), float(box_w), float(box_h),
                               color=(240, 240, 240, 255))
         t = int(getattr(self.core, 'elapsed_s', 0.0) or 0.0)
-        self._gl_text(float(x + 12), float(y + 1),
+        self._gl_text(float(x + 12), float(y),
                       f'Time: {t // 60:02d}:{t % 60:02d}',
                       font_size=11, bold=True, color=HUD_COL_WHITE)
+
+        now = time.perf_counter()
+        if self._time_bonus_text and now < self._time_bonus_until:
+            self._gl_text(float(x + 210), float(y + 8),
+                          self._time_bonus_text,
+                          font_size=22, bold=True, color=(255, 220, 60, 255))
+        elif self._time_bonus_text and now >= self._time_bonus_until:
+            self._time_bonus_text = ''
+
         self._gl_text(float(x + 12), float(y + 22),
                       f'Coins: {getattr(self.core, "coins_collected", 0)}'
                       f'/{getattr(self.core, "coins_required", 0)}'
@@ -630,7 +595,6 @@ void main(){ FragColor=texture(uTex,vUV); }
                       f'/{getattr(self.core, "keys_required", 0)}',
                       font_size=11, bold=False, color=HUD_COL_WHITE)
 
-        # Minimap cam icon (bottom-right)
         icon_size = 54
         ix = w - icon_size - 16
         iy = h - icon_size - 16
@@ -650,14 +614,13 @@ void main(){ FragColor=texture(uTex,vUV); }
             remaining = max(0.0, self._minimap_cooldown_until - now)
             self._gl_rect(float(ix), float(iy),
                           float(icon_size), float(icon_size), 0, 0, 0, 0.62)
-            self._gl_text(float(ix + 10), float(iy + 16),
+            self._gl_text(float(ix + 10), float(iy + 20),
                           f'{int(math.ceil(remaining))}s',
                           font_size=HUD_FS_MED, bold=True, color=(255, 210, 90, 255))
 
         if now < self._minimap_until:
             self._draw_minimap_overlay_gl(w, h)
 
-        # Sector popup
         popup_t = float(getattr(self.core, '_sector_popup_timer', 0.0) or 0.0)
         popup_id = str(getattr(self.core, '_sector_popup_id', '') or '')
         if popup_t > 0.0 and popup_id:
@@ -683,11 +646,9 @@ void main(){ FragColor=texture(uTex,vUV); }
                                  font_size=11, bold=True,
                                  color=(255, 220, 110, int(255 * alpha)))
 
-        # Pause panel (only when not in a modal)
         if (not self._modal_visible) and bool(getattr(self.core, 'paused', False)):
             self._draw_pause_panel_gl(w, h)
 
-        # Screen-closing iris wipe
         prog = float(getattr(self.core, 'screen_close_progress', 0.0) or 0.0)
         if prog > 0.0:
             self._draw_closing_animation_gl(w, h, prog)
@@ -699,10 +660,6 @@ void main(){ FragColor=texture(uTex,vUV); }
 
         if self._modal_visible:
             self._draw_modal_gl(w, h)
-
-    # ------------------------------------------------------------------
-    # Minimap
-    # ------------------------------------------------------------------
 
     def _ensure_minimap_static_texture(self, w: int, h: int) -> Tuple[int, int, int, int, int]:
         layout = getattr(self.core, 'layout', None) or []
@@ -815,7 +772,6 @@ void main(){ FragColor=texture(uTex,vUV); }
                 ])
             self._hud_draw_col(w, h, verts)
 
-        # Coins
         coin_r = float(max(6, int(cell_px * 0.35))) * 0.5
         for coin in getattr(self.core, 'coins', {}).values():
             if getattr(coin, 'taken', False):
@@ -824,7 +780,6 @@ void main(){ FragColor=texture(uTex,vUV); }
             sx, sy = to_screen(rr + 0.5, cc + 0.5)
             _circle(sx, sy, coin_r, (1.0, 215 / 255, 0.0, 1.0))
 
-        # Ghosts
         ghost_colors = {
             1: (1, 80 / 255, 60 / 255),
             2: (80 / 255, 1, 140 / 255),
@@ -843,21 +798,17 @@ void main(){ FragColor=texture(uTex,vUV); }
             sx, sy = to_screen(gr + 0.5, gcx + 0.5)
             _circle(sx, sy, gsz, (col[0], col[1], col[2], 0.95))
 
-            eye_d = max(2.0, gsz * 0.15)
-            eye_r = eye_d * 0.5
+            eye_size = max(2.0, gsz * 0.15)
             eye_ox = gsz * 0.25
             eye_oy = gsz * 0.10
-            pupil_r = max(1.0, eye_d * 0.50) * 0.5
             for ex in (sx - eye_ox, sx + eye_ox):
                 ey = sy - eye_oy
                 _circle(float(ex), float(ey), float(
-                    eye_r + 0.6), (0.0, 0.0, 0.0, 1.0))
+                    eye_size), (1.0, 1.0, 1.0, 1.0))
+                pupil = max(1.0, eye_size * 0.5)
                 _circle(float(ex), float(ey), float(
-                    eye_r),       (1.0, 1.0, 1.0, 1.0))
-                _circle(float(ex), float(ey), float(
-                    pupil_r),     (0.0, 0.0, 0.0, 1.0))
+                    pupil), (0.0, 0.0, 0.0, 1.0))
 
-        # Player
         px_w = float(getattr(self.core.player, 'x', 0.0) or 0.0)
         pz_w = float(getattr(self.core.player, 'z', 0.0) or 0.0)
         yaw = float(getattr(self.core.player, 'yaw', 0.0) or 0.0)
@@ -880,7 +831,6 @@ void main(){ FragColor=texture(uTex,vUV); }
                       float(cy + math.cos(yaw) * ll),
                       color=(255, 220, 110, 255))
 
-        # Countdown
         now = time.perf_counter()
         if now < self._minimap_until:
             remaining = max(0.0, self._minimap_until - now)
@@ -932,12 +882,7 @@ void main(){ FragColor=texture(uTex,vUV); }
         glBindTexture(GL_TEXTURE_2D, 0)
         return int(tex_id)
 
-    # ------------------------------------------------------------------
-    # Pause panel  (exact PySide6 parity: same layout, colors, button order)
-    # ------------------------------------------------------------------
-
     def _draw_pause_panel_gl(self, w: int, h: int) -> None:
-        # Dim overlay
         self._gl_rect(0, 0, float(w), float(h), 0, 0, 0, 160 / 255)
 
         pw = 560
@@ -945,18 +890,15 @@ void main(){ FragColor=texture(uTex,vUV); }
         x0 = (w - pw) // 2
         y0 = (h - ph) // 2
 
-        # Panel background + border  (QColor 18,18,22,235)
         self._gl_rect(float(x0), float(y0), float(pw), float(ph),
                       18 / 255, 18 / 255, 22 / 255, 235 / 255)
         self._gl_outline_rect(float(x0), float(y0), float(pw), float(ph),
                               color=(220, 220, 220, 255))
 
-        # Title "PAUSED"  (QColor 255,220,110)
         self._gl_text_center(float(x0), float(y0 + 10), float(pw), 54,
                              'PAUSED', font_size=HUD_FS_PAUSE_TITLE,
                              bold=True, color=HUD_COL_YELLOW)
 
-        # FPS / RAM stats
         pm = self.performance_monitor
         fps_str = f'FPS: {int(pm.stable_display_fps())}' if pm else 'FPS: —'
         ram_str = f'RAM usage: {pm.current_ram_mb():.1f} MB' if pm else 'RAM usage: — MB'
@@ -968,7 +910,6 @@ void main(){ FragColor=texture(uTex,vUV); }
         self._gl_text(float(sx), float(sy + lh),  ram_str,
                       font_size=HUD_FS_SMALL, bold=False, color=(235, 235, 235, 255))
 
-        # Buttons  (QColor 32,32,40,235)
         btn_w = 280
         btn_h = 48
         gap = 16
@@ -995,22 +936,13 @@ void main(){ FragColor=texture(uTex,vUV); }
                                  label, font_size=HUD_FS_MED, bold=True,
                                  color=(255, 255, 255, 255))
 
-    # ------------------------------------------------------------------
-    # Level-select modal  (exact PySide6 parity)
-    # ------------------------------------------------------------------
-
     def _draw_level_select_modal_gl(self, w: int, h: int) -> None:
-        """Full-screen black + centred two-button level selector."""
-        # Full black background
         self._gl_rect(0, 0, float(w), float(h), 0, 0, 0, 1.0)
 
-        # Title
         self._gl_text_center(0, float(h * 0.10), float(w), 80,
                              self._modal_title or 'Select Level',
                              font_size=28, bold=True, color=HUD_COL_WHITE)
-        # Subtitle
         if self._modal_body:
-            # Wrap subtitle lines (two lines in body)
             for i, ln in enumerate(self._modal_body.split('\n')):
                 self._gl_text_center(0, float(h * 0.10 + 56 + i * 20), float(w), 22,
                                      ln, font_size=13, bold=False,
@@ -1025,7 +957,6 @@ void main(){ FragColor=texture(uTex,vUV); }
 
         self._modal_btn_rects.clear()
 
-        # Level 1 button (always enabled)
         self._gl_rect(float(bx), float(by1), float(btn_w), float(btn_h),
                       22 / 255, 22 / 255, 26 / 255, 1.0)
         self._gl_outline_rect(float(bx), float(by1), float(btn_w), float(btn_h),
@@ -1035,7 +966,6 @@ void main(){ FragColor=texture(uTex,vUV); }
         self._modal_btn_rects['level1'] = wx.Rect(
             int(bx), int(by1), int(btn_w), int(btn_h))
 
-        # Level 2 button (greyed when locked)
         l2_unlocked = 'level2' in self._modal_unlocked
         l2_label = 'Level 2' if l2_unlocked else 'Level 2 (Locked)'
         l2_alpha = 1.0 if l2_unlocked else 190 / 255
@@ -1049,7 +979,6 @@ void main(){ FragColor=texture(uTex,vUV); }
         self._modal_btn_rects['level2'] = wx.Rect(
             int(bx), int(by2), int(btn_w), int(btn_h))
 
-        # Close ✕ button (top-right, hidden when allow_close=False)
         cs = 38
         cx2 = w - cs - 20
         cy2 = 18
@@ -1062,10 +991,6 @@ void main(){ FragColor=texture(uTex,vUV); }
                       float(cx2 + cs - 8), float(cy2 + cs - 8), color=close_col)
         self._gl_line(float(cx2 + cs - 8), float(cy2 + 8),
                       float(cx2 + 8), float(cy2 + cs - 8), color=close_col)
-
-    # ------------------------------------------------------------------
-    # Tutorial modal
-    # ------------------------------------------------------------------
 
     def _draw_tutorial_modal_gl(self, w: int, h: int) -> None:
         pw = min(840, int(w * 0.74))
@@ -1080,13 +1005,15 @@ void main(){ FragColor=texture(uTex,vUV); }
         if self._modal_title:
             self._gl_text(float(x0 + 24), float(y0 + 44), self._modal_title,
                           font_size=18, bold=True, color=(235, 235, 235, 255))
+        self._gl_line(float(x0 + 24), float(y0 + 96),
+                      float(x0 + pw - 24), float(y0 + 96),
+                      color=(235, 235, 235, 100))
         lines = self._wrap_text_lines(self._modal_body, max_width_px=pw - 48,
                                       font_size=14, bold=False)
         for i, ln in enumerate(lines):
             if ln:
-                self._gl_text(float(x0 + 24), float(y0 + 84 + i * 18), ln,
+                self._gl_text(float(x0 + 24), float(y0 + 120 + i * 18), ln,
                               font_size=14, bold=False, color=(220, 220, 220, 255))
-        # Close ✕
         cs = 32
         cx2 = x0 + pw - 24 - cs
         cy2 = y0 + 22
@@ -1100,10 +1027,6 @@ void main(){ FragColor=texture(uTex,vUV); }
         self._gl_outline_rect(float(cx2), float(
             cy2), float(cs), float(cs), color=pen)
 
-    # ------------------------------------------------------------------
-    # Modal dispatcher
-    # ------------------------------------------------------------------
-
     def _draw_modal_gl(self, w: int, h: int) -> None:
         glDisable(GL_DEPTH_TEST)
         glEnable(GL_BLEND)
@@ -1114,10 +1037,6 @@ void main(){ FragColor=texture(uTex,vUV); }
             self._draw_level_select_modal_gl(w, h)
         elif self._modal_kind == 'tutorial':
             self._draw_tutorial_modal_gl(w, h)
-
-    # ------------------------------------------------------------------
-    # Stats / end screens
-    # ------------------------------------------------------------------
 
     def _draw_stats_screen_gl(self, w: int, h: int) -> None:
         self._gl_rect(0, 0, float(w), float(h), 0, 0, 0, 1)
@@ -1211,10 +1130,6 @@ void main(){ FragColor=texture(uTex,vUV); }
             ])
         self._hud_draw_col(w, h, verts)
 
-    # ------------------------------------------------------------------
-    # Lore
-    # ------------------------------------------------------------------
-
     def enqueue_lore_lines(self, lines: List[str]) -> None:
         for ln in (lines or []):
             s = str(ln or '').strip()
@@ -1271,10 +1186,6 @@ void main(){ FragColor=texture(uTex,vUV); }
         self._gl_text_center(bx, by, float(tw), float(th + 4), text,
                              font_size=18, bold=False, color=(255, 255, 255, alpha))
 
-    # ------------------------------------------------------------------
-    # Modal public API
-    # ------------------------------------------------------------------
-
     def show_level_select_modal(self, *, unlocked: Set[str],
                                 allow_close: bool, return_to_pause: bool) -> None:
         self._modal_visible = True
@@ -1311,10 +1222,6 @@ void main(){ FragColor=texture(uTex,vUV); }
                 return str(key)
         return None
 
-    # ------------------------------------------------------------------
-    # Minimap trigger
-    # ------------------------------------------------------------------
-
     def _try_open_minimap(self) -> None:
         now = time.perf_counter()
         if now < self._minimap_cooldown_until:
@@ -1332,13 +1239,10 @@ void main(){ FragColor=texture(uTex,vUV); }
             return
         self._try_open_minimap()
 
-    # ------------------------------------------------------------------
-    # Mouse (FPS camera)
-    # ------------------------------------------------------------------
-
     def _fps_camera_start(self, center_x: int, center_y: int) -> None:
         self._mouse_captured = True
         self._mouse_center = (center_x, center_y)
+        self._mouse_skip_next_delta = True
         self.SetCursor(wx.Cursor(wx.CURSOR_BLANK))
         if not self.HasCapture():
             self.CaptureMouse()
@@ -1380,6 +1284,12 @@ void main(){ FragColor=texture(uTex,vUV); }
         if not self._mouse_captured or not self._mouse_center:
             evt.Skip()
             return
+        if self._mouse_skip_next_delta:
+            self._mouse_skip_next_delta = False
+            cx, cy = self._mouse_center
+            self.WarpPointer(cx, cy)
+            evt.Skip()
+            return
         mx, my = evt.GetPosition()
         cx, cy = self._mouse_center
         dx, dy = mx - cx, my - cy
@@ -1395,16 +1305,9 @@ void main(){ FragColor=texture(uTex,vUV); }
         self._fps_camera_stop()
 
 
-# ---------------------------------------------------------------------------
-# Main window
-# ---------------------------------------------------------------------------
-
 class WxGameWindow(wx.Frame):
 
     def __init__(self):
-        # Create performance monitor FIRST, before any I/O or setup
-        # This ensures startup_time_ms reflects the full cost from window init to first frame,
-        # matching PySide6 and Kivy's measurement approach for fair comparison.
         self.performance_monitor = PerformanceMonitor(framework='wxPython')
 
         screen = wx.Display().GetClientArea()
@@ -1488,10 +1391,6 @@ class WxGameWindow(wx.Frame):
         else:
             self._open_level_select_modal(startup=True)
 
-    # ------------------------------------------------------------------
-    # Ghost sound
-    # ------------------------------------------------------------------
-
     def _ghost_sound_tick(self) -> None:
         if not self._ghost_sound_active:
             return
@@ -1514,10 +1413,6 @@ class WxGameWindow(wx.Frame):
         if nearest is None or nearest > 10.0:
             return
         self._audio.play_ghost()
-
-    # ------------------------------------------------------------------
-    # Input helpers
-    # ------------------------------------------------------------------
 
     def _set_footsteps_playing(self, playing: bool) -> None:
         try:
@@ -1546,10 +1441,6 @@ class WxGameWindow(wx.Frame):
     def _on_kill_focus(self, evt: wx.FocusEvent) -> None:
         self._reset_input_state()
         evt.Skip()
-
-    # ------------------------------------------------------------------
-    # Core callbacks
-    # ------------------------------------------------------------------
 
     def _register_core_callbacks(self) -> None:
         token = id(self.core)
@@ -1591,7 +1482,9 @@ class WxGameWindow(wx.Frame):
         try:
             s = int((data or {}).get('seconds', 0) or 0)
             if s > 0:
-                self._show_lore_line(f'+{s}s')
+                self.canvas._time_bonus_text = f'+{s}'
+                self.canvas._time_bonus_until = time.perf_counter() + 2.5
+                self.canvas.Refresh(False)
         except Exception:
             pass
 
@@ -1611,7 +1504,6 @@ class WxGameWindow(wx.Frame):
                 self._show_lore_line('A dream... Far too lucid.')
 
     def _on_sent_to_jail(self, _data: dict) -> None:
-        # Track which ghost sent us to jail (ghost 4 triggers hard minigame)
         reason = str(_data.get('reason', ''))
         if reason == 'ghost_4':
             self._last_ghost_id = 4
@@ -1630,7 +1522,6 @@ class WxGameWindow(wx.Frame):
                 'A sector map is displayed here. Use it to orient yourself before returning to the maze.')
 
     def _on_sent_to_spawn(self, _data: dict) -> None:
-        """Ghost 3 sends player to spawn instead of jail - show lore and flash screen."""
         self._show_lore_line('Be safe.')
         self.canvas.trigger_flash(300, (20/255, 20/255, 25/255, 180/255))
 
@@ -1654,7 +1545,6 @@ class WxGameWindow(wx.Frame):
             self._save_progression()
 
     def _on_checkpoint_reached(self, _data: dict) -> None:
-        # Don't pause if game is already ending (prevents pause panel from showing)
         if getattr(self.core, 'screen_closing', False) or getattr(self.core, 'game_won', False):
             return
         self._set_paused(True)
@@ -1694,7 +1584,6 @@ class WxGameWindow(wx.Frame):
             self._last_update_time = time.perf_counter()
 
         if ok:
-            # Mark as taken AND defer immediately to prevent re-triggering
             self.core.mark_key_fragment_taken(frag_id)
             self.core.defer_key_fragment(frag_id)
         else:
@@ -1702,10 +1591,6 @@ class WxGameWindow(wx.Frame):
             self.core.defer_key_fragment(frag_id)
         self.keys_pressed.clear()
         self._key_minigame_open = False
-
-    # ------------------------------------------------------------------
-    # Interact
-    # ------------------------------------------------------------------
 
     def _handle_interact(self) -> None:
         if getattr(self.core, 'paused', False):
@@ -1721,7 +1606,6 @@ class WxGameWindow(wx.Frame):
             self.core.simulation_frozen = True
             ok = False
             try:
-                # Use hard mode if ghost 4 caught us
                 hard_mode = (self._last_ghost_id == 4)
                 ok = bool(SilhouetteMatchDialog(
                     self, hard_mode=hard_mode).ShowModal() == wx.ID_OK)
@@ -1738,10 +1622,6 @@ class WxGameWindow(wx.Frame):
             self.keys_pressed.clear()
         elif action == 'gate_jail':
             self.core.try_leave_jail()
-
-    # ------------------------------------------------------------------
-    # Progression / save
-    # ------------------------------------------------------------------
 
     def _load_progression(self) -> dict:
         if not os.path.exists(self._progress_path):
@@ -1792,10 +1672,6 @@ class WxGameWindow(wx.Frame):
         except Exception:
             pass
 
-    # ------------------------------------------------------------------
-    # Level management
-    # ------------------------------------------------------------------
-
     def _start_level(self, level_id: str, *, load_save: bool) -> None:
         level_id = str(level_id or 'level1')
         paused_was = bool(getattr(self.core, 'paused', False))
@@ -1820,7 +1696,6 @@ class WxGameWindow(wx.Frame):
             self._lore_flags.pop(k, None)
         self.__dict__.pop('_player_has_moved', None)
 
-        # Preserve startup time and texture load time across level restarts (like Kivy/PySide6)
         old_startup_time = getattr(
             self.performance_monitor, 'startup_time_ms', None)
         old_texture_load_time = getattr(
@@ -1888,19 +1763,17 @@ class WxGameWindow(wx.Frame):
         self._set_paused(not bool(getattr(self.core, 'paused', False)))
         self.canvas.Refresh(False)
 
-    def _open_level_select_modal(self, *, startup: bool) -> None:
+    def _open_level_select_modal(self, *, startup: bool, allow_close: bool | None = None) -> None:
         unlocked = set(self._progress.get('unlocked_levels') or [])
         self._set_paused(True)
         self.canvas.hide_mouse_capture()
+        if allow_close is None:
+            allow_close = not startup
         self.canvas.show_level_select_modal(
             unlocked=unlocked,
-            allow_close=(not startup),
+            allow_close=allow_close,
             return_to_pause=(not startup))
         self.canvas.Refresh(False)
-
-    # ------------------------------------------------------------------
-    # Game loop
-    # ------------------------------------------------------------------
 
     def _on_tick(self, _evt: wx.TimerEvent) -> None:
         now = time.perf_counter()
@@ -1909,7 +1782,6 @@ class WxGameWindow(wx.Frame):
 
         paused = bool(getattr(self.core, 'paused', False))
 
-        # Always update screen closing animation (even when paused)
         if self.core.screen_closing and not self.core.game_won:
             self.core._update_screen_close(dt)
         elif not paused:
@@ -1957,16 +1829,24 @@ class WxGameWindow(wx.Frame):
             self.canvas.Refresh(False)
             return
 
-        move_speed = 0.12 if self._current_level_id == 'level1' else 0.18
+        move_speed = 0.09 if self._current_level_id == 'level1' else 0.11
         dx = dz = 0.0
         if ord('W') in self.keys_pressed:
-            dz += move_speed
+            dz += 1.0
         if ord('S') in self.keys_pressed:
-            dz -= move_speed
+            dz -= 1.0
         if ord('A') in self.keys_pressed:
-            dx -= move_speed
+            dx -= 1.0
         if ord('D') in self.keys_pressed:
-            dx += move_speed
+            dx += 1.0
+
+        if dx != 0.0 and dz != 0.0:
+            length = math.sqrt(dx * dx + dz * dz)
+            dx /= length
+            dz /= length
+
+        dx *= move_speed
+        dz *= move_speed
 
         moved = False
         if dx != 0.0 or dz != 0.0:
@@ -1975,14 +1855,12 @@ class WxGameWindow(wx.Frame):
             except Exception:
                 moved = False
             if moved:
-                # Record that input was processed (game loop latency measurement)
                 self.performance_monitor.record_input_processed()
             if moved and not hasattr(self, '_player_has_moved'):
                 self._player_has_moved = True
 
         self._set_footsteps_playing(moved and not self._key_minigame_open)
 
-        # Ghost lore trigger
         try:
             nearest = min(
                 (math.hypot(g.x - self.core.player.x, g.z - self.core.player.z)
@@ -2001,10 +1879,6 @@ class WxGameWindow(wx.Frame):
             pass
 
         self.canvas.Refresh(False)
-
-    # ------------------------------------------------------------------
-    # Level end
-    # ------------------------------------------------------------------
 
     def _handle_level_end(self) -> None:
         self._level_end_triggered = True
@@ -2061,15 +1935,10 @@ class WxGameWindow(wx.Frame):
             return
         self.canvas.hide_stats_screen()
         self._level_complete = False
-        self._open_level_select_modal(startup=False)
+        self._open_level_select_modal(startup=False, allow_close=False)
         self.canvas.Refresh(False)
 
-    # ------------------------------------------------------------------
-    # Keyboard
-    # ------------------------------------------------------------------
-
     def _on_key_down(self, evt: wx.KeyEvent) -> None:
-        # Record input event for latency measurement (framework event dispatch)
         self.performance_monitor.record_input_event()
         code = int(evt.GetKeyCode())
         self.keys_pressed.add(code)
@@ -2083,14 +1952,11 @@ class WxGameWindow(wx.Frame):
             return
 
         if code == wx.WXK_ESCAPE:
-            # Stats / end screen takes priority
+            if self.canvas._show_the_end:
+                self.Close()
+                return
             if self.canvas._stats_visible:
                 self._on_stats_screen_esc()
-                return
-            if self.canvas._show_the_end:
-                self.canvas._show_the_end = False
-                self._level_complete = False
-                self._open_level_select_modal(startup=False)
                 return
             if self.canvas._modal_visible:
                 rtp = bool(
@@ -2106,10 +1972,6 @@ class WxGameWindow(wx.Frame):
     def _on_key_up(self, evt: wx.KeyEvent) -> None:
         self.keys_pressed.discard(int(evt.GetKeyCode()))
         evt.Skip()
-
-    # ------------------------------------------------------------------
-    # Click routing
-    # ------------------------------------------------------------------
 
     def _on_click(self, evt: wx.MouseEvent) -> None:
         if self.canvas._stats_visible:
@@ -2167,10 +2029,6 @@ class WxGameWindow(wx.Frame):
         elif action == 'exit':
             self.Close()
 
-    # ------------------------------------------------------------------
-    # Lore / tutorial
-    # ------------------------------------------------------------------
-
     def _show_lore_line(self, text: str) -> None:
         s = str(text or '').strip()
         if s:
@@ -2186,10 +2044,6 @@ class WxGameWindow(wx.Frame):
         self.canvas._modal_return_to_pause = False
         self.canvas.hide_mouse_capture()
         self.keys_pressed.clear()
-
-    # ------------------------------------------------------------------
-    # Close
-    # ------------------------------------------------------------------
 
     def _on_close(self, evt: wx.CloseEvent) -> None:
         self._ghost_sound_active = False

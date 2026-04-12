@@ -55,18 +55,15 @@ class OpenGLRenderer:
         self._chunk_vbos: dict[tuple[int, int],
                                tuple[Optional[int], int, Optional[int], int]] = {}
 
-        # Ghost VBOs
         self._ghost_body_vbo: Optional[int] = None
         self._ghost_body_vertex_count: int = 0
         self._ghost_eye_vbo: Optional[int] = None
         self._ghost_eye_vertex_count: int = 0
 
-        # Lamp VBO (static, built once per level)
         self._lamp_vbo: Optional[int] = None
         self._lamp_vertex_count: int = 0
         self._lamp_positions: List[Tuple[int, int]] = []
 
-        # Streaming buffers for dynamic entities
         self._coin_geom_vbo: Optional[int] = None
         self._coin_geom_vertex_count: int = 0
         self._coin_tex_vbo: Optional[int] = None
@@ -84,11 +81,9 @@ class OpenGLRenderer:
         self._ghosts_vbo: Optional[int] = None
         self._ghosts_vertex_count: int = 0
 
-        # Initialize text texture cache with reasonable size limit
         self._text_texture_cache: dict[tuple, tuple[int, int, int]] = {}
         self._jail_map_texture: Optional[int] = None
 
-        # Performance optimization flags
         self._textures_loaded = False
         self._geometry_built = False
 
@@ -135,13 +130,10 @@ class OpenGLRenderer:
 
             self._textures_loaded = True
 
-            # Build ghost VBOs for performance
             self._build_ghost_vbo()
 
-            # Build lamp VBO for performance
             self._build_lamp_vbo()
 
-            # Initialize streaming buffers for dynamic entities
             vbo = glGenBuffers(1)
             self._coin_geom_vbo = int(vbo) if vbo else None
             vbo = glGenBuffers(1)
@@ -163,9 +155,7 @@ class OpenGLRenderer:
             print(f"wxPython renderer initialization error: {e}")
             import traceback
             traceback.print_exc()
-            # Don't silently swallow initialization errors
 
-        # Capture texture load time for PDF report
         load_time = time.perf_counter() - start_time
         try:
             perf = getattr(self.core, '_performance_monitor', None)
@@ -182,17 +172,14 @@ class OpenGLRenderer:
             except Exception:
                 pass
         except ImportError:
-            # PDF export not available, just skip texture load time capture
             pass
 
     def _ensure_textures_loaded(self) -> None:
         if self._textures_loaded:
             return
 
-        # Load textures efficiently with caching
         start_time = time.perf_counter()
 
-        # Pre-check if files exist to avoid unnecessary processing
         wall_path = os.path.join(self._assets_dir, 'image.png')
         floor_path = os.path.join(self._assets_dir, 'path.png')
         coin_path = os.path.join(self._assets_dir, 'JEMA GER 1640-11.png')
@@ -212,34 +199,28 @@ class OpenGLRenderer:
 
         self._textures_loaded = True
 
-        # Build ghost VBOs for performance
         self._build_ghost_vbo()
 
-        # Build lamp VBO for performance
         self._build_lamp_vbo()
 
-        # Capture texture load time for PDF report
         load_time = time.perf_counter() - start_time
         try:
             perf = getattr(self.core, '_performance_monitor', None)
             if perf:
                 perf.record_texture_load_time(load_time * 1000)
         except Exception:
-            # PDF export not available, just skip texture load time capture
             pass
 
     def _ensure_geometry_built(self) -> None:
         if self._geometry_built:
             return
 
-        # Build geometry in a more efficient way
         start_time = time.perf_counter()
 
         self._build_static_geometry()
         self._build_world_vbos()
         self._geometry_built = True
 
-        # Optional: Log build time for debugging
         build_time = time.perf_counter() - start_time
         if build_time > 1.0:
             print(f"Geometry built in {build_time:.2f}s")
@@ -299,7 +280,6 @@ class OpenGLRenderer:
         glPopMatrix()
 
     def _draw_jail_table_and_book(self, anim_t: float) -> None:
-        # Visual cue for interactable jail book (ported from PySide).
         if not getattr(self.core, 'jail_book_cell', None):
             return
         jr, jc = self.core.jail_book_cell
@@ -329,16 +309,6 @@ class OpenGLRenderer:
         self._draw_untextured_cube()
         glPopMatrix()
 
-        # Book glow marker
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-        glDepthMask(False)
-        self._radial_sprite_glow(0.0, 0.70, 0.0, 0.55,
-                                 (0.95, 0.85, 0.35), 0.16)
-        self._radial_sprite_glow(0.0, 0.70, 0.0, 0.95,
-                                 (0.95, 0.85, 0.35), 0.06)
-        glDepthMask(True)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
         glPopMatrix()
         glEnable(GL_LIGHTING)
         glEnable(GL_TEXTURE_2D)
@@ -360,7 +330,6 @@ class OpenGLRenderer:
                 self.sky_color[1]), float(self.sky_color[2]), 1.0])
 
     def render(self) -> None:
-        # Lazy load textures and geometry on first render
         self._ensure_textures_loaded()
         self._ensure_geometry_built()
 
@@ -369,8 +338,6 @@ class OpenGLRenderer:
 
         frozen = bool(getattr(self.core, 'simulation_frozen', False))
 
-        # Drive small renderer-only animations (ghost bob, coin spin, etc.) from wall clock.
-        # Using core.elapsed_s can stall if the update loop is paused or dt is clamped.
         now = time.perf_counter()
         if self._last_anim_perf_s is None:
             self._last_anim_perf_s = now
@@ -379,7 +346,6 @@ class OpenGLRenderer:
         if not frozen:
             self._anim_clock_s += dt_anim
 
-        # Keep this for compatibility with any other code that might still expect it.
         try:
             self._last_anim_elapsed_s = float(
                 getattr(self.core, 'elapsed_s', 0.0) or 0.0)
@@ -430,11 +396,9 @@ class OpenGLRenderer:
 
         self._draw_entities(anim_t)
 
-        # Moving platforms - use streaming buffers
         platform_buffer = self._build_platforms_buffer(anim_t)
         self._draw_platforms(platform_buffer)
 
-        # Gates - use streaming buffers
         gate_buffer = self._build_gates_buffer(anim_t)
         self._draw_gates(gate_buffer)
 
@@ -455,7 +419,6 @@ class OpenGLRenderer:
         ar, ac = arrow.cell
         cx = float(ac) + 0.5
         cz = float(ar) + 0.5
-        # Position lower (was 0.62, now 0.45) + bounce instead of bob
         bounce = 0.08 * math.sin(anim_t * 2.5)  # Smooth bounce animation
         cy = float(getattr(self.core, 'wall_height', 3.0)) * 0.45 + bounce
 
@@ -463,21 +426,17 @@ class OpenGLRenderer:
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        # Pulsing alpha
         pulse = 0.75 + 0.25 * math.sin(anim_t * 3.0)
 
-        # ── Ultra-smooth glow halo (coin-style single layer) ─────────────────────
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_LIGHTING)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE)
         glDepthMask(False)
 
-        # Camera vectors for glow orientation (like coins)
         yaw = float(self.core.player.yaw)
         rx = math.cos(yaw)
         rz = -math.sin(yaw)
 
-        # Single large glow with perfect radial fade (coin technique)
         glow_radius = 1.5
         glow_alpha = 0.25 * pulse
 
@@ -497,13 +456,10 @@ class OpenGLRenderer:
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glEnable(GL_DEPTH_TEST)
 
-        # ── Solid 3D arrow (visible through walls) ────────────────────────────────
-        # Disable depth test to make arrow visible through walls
         glDisable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
         glEnable(GL_LIGHT0)
 
-        # Solid materials (no transparency)
         glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT,  [0.0, 0.65, 0.20, 1.0])
         glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE,  [
                      0.0, 0.98, 0.35, 1.0])  # Alpha = 1.0 (solid)
@@ -513,21 +469,17 @@ class OpenGLRenderer:
 
         glPushMatrix()
         glTranslatef(cx, cy, cz)
-        # No rotation - just bounce
 
-        # Arrow dimensions (slightly larger for better visibility)
         shaft_r = 0.12   # shaft cylinder radius
         shaft_h = 0.60   # shaft length
         head_r = 0.30   # arrowhead cone base radius
         head_h = 0.42   # arrowhead cone height
         seg = 32     # increased smoothness
 
-        # Arrow points DOWNWARD: tip at bottom (0, -shaft_h/2 - head_h, 0)
         shaft_top = shaft_h * 0.5          # top of shaft (y+)
         shaft_bot = -shaft_h * 0.5         # bottom of shaft / base of cone
         tip_y = shaft_bot - head_h     # tip of arrowhead
 
-        # ── Shaft: cylinder (enhanced smoothness) ───────────────────────────────────
         glBegin(GL_TRIANGLE_STRIP)
         for i in range(seg + 1):
             a = (i / seg) * 2.0 * math.pi
@@ -537,7 +489,6 @@ class OpenGLRenderer:
             glVertex3f(ca * shaft_r, shaft_bot, sa * shaft_r)
         glEnd()
 
-        # Shaft top cap
         glBegin(GL_TRIANGLE_FAN)
         glNormal3f(0.0, 1.0, 0.0)
         glVertex3f(0.0, shaft_top, 0.0)
@@ -546,7 +497,6 @@ class OpenGLRenderer:
             glVertex3f(math.cos(a) * shaft_r, shaft_top, math.sin(a) * shaft_r)
         glEnd()
 
-        # ── Arrowhead cone base cap ─────────────────────────────────────────
         glBegin(GL_TRIANGLE_FAN)
         glNormal3f(0.0, 1.0, 0.0)
         glVertex3f(0.0, shaft_bot, 0.0)
@@ -555,7 +505,6 @@ class OpenGLRenderer:
             glVertex3f(math.cos(a) * head_r, shaft_bot, math.sin(a) * head_r)
         glEnd()
 
-        # ── Arrowhead cone side (smooth normals along slant) ────────────────
         slant = math.atan2(head_r, head_h)   # angle from vertical
         # upward component of outward normal
         ny = math.sin(slant)
@@ -573,7 +522,6 @@ class OpenGLRenderer:
         glPopMatrix()
         glEnable(GL_DEPTH_TEST)
 
-        # Reset material to default so other geometry is unaffected
         glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, [0.0, 0.0, 0.0, 1.0])
         glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE,  [0.8, 0.8, 0.8, 1.0])
         glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, [0.0, 0.0, 0.0, 1.0])
@@ -722,7 +670,6 @@ class OpenGLRenderer:
 
             for r in range(grid_h):
                 for c in range(grid_w):
-                    # Use sector mapping like PySide version
                     if (r, c) in getattr(self.core, 'walls', set()):
                         continue
                     sid = ''
@@ -739,7 +686,6 @@ class OpenGLRenderer:
                     mdc.SetBrush(wx.Brush(col))
                     mdc.DrawRectangle(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
 
-            # Sector letters: compute centroid per sector id.
             acc: dict[str, tuple[float, float, int]] = {}
             sid_for = getattr(self.core, 'sector_id_for_cell', None)
             if callable(sid_for):
@@ -767,7 +713,6 @@ class OpenGLRenderer:
                 py = oy + (cr + 0.5) * cell
                 mdc.DrawText(str(sid)[:1], int(px - 10), int(py - 18))
 
-            # Exit label
             if getattr(self.core, 'exit_cells', None):
                 try:
                     er, ec = self.core.exit_cells[0]
@@ -798,14 +743,11 @@ class OpenGLRenderer:
                 return 0
             rgb_b = bytes(rgb)
 
-            # Skip InitAlpha() - it sets all alpha to 0 (invisible)
-            # Instead, force all alpha values to 255 (opaque) using numpy
             import numpy as np
             rgb_array = np.frombuffer(rgb_b, dtype=np.uint8).reshape(w, h, 3)
             # All pixels opaque
             alpha_array = np.full((w, h), 255, dtype=np.uint8)
 
-            # Combine RGB and Alpha into RGBA
             rgba_array = np.dstack((rgb_array, alpha_array))
             data_bytes = rgba_array.tobytes()
         except Exception as e:
@@ -826,7 +768,6 @@ class OpenGLRenderer:
         return int(tex_id)
 
     def _draw_sector_signs_and_jail_painting(self) -> None:
-        # Ported from PySide renderer: wall-mounted "SECTOR X" signs + jail painting (sector map texture).
         sector_signs = getattr(self.core, 'sector_signs', None) or {}
         painting = getattr(self.core, 'jail_painting', None)
         if (not sector_signs) and (not painting):
@@ -944,7 +885,6 @@ class OpenGLRenderer:
                 cx = cz = cy = 0.0
                 facing = 'N'
 
-            # Shift the painting along the wall away from corners to avoid being clipped.
             dr, dc = (0, 0)
             if facing == 'N':
                 dr, dc = (-1, 0)
@@ -981,13 +921,11 @@ class OpenGLRenderer:
                     shift = max(-0.28, min(0.28, (pos - neg) * 0.12))
                     cz += shift
 
-            # Frame
             glColor4f(0.30, 0.20, 0.10, 1.0)
             glBegin(GL_QUADS)
             _wall_quad(cx, cy, cz, 0.78, 0.50, str(facing))
             glEnd()
 
-            # Canvas background
             glColor4f(0.08, 0.08, 0.10, 0.98)
             glBegin(GL_QUADS)
             _wall_quad(cx, cy, cz, 0.72, 0.44, str(facing))
@@ -1047,7 +985,6 @@ class OpenGLRenderer:
                 glBindTexture(GL_TEXTURE_2D, 0)
                 glDisable(GL_TEXTURE_2D)
 
-        # Reset texture environment and ensure proper state cleanup
         glBindTexture(GL_TEXTURE_2D, 0)
         glDisable(GL_TEXTURE_2D)
         glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE,
@@ -1055,7 +992,6 @@ class OpenGLRenderer:
         glEnable(GL_LIGHTING)
 
     def _draw_entities(self, anim_t: float) -> None:
-        # Minimal parity: key fragments + ghosts (ported from PySide immediate-mode entities).
         glDisable(GL_TEXTURE_2D)
 
         px = float(self.core.player.x)
@@ -1092,7 +1028,6 @@ class OpenGLRenderer:
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
         def radial_sprite_glow(cx: float, cy: float, cz: float, radius: float, color: Tuple[float, float, float], alpha: float) -> None:
-            # Seamless circular glow oriented towards the camera.
             from OpenGL.GL import GL_TRIANGLE_FAN
 
             glBlendFunc(GL_SRC_ALPHA, GL_ONE)
@@ -1111,15 +1046,12 @@ class OpenGLRenderer:
             glDepthMask(True)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        # Key fragments - use streaming buffers
         key_buffer = self._build_key_fragments_buffer(anim_t)
         self._draw_key_fragments(key_buffer)
 
-        # Ghosts (streaming buffer - exact same as Kivy)
         ghost_buffer = self._build_ghosts_buffer(anim_t)
         self._draw_ghosts(ghost_buffer)
 
-        # Spike traps - use streaming buffers
         spike_buffer = self._build_spikes_buffer(anim_t)
         self._draw_spikes(spike_buffer)
 
@@ -1155,10 +1087,8 @@ class OpenGLRenderer:
                     pass
             self._chunk_vbos.clear()
 
-        # Also clean up ghost VBOs
         self._delete_ghost_vbos()
 
-        # Clean up streaming buffers
         try:
             if self._coin_geom_vbo is not None:
                 glDeleteBuffers(1, [int(self._coin_geom_vbo)])
@@ -1207,7 +1137,6 @@ class OpenGLRenderer:
         self._ghosts_vertex_count = 0
 
     def _build_world_vbos(self) -> None:
-        # Only rebuild VBOs if they don't exist or world has changed
         if self._world_vbo_floor is not None and self._world_vbo_wall is not None:
             if hasattr(self, '_world_vbo_hash'):
                 current_hash = hash(
@@ -1215,7 +1144,6 @@ class OpenGLRenderer:
                 if current_hash == self._world_vbo_hash:
                     return
 
-        # Clear existing VBOs (single deletion - no double delete)
         self._delete_world_vbos()
 
         from array import array
@@ -1305,7 +1233,6 @@ class OpenGLRenderer:
         except Exception:
             self._delete_world_vbos()
 
-        # Store hash to detect changes (moved from _draw_world)
         self._world_vbo_hash = hash(
             (tuple(sorted(self.core.floors)), tuple(sorted(self.core.walls))))
 
@@ -1313,7 +1240,6 @@ class OpenGLRenderer:
         """Build VBOs for ghost body and eyes."""
         from array import array
 
-        # Clean up existing ghost VBOs
         self._delete_ghost_vbos()
 
         segments = 26 if self._fast_mode else 40
@@ -1329,7 +1255,6 @@ class OpenGLRenderer:
                 rv = radius * 0.95
             return yv, rv
 
-        # Body geometry
         body: array = array('f')
         for layer in range(1, body_layers):
             y_prev, r_prev = y_and_r((layer - 1) / (body_layers - 1))
@@ -1355,7 +1280,6 @@ class OpenGLRenderer:
                 self._ghost_body_vbo = None
                 self._ghost_body_vertex_count = 0
 
-        # Eyes geometry (two quads as triangles)
         eye: array = array('f')
         eye_y = radius * 0.22
         eye_z = radius * 1.05
@@ -1389,7 +1313,6 @@ class OpenGLRenderer:
         """Pre-build ceiling lamp geometry (static per level)."""
         from array import array
 
-        # Only clean up existing lamp VBO if we're rebuilding (not on first build)
         if self._lamp_vbo is not None:
             try:
                 glDeleteBuffers(1, [int(self._lamp_vbo)])
@@ -1406,13 +1329,10 @@ class OpenGLRenderer:
         def is_floor(rr, cc):
             return (rr, cc) in floors and (rr, cc) not in walls
 
-        # Create exclusion zones for lamp placement (same as coins)
         exclusion_zones = set()
 
-        # Add all gate cells
         exclusion_zones.update(self.core.gate_cells)
 
-        # Find all 'd' gate cells in layout
         gate_cells = []
         if hasattr(self.core, 'layout') and self.core.layout:
             for r, row in enumerate(self.core.layout):
@@ -1420,7 +1340,6 @@ class OpenGLRenderer:
                     if char == 'd':
                         gate_cells.append((r, c))
 
-        # Exclude from start cells to nearest gate
         for start_cell in self.core.start_cells:
             if gate_cells:
                 nearest_gate = min(gate_cells, key=lambda g: abs(
@@ -1433,7 +1352,6 @@ class OpenGLRenderer:
                     for c in range(min_c, max_c + 1):
                         exclusion_zones.add((r, c))
 
-        # Exclude from exit cells to nearest gate
         for exit_cell in self.core.exit_cells:
             if gate_cells:
                 nearest_gate = min(gate_cells, key=lambda g: abs(
@@ -1446,7 +1364,6 @@ class OpenGLRenderer:
                     for c in range(min_c, max_c + 1):
                         exclusion_zones.add((r, c))
 
-        # Find lamp candidates (same logic as before, but exclude gate areas)
         candidates = []
         for (r, c) in floors:
             if (r, c) in walls or (r, c) in exclusion_zones:
@@ -1468,7 +1385,6 @@ class OpenGLRenderer:
 
         self._lamp_positions = list(lamps)
 
-        # Build lamp geometry (same as PySide6/Kivy)
         lamp_data = array('f')
         DARK = (0.10, 0.10, 0.12, 1.0)
         METAL = (0.18, 0.18, 0.22, 1.0)
@@ -1480,43 +1396,36 @@ class OpenGLRenderer:
             y0, y1 = cy - sy, cy + sy
             z0, z1 = cz - sz, cz + sz
 
-            # Each face: 2 triangles = 6 vertices
-            # Front face
             lamp_data.extend([x0, y0, z1, *color])
             lamp_data.extend([x1, y0, z1, *color])
             lamp_data.extend([x1, y1, z1, *color])
             lamp_data.extend([x0, y0, z1, *color])
             lamp_data.extend([x1, y1, z1, *color])
             lamp_data.extend([x0, y1, z1, *color])
-            # Back face
             lamp_data.extend([x0, y0, z0, *color])
             lamp_data.extend([x0, y1, z0, *color])
             lamp_data.extend([x1, y1, z0, *color])
             lamp_data.extend([x0, y0, z0, *color])
             lamp_data.extend([x1, y1, z0, *color])
             lamp_data.extend([x1, y0, z0, *color])
-            # Left face
             lamp_data.extend([x0, y0, z0, *color])
             lamp_data.extend([x0, y0, z1, *color])
             lamp_data.extend([x0, y1, z1, *color])
             lamp_data.extend([x0, y0, z0, *color])
             lamp_data.extend([x0, y1, z1, *color])
             lamp_data.extend([x0, y1, z0, *color])
-            # Right face
             lamp_data.extend([x1, y0, z0, *color])
             lamp_data.extend([x1, y1, z0, *color])
             lamp_data.extend([x1, y1, z1, *color])
             lamp_data.extend([x1, y0, z0, *color])
             lamp_data.extend([x1, y1, z1, *color])
             lamp_data.extend([x1, y0, z1, *color])
-            # Top face
             lamp_data.extend([x0, y1, z0, *color])
             lamp_data.extend([x1, y1, z0, *color])
             lamp_data.extend([x1, y1, z1, *color])
             lamp_data.extend([x0, y1, z0, *color])
             lamp_data.extend([x1, y1, z1, *color])
             lamp_data.extend([x0, y1, z1, *color])
-            # Bottom face
             lamp_data.extend([x0, y0, z0, *color])
             lamp_data.extend([x0, y0, z1, *color])
             lamp_data.extend([x1, y0, z1, *color])
@@ -1526,17 +1435,13 @@ class OpenGLRenderer:
 
         for r, c in lamps:
             cx, cz = c + 0.5, r + 0.5
-            # Dark stem
             add_cube(cx, ceil_h - 0.15 + 0.18, cz, 0.015, 0.18, 0.015, DARK)
-            # Metal shade
             add_cube(cx, ceil_h - 0.15 + 0.02, cz, 0.13, 0.05, 0.13, METAL)
-            # Warm bulb
             add_cube(cx, ceil_h - 0.15 - 0.02, cz, 0.05, 0.035, 0.05, WARM)
 
         # 7 floats per vertex (x,y,z,r,g,b,a)
         self._lamp_vertex_count = len(lamp_data) // 7
 
-        # Upload to VBO
         if self._lamp_vertex_count > 0:
             try:
                 vbo = glGenBuffers(1)
@@ -1864,7 +1769,6 @@ class OpenGLRenderer:
         if not os.path.exists(path):
             return None
 
-        # Cache texture IDs by path to avoid reloading
         if hasattr(self, '_texture_cache'):
             cached = self._texture_cache.get(path)
             if cached:
@@ -1880,20 +1784,14 @@ class OpenGLRenderer:
         if img is None or (not img.IsOk()):
             return None
 
-        # Ensure RGBA and flip vertically to match OpenGL texture coords.
         try:
             if not img.HasAlpha():
-                # Create proper alpha channel - make fully opaque
                 img.InitAlpha()
             else:
-                # For wall/floor textures, ensure full opacity
-                # For coin textures, preserve transparency
                 path_lower = str(path).lower()
                 if 'coin' in path_lower or 'jema' in path_lower:
-                    # Keep transparency for coins
                     pass
                 else:
-                    # Make walls/floors fully opaque
                     alpha_buf = img.GetAlphaBuffer()
                     if alpha_buf:
                         alpha_data = bytes(alpha_buf)
@@ -1904,7 +1802,6 @@ class OpenGLRenderer:
         except Exception:
             pass
         try:
-            # Flip vertically to match other frameworks (PySide6 uses mirrored(False, True))
             img = img.Mirror(False, True)  # Flip vertically like PySide6/Kivy
         except Exception:
             pass
@@ -1916,7 +1813,6 @@ class OpenGLRenderer:
             alpha = img.GetAlphaBuffer()
             if rgb is None or alpha is None:
                 return None
-            # Interleave RGB + A into RGBA using numpy (40-50x faster than Python loop).
             rgb_arr = np.frombuffer(
                 bytes(rgb), dtype=np.uint8).reshape(w * h, 3)
             a_arr = np.frombuffer(bytes(alpha), dtype=np.uint8)
@@ -1937,7 +1833,6 @@ class OpenGLRenderer:
                      0, GL_RGBA, GL_UNSIGNED_BYTE, data_bytes)
         glBindTexture(GL_TEXTURE_2D, 0)
 
-        # Cache the texture ID
         self._texture_cache[path] = int(tex_id)
         return int(tex_id)
 
@@ -1947,14 +1842,12 @@ class OpenGLRenderer:
             return
 
         try:
-            # Delete all GL textures
             for tex_id, _, _ in self._text_texture_cache.values():
                 if tex_id and tex_id > 0:
                     glDeleteTextures([tex_id])
         except Exception:
             pass
 
-        # Clear the cache
         self._text_texture_cache.clear()
 
     def get_text_texture(self, text: str, *, font_family: str = 'Segoe UI', font_size: int = 28, bold: bool = True,
@@ -1969,9 +1862,7 @@ class OpenGLRenderer:
         if not text:
             return (0, 1, 1)
 
-        # Limit cache size to prevent memory bloat
         if len(self._text_texture_cache) > 200:
-            # Remove oldest 50 entries and delete GL textures
             glBindTexture(GL_TEXTURE_2D, 0)  # ADD THIS: Unbind before deleting
             keys_to_remove = list(self._text_texture_cache.keys())[:50]
             for k in keys_to_remove:
@@ -1998,7 +1889,6 @@ class OpenGLRenderer:
                 wx.FONTWEIGHT_BOLD if bool(bold) else wx.FONTWEIGHT_NORMAL,
             )
 
-        # Measure via wx.DC.
         try:
             mdc = wx.MemoryDC()
             bmp = wx.Bitmap(4, 4)
@@ -2016,8 +1906,6 @@ class OpenGLRenderer:
         bmp = wx.Bitmap(w, h)
         mdc = wx.MemoryDC(bmp)
         try:
-            # Render WHITE text on BLACK background regardless of requested color
-            # Then use luminance as alpha, and tint the RGB to the requested color
             mdc.SetBackground(wx.Brush(wx.Colour(0, 0, 0, 255)))
             mdc.Clear()
             gc = wx.GraphicsContext.Create(mdc)
@@ -2026,7 +1914,6 @@ class OpenGLRenderer:
                     gc.SetAntialiasMode(wx.ANTIALIAS_DEFAULT)
                 except Exception:
                     pass
-                # Always render in white — we'll colorize in the RGBA step
                 gc.SetFont(font, wx.Colour(255, 255, 255, 255))
                 gc.DrawText(text, float(pad), float(pad))
             else:
@@ -2045,10 +1932,8 @@ class OpenGLRenderer:
             rgb_arr = np.frombuffer(
                 bytes(rgb_buf), dtype=np.uint8).reshape(w * h, 3)
 
-            # Use max channel as alpha (luminance mask) — smooth antialiasing preserved
             lum = rgb_arr.max(axis=1).astype(np.float32) / 255.0
 
-            # Colorize: multiply white coverage by requested color
             r_col = int(color[0]) / 255.0
             g_col = int(color[1]) / 255.0
             b_col = int(color[2]) / 255.0
@@ -2077,7 +1962,6 @@ class OpenGLRenderer:
         return out
 
     def _get_text_texture(self, text: str) -> int:
-        # Backwards-compatible helper: return only the texture id.
         tex, _, _ = self.get_text_texture(text)
         return int(tex)
 
@@ -2096,13 +1980,11 @@ class OpenGLRenderer:
         TWO_PI = 6.283185307179586
         RAD_TO_DEG = 57.29577951308232
 
-        # Camera vectors for glow effects
         yaw = self.core.player.yaw
         right_x = math.cos(yaw)
         right_z = -math.sin(yaw)
 
         def radial_sprite_glow(cx: float, cy: float, cz: float, radius: float, color: Tuple[float, float, float], alpha: float) -> None:
-            # Seamless circular glow oriented towards the camera (no rectangular billboard edges).
             glBlendFunc(GL_SRC_ALPHA, GL_ONE)
             glDepthMask(False)
             glBegin(GL_TRIANGLE_FAN)
@@ -2148,8 +2030,6 @@ class OpenGLRenderer:
             if textured and self._tex_coin is not None:
                 inner_radius = radius * 0.92
 
-                # Solid base cap (full radius) to avoid any see-through ring between
-                # the textured disc and the rim.
                 glColor4f(1.0, 0.84, 0.18, 0.98)
                 glBegin(GL_TRIANGLE_FAN)
                 glVertex3f(0.0, y1, 0.0)
@@ -2218,18 +2098,14 @@ class OpenGLRenderer:
             glVertex3f(0.0, y0, 0.0)
             glEnd()
 
-        # Coins - use streaming buffers
         coin_buffer = self._build_coin_buffer(anim_t)
         tex_buffer = self._build_coin_tex_buffer(anim_t)
         glow_buffer = self._build_glow_buffer(anim_t)
 
-        # Draw coin geometries first (preserves original order)
         self._draw_coin_geometries(coin_buffer)
 
-        # Draw textured coins second (preserves original order)
         self._draw_coin_textures(tex_buffer)
 
-        # Draw additive glows third (preserves original order)
         self._draw_additive_glows(glow_buffer)
 
     def _draw_ceiling_lamps(self) -> None:
@@ -2244,16 +2120,13 @@ class OpenGLRenderer:
         def is_floor(rr: int, cc: int) -> bool:
             return (rr, cc) in self.core.floors and (rr, cc) not in self.core.walls
 
-        # Use lamp positions already computed by _build_lamp_vbo() - no redundant computation
         lamps = self._lamp_positions
 
-        # Camera vectors for billboard effects
         yaw = self.core.player.yaw
         right_x = math.cos(yaw)
         right_z = -math.sin(yaw)
 
         def floor_glow(cx: float, cz: float, y: float, radius: float, color: Tuple[float, float, float], alpha: float) -> None:
-            # Camera-independent circular glow projected onto the floor.
             glBlendFunc(GL_SRC_ALPHA, GL_ONE)
             glDepthMask(False)
             glBegin(GL_TRIANGLE_FAN)
@@ -2292,14 +2165,12 @@ class OpenGLRenderer:
             glDepthMask(True)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        # Ceiling lamps (VBO-based, matching Kivy/PySide6)
         if self._lamp_vbo is not None and self._lamp_vertex_count > 0:
             glDisable(GL_TEXTURE_2D)
             glDisable(GL_LIGHTING)
             glEnable(GL_BLEND)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-            # Draw lamp VBO
             glDisable(GL_LIGHTING)  # Fix GL_LIGHTING state bleed
             glEnableClientState(GL_VERTEX_ARRAY)
             glEnableClientState(GL_COLOR_ARRAY)
@@ -2313,7 +2184,6 @@ class OpenGLRenderer:
             glDisableClientState(GL_VERTEX_ARRAY)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-            # Draw lamp glow effects (same as before)
             ceil_h = float(self.core.ceiling_height)
             for r, c in self._lamp_positions:
                 cx = c + 0.5
@@ -2331,13 +2201,11 @@ class OpenGLRenderer:
             return
         base = 0.18
         glBegin(GL_QUADS)
-        # base plate
         glVertex3f(-base, 0.01, -base)
         glVertex3f(base, 0.01, -base)
         glVertex3f(base, 0.01, base)
         glVertex3f(-base, 0.01, base)
         glEnd()
-        # four sides
         from OpenGL.GL import GL_TRIANGLES
         glBegin(GL_TRIANGLES)
         glVertex3f(-base, 0.01, -base)
@@ -2353,8 +2221,6 @@ class OpenGLRenderer:
         glVertex3f(-base, 0.01, -base)
         glVertex3f(0.0, height, 0.0)
         glEnd()
-
-    # ------------------------------------------------------------------ streaming buffers
 
     def _build_coin_buffer(self, anim_t: float) -> array:
         """Build coin geometry buffer with exact same math as immediate mode."""
@@ -2375,34 +2241,27 @@ class OpenGLRenderer:
             if d2 > entity_r2:
                 continue
 
-            # Exact same animation as original
             bob = 0.06 * math.sin(anim_t * 1.6 + r * 0.37 + c * 0.51)
             spin = (anim_t * 3.0) % TWO_PI
             cy = 1.22 + bob
 
-            # Transform math: glRotatef(90,1,0,0) then glRotatef(spin,0,1,0)
             cos_s, sin_s = math.cos(spin), math.sin(spin)
 
             def xform(lx, ly, lz):
-                # Rotate X by 90: (lx, -lz, ly)
                 ax, ay, az = lx, -lz, ly
-                # Rotate Y by spin:
                 wx = ax * cos_s + az * sin_s
                 wz = -ax * sin_s + az * cos_s
                 return cx + wx, cy + ay, cz + wz
 
-            # Coin geometry parameters (exact match)
             thickness = 0.04
             radius = 0.14
             segments = 24 if d2 <= glow_r2 else 16
             y0, y1 = -thickness / 2.0, thickness / 2.0
 
-            # Rim quads (two triangles each)
             for i in range(segments):
                 a0 = (i / segments) * TWO_PI
                 a1 = ((i + 1) / segments) * TWO_PI
 
-                # Local coordinates
                 p = [
                     (math.cos(a0) * radius, y0, math.sin(a0) * radius),
                     (math.cos(a1) * radius, y0, math.sin(a1) * radius),
@@ -2412,7 +2271,6 @@ class OpenGLRenderer:
                     (math.cos(a0) * radius, y1, math.sin(a0) * radius),
                 ]
 
-                # Colors alternate like original
                 col = (1.0, 0.84, 0.18, 0.98) if i % 2 == 0 else (
                     240/255, 168/255, 48/255, 0.98)
 
@@ -2420,7 +2278,6 @@ class OpenGLRenderer:
                     wx, wy, wz = xform(lx, ly, lz)
                     buf.extend([wx, wy, wz, col[0], col[1], col[2], col[3]])
 
-            # Top/bottom disc fans (textured)
             gold = (1.0, 0.84, 0.18, 0.98)
             for sign, yf in ((1, y1), (-1, y0)):
                 for i in range(segments):
@@ -2457,23 +2314,18 @@ class OpenGLRenderer:
             if d2 > entity_r2:
                 continue
 
-            # Exact same animation as original
             bob = 0.06 * math.sin(anim_t * 1.6 + r * 0.37 + c * 0.51)
             spin = (anim_t * 3.0) % TWO_PI
             cy = 1.22 + bob
 
-            # Transform math: glRotatef(90,1,0,0) then glRotatef(spin,0,1,0)
             cos_s, sin_s = math.cos(spin), math.sin(spin)
 
             def xform(lx, ly, lz):
-                # Rotate X by 90: (lx, -lz, ly)
                 ax, ay, az = lx, -lz, ly
-                # Rotate Y by spin:
                 wx = ax * cos_s + az * sin_s
                 wz = -ax * sin_s + az * cos_s
                 return cx + wx, cy + ay, cz + wz
 
-            # Coin geometry parameters (exact match)
             thickness = 0.04
             radius = 0.14
             inner_r = radius * 0.92
@@ -2481,7 +2333,6 @@ class OpenGLRenderer:
             y1 = thickness / 2.0 + 0.001  # Slight offset for textured layer
             y0 = -thickness / 2.0 - 0.001
 
-            # Textured disc fans (top and bottom)
             for sign, yf in ((1, y1), (-1, y0)):
                 for i in range(segments):
                     a0 = (i / segments) * TWO_PI
@@ -2509,12 +2360,10 @@ class OpenGLRenderer:
         entity_r2 = 18.0 ** 2
         glow_r2 = 12.0 ** 2
 
-        # Camera direction for glow orientation (same as original)
         yaw = float(getattr(player, 'yaw', 0.0) or 0.0)
         right_x = math.cos(yaw)
         right_z = -math.sin(yaw)
 
-        # Coin glows
         for coin in self.core.coins.values():
             if coin.taken:
                 continue
@@ -2526,21 +2375,17 @@ class OpenGLRenderer:
                 continue
 
             if d2 <= glow_r2:
-                # Exact same glow parameters as original
                 bob = 0.06 * math.sin(anim_t * 1.6 + r * 0.37 + c * 0.51)
                 pulse = 0.16 + 0.06 * \
                     math.sin(anim_t * 2.2 + r * 0.17 + c * 0.23)
                 cy = 1.22 + bob
 
-                # Build triangle fan for glow
                 glow_radius = 0.34
                 glow_color = (1.0, 0.90, 0.35)
 
-                # Center vertex
                 buf.extend([cx, cy, cz, glow_color[0],
                            glow_color[1], glow_color[2], pulse])
 
-                # Ring vertices (fade to transparent)
                 for i in range(29):
                     a = (i / 28) * TWO_PI
                     x = math.cos(a) * glow_radius
@@ -2550,12 +2395,10 @@ class OpenGLRenderer:
                     buf.extend([wx, cy + y, wz, glow_color[0],
                                glow_color[1], glow_color[2], 0.0])
 
-        # TODO: Add ghost glows, lamp glows, etc. later
         return buf
 
     def _draw_coin_geometries(self, coin_buffer: array) -> None:
         """Draw coin geometries with exact OpenGL state as original."""
-        # Initialize VBOs on-demand if not already done
         if self._coin_geom_vbo is None:
             vbo = glGenBuffers(1)
             self._coin_geom_vbo = int(vbo) if vbo else None
@@ -2570,21 +2413,18 @@ class OpenGLRenderer:
         data = coin_buffer.tobytes()
         stride = 7 * 4  # 7 floats × 4 bytes
 
-        # Exact same state setup as original coin rendering
         glDisable(GL_LIGHTING)
         glDisable(GL_TEXTURE_2D)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_COLOR_ARRAY)
 
-        # Upload and draw
         glBindBuffer(GL_ARRAY_BUFFER, self._coin_geom_vbo)
         glBufferData(GL_ARRAY_BUFFER, len(data), data, GL_STREAM_DRAW)
         glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
         glColorPointer(4, GL_FLOAT, stride, ctypes.c_void_p(12))
         glDrawArrays(GL_TRIANGLES, 0, len(coin_buffer) // 7)
 
-        # Cleanup
         glDisableClientState(GL_COLOR_ARRAY)
         glDisableClientState(GL_VERTEX_ARRAY)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -2597,7 +2437,6 @@ class OpenGLRenderer:
         data = tex_buffer.tobytes()
         stride = 5 * 4  # 5 floats × 4 bytes
 
-        # Exact same state setup as original textured coin rendering
         glDisable(GL_LIGHTING)
         glEnable(GL_TEXTURE_2D)
         glBindTexture(GL_TEXTURE_2D, self._tex_coin)
@@ -2605,7 +2444,6 @@ class OpenGLRenderer:
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_TEXTURE_COORD_ARRAY)
 
-        # Upload and draw
         glBindBuffer(GL_ARRAY_BUFFER, self._coin_tex_vbo)
         glBufferData(GL_ARRAY_BUFFER, len(data), data, GL_STREAM_DRAW)
         glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
@@ -2613,7 +2451,6 @@ class OpenGLRenderer:
         glColor4f(1.0, 1.0, 1.0, 0.98)  # White color for textured rendering
         glDrawArrays(GL_TRIANGLES, 0, len(tex_buffer) // 5)
 
-        # Cleanup
         glDisableClientState(GL_TEXTURE_COORD_ARRAY)
         glDisableClientState(GL_VERTEX_ARRAY)
         glBindTexture(GL_TEXTURE_2D, 0)
@@ -2627,7 +2464,6 @@ class OpenGLRenderer:
         data = glow_buffer.tobytes()
         stride = 7 * 4  # 7 floats × 4 bytes
 
-        # Exact same state setup as original radial_sprite_glow
         glDisable(GL_LIGHTING)
         glDisable(GL_TEXTURE_2D)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE)
@@ -2635,20 +2471,17 @@ class OpenGLRenderer:
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_COLOR_ARRAY)
 
-        # Upload and draw - each glow is 30 vertices (1 center + 29 ring)
         glBindBuffer(GL_ARRAY_BUFFER, self._glow_additive_vbo)
         glBufferData(GL_ARRAY_BUFFER, len(data), data, GL_STREAM_DRAW)
         glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
         glColorPointer(4, GL_FLOAT, stride, ctypes.c_void_p(12))
 
-        # Draw each glow as separate triangle fan (30 vertices per glow)
         vertices_per_glow = 30
         glow_count = len(glow_buffer) // (7 * vertices_per_glow)
         for i in range(glow_count):
             offset = i * vertices_per_glow
             glDrawArrays(GL_TRIANGLE_FAN, offset, vertices_per_glow)
 
-        # Cleanup (exact match to original)
         glDepthMask(True)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glDisableClientState(GL_COLOR_ARRAY)
@@ -2662,7 +2495,6 @@ class OpenGLRenderer:
         px, pz = float(player.x), float(player.z)
         entity_r2 = 18.0 ** 2
 
-        # Get spike height factor from core (same as Kivy)
         h_factor = float(self.core.spike_height_factor()) if hasattr(
             self.core, 'spike_height_factor') else 0.0
 
@@ -2674,19 +2506,16 @@ class OpenGLRenderer:
             if d2 > entity_r2:
                 continue
 
-            # Exact same spike geometry as Kivy's spike_col method
             height = 0.85 * h_factor
             if height <= 0.02:
                 continue
 
             base = 0.18
-            # Use active/inactive colors like original
             RED = (0.85, 0.15, 0.15, 1.0) if sp.active else (
                 0.45, 0.12, 0.12, 1.0)
             y_base = 0.01
             y_tip = height
 
-            # Disc fan base (8 segments like Kivy)
             for i in range(8):
                 a0 = (i / 8) * (2.0 * math.pi)
                 a1 = ((i + 1) / 8) * (2.0 * math.pi)
@@ -2695,11 +2524,9 @@ class OpenGLRenderer:
                 x1 = cx + math.cos(a1) * base
                 z1 = cz + math.sin(a1) * base
 
-                # Two triangles for disc fan
                 for (lx, ly, lz) in [(x0, y_base, z0), (x1, y_base, z1), (cx, y_base, cz)]:
                     buf.extend([lx, ly, lz, *RED])
 
-            # Triangle sides (8 segments like Kivy)
             for i in range(8):
                 a0 = (i / 8) * (2.0 * math.pi)
                 a1 = ((i + 1) / 8) * (2.0 * math.pi)
@@ -2708,7 +2535,6 @@ class OpenGLRenderer:
                 x1 = cx + math.cos(a1) * base
                 z1 = cz + math.sin(a1) * base
 
-                # Triangle for each side
                 for (lx, ly, lz) in [(x0, y_base, z0), (x1, y_base, z1), (cx, y_tip, cz)]:
                     buf.extend([lx, ly, lz, *RED])
 
@@ -2721,7 +2547,6 @@ class OpenGLRenderer:
         px, pz = float(player.x), float(player.z)
         entity_r2 = 18.0 ** 2
 
-        # Exact same colors as Kivy's platform_col method
         BROWN = (0.6, 0.4, 0.2, 1.0)
         DARK = (0.4, 0.3, 0.15, 1.0)
 
@@ -2733,37 +2558,28 @@ class OpenGLRenderer:
             if d2 > entity_r2:
                 continue
 
-            # Exact same platform geometry as Kivy's platform_col method
             cy = plat.y_offset
 
-            # Main platform cube (0.4 x 0.05 x 0.4, centered at cy + 0.05)
             sx, sy, sz = 0.4, 0.05, 0.4
             x0, x1 = cx - sx, cx + sx
             y0, y1 = cy, cy + sy * 2  # sy=0.05, so height is 0.1 total
             z0, z1 = cz - sz, cz + sz
 
-            # Each face: 2 triangles = 6 vertices
-            # Top face (BROWN)
             for (lx, ly, lz) in [(x0, y1, z0), (x1, y1, z0), (x1, y1, z1), (x0, y1, z0), (x1, y1, z1), (x0, y1, z1)]:
                 buf.extend([lx, ly, lz, *BROWN])
 
-            # Bottom face (DARK)
             for (lx, ly, lz) in [(x0, y0, z0), (x0, y0, z1), (x1, y0, z1), (x0, y0, z0), (x1, y0, z1), (x1, y0, z0)]:
                 buf.extend([lx, ly, lz, *DARK])
 
-            # Front face (BROWN)
             for (lx, ly, lz) in [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y0, z1), (x1, y1, z1), (x0, y1, z1)]:
                 buf.extend([lx, ly, lz, *BROWN])
 
-            # Back face (BROWN)
             for (lx, ly, lz) in [(x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x0, y0, z0), (x1, y1, z0), (x1, y0, z0)]:
                 buf.extend([lx, ly, lz, *BROWN])
 
-            # Left face (BROWN)
             for (lx, ly, lz) in [(x0, y0, z0), (x0, y0, z1), (x0, y1, z1), (x0, y0, z0), (x0, y1, z1), (x0, y1, z0)]:
                 buf.extend([lx, ly, lz, *BROWN])
 
-            # Right face (BROWN)
             for (lx, ly, lz) in [(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z0), (x1, y1, z1), (x1, y0, z1)]:
                 buf.extend([lx, ly, lz, *BROWN])
 
@@ -2771,7 +2587,6 @@ class OpenGLRenderer:
 
     def _draw_spikes(self, spike_buffer: array) -> None:
         """Draw spikes with exact OpenGL state as original."""
-        # Initialize VBOs on-demand if not already done
         if self._spikes_vbo is None:
             vbo = glGenBuffers(1)
             self._spikes_vbo = int(vbo) if vbo else None
@@ -2782,27 +2597,23 @@ class OpenGLRenderer:
         data = spike_buffer.tobytes()
         stride = 7 * 4  # 7 floats × 4 bytes
 
-        # Exact same state setup as original spike rendering
         glDisable(GL_LIGHTING)
         glDisable(GL_TEXTURE_2D)
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_COLOR_ARRAY)
 
-        # Upload and draw
         glBindBuffer(GL_ARRAY_BUFFER, self._spikes_vbo)
         glBufferData(GL_ARRAY_BUFFER, len(data), data, GL_STREAM_DRAW)
         glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
         glColorPointer(4, GL_FLOAT, stride, ctypes.c_void_p(12))
         glDrawArrays(GL_TRIANGLES, 0, len(spike_buffer) // 7)
 
-        # Cleanup
         glDisableClientState(GL_COLOR_ARRAY)
         glDisableClientState(GL_VERTEX_ARRAY)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
     def _draw_platforms(self, platform_buffer: array) -> None:
         """Draw platforms with exact OpenGL state as original."""
-        # Initialize VBOs on-demand if not already done
         if self._platforms_vbo is None:
             vbo = glGenBuffers(1)
             self._platforms_vbo = int(vbo) if vbo else None
@@ -2813,20 +2624,17 @@ class OpenGLRenderer:
         data = platform_buffer.tobytes()
         stride = 7 * 4  # 7 floats × 4 bytes
 
-        # Exact same state setup as original platform rendering
         glDisable(GL_LIGHTING)
         glDisable(GL_TEXTURE_2D)
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_COLOR_ARRAY)
 
-        # Upload and draw
         glBindBuffer(GL_ARRAY_BUFFER, self._platforms_vbo)
         glBufferData(GL_ARRAY_BUFFER, len(data), data, GL_STREAM_DRAW)
         glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
         glColorPointer(4, GL_FLOAT, stride, ctypes.c_void_p(12))
         glDrawArrays(GL_TRIANGLES, 0, len(platform_buffer) // 7)
 
-        # Cleanup
         glDisableClientState(GL_COLOR_ARRAY)
         glDisableClientState(GL_VERTEX_ARRAY)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -2838,7 +2646,6 @@ class OpenGLRenderer:
         px, pz = float(player.x), float(player.z)
         entity_r2 = 18.0 ** 2
 
-        # Exact same colors as Kivy's gate_bars_col method
         GRAY = (0.70, 0.70, 0.75, 1.0)
         CB = (0.65, 0.65, 0.70, 1.0)
 
@@ -2851,13 +2658,11 @@ class OpenGLRenderer:
                 if d2 > entity_r2:
                     continue
 
-                # Exact same gate geometry as Kivy's gate_bars_col method
                 gx, gy_center, gz = cx, wall_h / 2.0, cz
                 bar_h = wall_h
                 bar_y_center = gy_center + gate.y_offset
                 is_jail = gate.id == 'jail'
 
-                # 5 vertical bars
                 for i in range(-2, 3):
                     if is_jail:
                         bx = gx + i * 0.18
@@ -2866,33 +2671,24 @@ class OpenGLRenderer:
                         bx = gx
                         bz = gz + i * 0.18
 
-                    # Bar cube (0.035, bar_h*0.5, 0.06)
                     sx, sy, sz = 0.035, bar_h * 0.5, 0.06
                     x0, x1 = bx - sx, bx + sx
                     y0, y1 = bar_y_center - sy, bar_y_center + sy
                     z0, z1 = bz - sz, bz + sz
 
-                    # Each face: 2 triangles = 6 vertices
-                    # Front face
                     for (lx, ly, lz) in [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y0, z1), (x1, y1, z1), (x0, y1, z1)]:
                         buf.extend([lx, ly, lz, *GRAY])
-                    # Back face
                     for (lx, ly, lz) in [(x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x0, y0, z0), (x1, y1, z0), (x1, y0, z0)]:
                         buf.extend([lx, ly, lz, *GRAY])
-                    # Left face
                     for (lx, ly, lz) in [(x0, y0, z0), (x0, y0, z1), (x0, y1, z1), (x0, y0, z0), (x0, y1, z1), (x0, y1, z0)]:
                         buf.extend([lx, ly, lz, *GRAY])
-                    # Right face
                     for (lx, ly, lz) in [(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z0), (x1, y1, z1), (x1, y0, z1)]:
                         buf.extend([lx, ly, lz, *GRAY])
-                    # Top face
                     for (lx, ly, lz) in [(x0, y1, z0), (x1, y1, z0), (x1, y1, z1), (x0, y1, z0), (x1, y1, z1), (x0, y1, z1)]:
                         buf.extend([lx, ly, lz, *GRAY])
-                    # Bottom face
                     for (lx, ly, lz) in [(x0, y0, z0), (x0, y0, z1), (x1, y0, z1), (x0, y0, z0), (x1, y0, z1), (x1, y0, z0)]:
                         buf.extend([lx, ly, lz, *GRAY])
 
-                # Top crossbar
                 cb_y = bar_y_center + bar_h * 0.42
                 if is_jail:
                     sx, sy, sz = 0.47, 0.06, 0.08
@@ -2903,23 +2699,16 @@ class OpenGLRenderer:
                 y0, y1 = cb_y - sy, cb_y + sy
                 z0, z1 = gz - sz, gz + sz
 
-                # Each face: 2 triangles = 6 vertices
-                # Front face
                 for (lx, ly, lz) in [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y0, z1), (x1, y1, z1), (x0, y1, z1)]:
                     buf.extend([lx, ly, lz, *CB])
-                # Back face
                 for (lx, ly, lz) in [(x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x0, y0, z0), (x1, y1, z0), (x1, y0, z0)]:
                     buf.extend([lx, ly, lz, *CB])
-                # Left face
                     for (lx, ly, lz) in [(x0, y0, z0), (x0, y0, z1), (x0, y1, z1), (x0, y0, z0), (x0, y1, z1), (x0, y1, z0)]:
                         buf.extend([lx, ly, lz, *CB])
-                # Right face
                     for (lx, ly, lz) in [(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z0), (x1, y1, z1), (x1, y0, z1)]:
                         buf.extend([lx, ly, lz, *CB])
-                # Top face
                     for (lx, ly, lz) in [(x0, y1, z0), (x1, y1, z0), (x1, y1, z1), (x0, y1, z0), (x1, y1, z1), (x0, y1, z1)]:
                         buf.extend([lx, ly, lz, *CB])
-                # Bottom face
                     for (lx, ly, lz) in [(x0, y0, z0), (x0, y0, z1), (x1, y0, z1), (x0, y0, z0), (x1, y0, z1), (x1, y0, z0)]:
                         buf.extend([lx, ly, lz, *CB])
 
@@ -2927,7 +2716,6 @@ class OpenGLRenderer:
 
     def _draw_gates(self, gate_buffer: array) -> None:
         """Draw gates with exact OpenGL state as original."""
-        # Initialize VBOs on-demand if not already done
         if self._gates_vbo is None:
             vbo = glGenBuffers(1)
             self._gates_vbo = int(vbo) if vbo else None
@@ -2938,20 +2726,17 @@ class OpenGLRenderer:
         data = gate_buffer.tobytes()
         stride = 7 * 4  # 7 floats × 4 bytes
 
-        # Exact same state setup as original gate rendering
         glDisable(GL_LIGHTING)
         glDisable(GL_TEXTURE_2D)
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_COLOR_ARRAY)
 
-        # Upload and draw
         glBindBuffer(GL_ARRAY_BUFFER, self._gates_vbo)
         glBufferData(GL_ARRAY_BUFFER, len(data), data, GL_STREAM_DRAW)
         glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
         glColorPointer(4, GL_FLOAT, stride, ctypes.c_void_p(12))
         glDrawArrays(GL_TRIANGLES, 0, len(gate_buffer) // 7)
 
-        # Cleanup
         glDisableClientState(GL_COLOR_ARRAY)
         glDisableClientState(GL_VERTEX_ARRAY)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -2989,14 +2774,11 @@ class OpenGLRenderer:
             bob = 0.08 * math.sin(anim_t * 2.4 + seed)
             spin = (anim_t * 140.0 + seed * 37.0) % 360.0
 
-            # Build key geometry exactly like draw_key_3d() but with VBO vertices
             key_x, key_y, key_z = cx, base_y + bob, cz
 
-            # Apply transformations: glRotatef(spin, 0,1,0), glRotatef(90,0,0,1), glScalef(1.05,1.05,1.05)
             spin_rad = math.radians(spin)
             scale = 1.05
 
-            # Ring geometry (24 segments, outer_r=0.16, inner_r=0.11, thickness=0.035)
             ring_cx = key_x + 0.23
             ring_cy = key_y + 0.06
             outer_r, inner_r, thickness = 0.16, 0.11, 0.035
@@ -3007,26 +2789,20 @@ class OpenGLRenderer:
                 c0, s0, c1, s1 = math.cos(a0), math.sin(
                     a0), math.cos(a1), math.sin(a1)
 
-                # Apply transformations to each vertex
                 def transform_vertex(x, y, z):
-                    # Scale
                     x *= scale
                     y *= scale
                     z *= scale
-                    # Rotate 90 degrees around Z-axis (glRotatef(90,0,0,1))
                     x_rot = -y
                     y_rot = x
                     z_rot = z
-                    # Rotate spin degrees around Y-axis (glRotatef(spin,0,1,0))
                     x_final = x_rot * \
                         math.cos(spin_rad) + z_rot * math.sin(spin_rad)
                     y_final = y_rot
                     z_final = -x_rot * \
                         math.sin(spin_rad) + z_rot * math.cos(spin_rad)
-                    # Translate
                     return (key_x + x_final, key_y + y_final, key_z + z_final)
 
-                # Outer face vertices (2 triangles)
                 for (lx, ly, lz) in [
                     (ring_cx + outer_r*c0, ring_cy -
                      thickness, key_z + outer_r*s0),
@@ -3044,7 +2820,6 @@ class OpenGLRenderer:
                         lx - key_x, ly - key_y, lz - key_z)
                     buf.extend([vx, vy, vz, *base])
 
-                # Inner face vertices (2 triangles)
                 for (lx, ly, lz) in [
                     (ring_cx + inner_r*c1, ring_cy -
                      thickness, key_z + inner_r*s1),
@@ -3062,7 +2837,6 @@ class OpenGLRenderer:
                         lx - key_x, ly - key_y, lz - key_z)
                     buf.extend([vx, vy, vz, *base])
 
-                # Top face vertices (2 triangles)
                 for (lx, ly, lz) in [
                     (ring_cx + inner_r*c0, ring_cy +
                      thickness, key_z + inner_r*s0),
@@ -3080,7 +2854,6 @@ class OpenGLRenderer:
                         lx - key_x, ly - key_y, lz - key_z)
                     buf.extend([vx, vy, vz, *base])
 
-                # Bottom face vertices (2 triangles)
                 for (lx, ly, lz) in [
                     (ring_cx + outer_r*c0, ring_cy -
                      thickness, key_z + outer_r*s0),
@@ -3098,14 +2871,12 @@ class OpenGLRenderer:
                         lx - key_x, ly - key_y, lz - key_z)
                     buf.extend([vx, vy, vz, *base])
 
-            # Shaft cube (0.26 x 0.03 x 0.04, positioned at -0.12, 0.06) - half extents like Kivy
             shaft_x, shaft_y, shaft_z = key_x - 0.12, key_y + 0.06, key_z
             sx, sy, sz = 0.26, 0.03, 0.04  # Half of glScalef(0.52, 0.06, 0.08)
             x0, x1 = shaft_x - sx, shaft_x + sx
             y0, y1 = shaft_y - sy, shaft_y + sy
             z0, z1 = shaft_z - sz, shaft_z + sz
 
-            # Shaft faces (6 faces × 2 triangles each)
             for (lx, ly, lz) in [
                 (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0,
                                                            # Front
@@ -3130,7 +2901,6 @@ class OpenGLRenderer:
                     lx - key_x, ly - key_y, lz - key_z)
                 buf.extend([vx, vy, vz, *base])
 
-            # Teeth cubes (3 teeth with different heights) - use half extents like Kivy
             for tx, th in [(-0.34, 0.12), (-0.25, 0.09), (-0.18, 0.07)]:
                 tooth_x, tooth_y, tooth_z = key_x + tx, key_y + 0.02, key_z
                 # Half of glScalef(0.06, th, 0.08)
@@ -3139,7 +2909,6 @@ class OpenGLRenderer:
                 y0, y1 = tooth_y - sy, tooth_y + sy
                 z0, z1 = tooth_z - sz, tooth_z + sz
 
-                # Tooth faces (6 faces × 2 triangles each)
                 for (lx, ly, lz) in [
                     (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0,
                                                                # Front
@@ -3168,7 +2937,6 @@ class OpenGLRenderer:
 
     def _draw_key_fragments(self, key_buffer: array) -> None:
         """Draw key fragments with exact OpenGL state as original immediate mode."""
-        # Initialize VBOs on-demand if not already done
         if self._key_fragments_vbo is None:
             vbo = glGenBuffers(1)
             self._key_fragments_vbo = int(vbo) if vbo else None
@@ -3179,21 +2947,18 @@ class OpenGLRenderer:
         data = key_buffer.tobytes()
         stride = 7 * 4  # 7 floats × 4 bytes
 
-        # Exact same state setup as original key fragment rendering
         glDisable(GL_LIGHTING)
         glDisable(GL_TEXTURE_2D)
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_COLOR_ARRAY)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        # Upload and draw
         glBindBuffer(GL_ARRAY_BUFFER, self._key_fragments_vbo)
         glBufferData(GL_ARRAY_BUFFER, len(data), data, GL_STREAM_DRAW)
         glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
         glColorPointer(4, GL_FLOAT, stride, ctypes.c_void_p(12))
         glDrawArrays(GL_TRIANGLES, 0, len(key_buffer) // 7)
 
-        # Cleanup
         glDisableClientState(GL_COLOR_ARRAY)
         glDisableClientState(GL_VERTEX_ARRAY)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -3205,7 +2970,6 @@ class OpenGLRenderer:
         px, pz = float(player.x), float(player.z)
         entity_r2 = 18.0 ** 2
 
-        # Ghost colors matching Kivy exactly
         ghost_colors = {
             1: (1.0, 0.35, 0.20, 0.82),
             2: (0.30, 1.0, 0.55, 0.82),
@@ -3214,7 +2978,6 @@ class OpenGLRenderer:
             5: (0.95, 0.35, 1.0, 0.82),
         }
 
-        # Ghost segment count matches Kivy fast_mode
         segments = 26 if self._fast_mode else 40
         body_layers = 11
         tail_layers = 8
@@ -3237,12 +3000,9 @@ class OpenGLRenderer:
             sx, sy, sz = 2.10 * s, 2.75 * s, 2.10 * s
             gy = 1.15 + y_raise + bob + wobble
 
-            # Build ghost geometry at origin like Kivy, then transform each vertex
             def build_ghost_vertex(x, y, z):
-                # Build at origin (0,0,0) like Kivy
                 return (x, y, z)
 
-            # Apply scale to base radius like Kivy does
             r = 0.20 * s  # Kivy: r = 0.20 * scale
 
             def y_and_r(t):
@@ -3250,10 +3010,8 @@ class OpenGLRenderer:
                     return r * 0.62 * math.cos(t * math.pi), r * 0.95 * math.sin(t * math.pi)
                 return -r * 0.25 * (t - 0.5) * 2.0, r * 0.95
 
-            # Build all vertices at origin first, then apply transformation like Kivy
             temp_vertices = []
 
-            # Body dome (convert to triangles exactly like Kivy quad_col)
             for layer in range(1, body_layers):
                 y_prev, r_prev = y_and_r((layer - 1) / (body_layers - 1))
                 y_curr, r_curr = y_and_r(layer / (body_layers - 1))
@@ -3263,8 +3021,6 @@ class OpenGLRenderer:
                     ca0, sa0 = math.cos(a0), math.sin(a0)
                     ca1, sa1 = math.cos(a1), math.sin(a1)
 
-                    # Quad vertices like Kivy: (prev_prev, prev_curr, curr_curr, curr_prev)
-                    # Kivy adds cy to body Y positions: (cx+ca0*r_prev, cy+y_prev, cz+sa0*r_prev)
                     p0 = build_ghost_vertex(
                         ca0 * r_prev, 0.0 + y_prev, sa0 * r_prev)  # cy=0
                     p1 = build_ghost_vertex(
@@ -3274,13 +3030,11 @@ class OpenGLRenderer:
                     p3 = build_ghost_vertex(
                         ca0 * r_curr, 0.0 + y_curr, sa0 * r_curr)  # cy=0
 
-                    # Two triangles exactly like Kivy quad_col: [p0,p1,p2, p0,p2,p3]
                     for p in [p0, p1, p2]:
                         temp_vertices.append(p)
                     for p in [p0, p2, p3]:
                         temp_vertices.append(p)
 
-            # Tail with animated wave effect (convert to triangles exactly like Kivy quad_col)
             for layer in range(tail_layers):
                 layer_ratio = layer / tail_layers
                 prev_ratio = (layer - 1) / tail_layers
@@ -3304,7 +3058,6 @@ class OpenGLRenderer:
                     ca0, sa0 = math.cos(a), math.sin(a)
                     ca1, sa1 = math.cos(a1), math.sin(a1)
 
-                    # Calculate wave displacement
                     sk_c0 = (math.sin(a * 3.0 + anim_t * 2.4 + layer * 0.55) * wave_amp
                              + math.sin(a * 7.0 - anim_t * 1.7 + layer * 0.35) * (wave_amp * 0.55))
                     sk_c1 = (math.sin(a1 * 3.0 + anim_t * 2.4 + layer * 0.55) * wave_amp
@@ -3322,19 +3075,16 @@ class OpenGLRenderer:
                     rp0 = max(r * 0.02, pr_prev + sk_p0)
                     rp1 = max(r * 0.02, pr_prev + sk_p1)
 
-                    # Quad vertices exactly like Kivy: (prev_prev, prev_curr, curr_curr, curr_prev)
                     p0 = build_ghost_vertex(ca0 * rp0, y_prev_abs, sa0 * rp0)
                     p1 = build_ghost_vertex(ca1 * rp1, y_prev_abs, sa1 * rp1)
                     p2 = build_ghost_vertex(ca1 * rc1, y_curr_abs, sa1 * rc1)
                     p3 = build_ghost_vertex(ca0 * rc0, y_curr_abs, sa0 * rc0)
 
-                    # Two triangles exactly like Kivy quad_col: [p0,p1,p2, p0,p2,p3]
                     for p in [p0, p1, p2]:
                         temp_vertices.append(p)
                     for p in [p0, p2, p3]:
                         temp_vertices.append(p)
 
-            # Eyes (two quads as triangles, facing +Z)
             eye_y = r * 0.22
             eye_z_f = r * 1.05
             eye_x_o = r * 0.34
@@ -3347,25 +3097,19 @@ class OpenGLRenderer:
                 y0, y1 = eye_y - eh, eye_y + eh
                 ez = 0.0 + eye_z_f  # Kivy: ez = cz + eye_z_f (cz=0)
 
-                # Two triangles per quad
                 for (lx, ly) in [(x0, y0), (x1, y0), (x1, y1), (x0, y0), (x1, y1), (x0, y1)]:
                     vx, vy, vz = build_ghost_vertex(lx, ly, ez)
                     temp_vertices.append((vx, vy, vz))
 
-            # Apply transformation to each vertex exactly like Kivy
             for i, (vx, vy, vz) in enumerate(temp_vertices):
-                # Apply remaining scale factors (geometry already has base scale)
                 # Kivy: sx,sy,sz = 2.10*s, 2.75*s, 2.10*s
                 x, y, z = vx * 2.10, vy * 2.75, vz * 2.10
-                # Then rotate around Y axis (like Kivy's _rot_pt_y - uses radians directly)
                 c = math.cos(yaw_g)  # yaw_g is already in radians
                 s = math.sin(yaw_g)
                 x_rot = x * c + z * s
                 z_rot = -x * s + z * c
-                # Finally translate to world position
                 final_x, final_y, final_z = x_rot + gx, y + gy, z_rot + gz
 
-                # Choose color based on vertex index
                 if i >= len(temp_vertices) - 12:  # Eyes are last 12 vertices
                     vertex_color = BLACK
                 else:
@@ -3377,7 +3121,6 @@ class OpenGLRenderer:
 
     def _draw_ghosts(self, ghost_buffer: array) -> None:
         """Draw ghosts with exact OpenGL state as original."""
-        # Initialize VBOs on-demand if not already done
         if self._ghosts_vbo is None:
             vbo = glGenBuffers(1)
             self._ghosts_vbo = int(vbo) if vbo else None
@@ -3388,24 +3131,20 @@ class OpenGLRenderer:
         data = ghost_buffer.tobytes()
         stride = 7 * 4  # 7 floats × 4 bytes
 
-        # Exact same state setup as original ghost rendering
         glDisable(GL_LIGHTING)
         glDisable(GL_TEXTURE_2D)
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_COLOR_ARRAY)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        # CRITICAL: Disable depth writing for smooth ghost rendering (like Kivy)
         glDepthMask(False)
 
-        # Upload and draw
         glBindBuffer(GL_ARRAY_BUFFER, self._ghosts_vbo)
         glBufferData(GL_ARRAY_BUFFER, len(data), data, GL_STREAM_DRAW)
         glVertexPointer(3, GL_FLOAT, stride, ctypes.c_void_p(0))
         glColorPointer(4, GL_FLOAT, stride, ctypes.c_void_p(12))
         glDrawArrays(GL_TRIANGLES, 0, len(ghost_buffer) // 7)
 
-        # Cleanup
         glDepthMask(True)  # Re-enable depth writing
         glDisableClientState(GL_COLOR_ARRAY)
         glDisableClientState(GL_VERTEX_ARRAY)
