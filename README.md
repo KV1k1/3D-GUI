@@ -35,22 +35,25 @@ Prototypom, ktorý slúži ako testovacie prostredie, je 3D hra typu bludisko s 
 Táto trojica frameworkov pokrýva široké spektrum – od tradičného natívneho prístupu, cez profesionálny a výkonnostne orientovaný ekosystém, až po moderný GPU-first prístup zameraný na multiplatformovú konzistentnosť:
 
 ### Funkčné požiadavky
--	Vizualizácia 3D priestoru: Aplikácia musí vedieť vykresliť 3D bludisko, zbierateľné mince a fragmenty kľúča, nepriatelia, textúry.
--	Ovládanie: Hráč musí mať možnosť pohybovať pomocou klávesov WASD a ovládať pohľad kamery pomocou myši.
-- Detekcia kolízií s mincami, ktoré sú po zbere odstránené a zvýšia skóre.
-- Aktivácia 3D puzzle minihry po zbere fragmentu kľúča.
--  Implementácia pohyblivých prekážok: 5 typov duchovia s unikátnymi superschopnosťami a pohyb po preddefinovaných trasách, hroty sa vysúvajú v časových intervaloch, platforma s cyklickým pohybom, brány sa odomykajú po splnení podmienok.
--	Detekcia kolízií s nepriateľmi a pascami, po ktorom je hráč presunutý do väzenia.
--	 Možnosť oslobodiť sa z väzenia interakciou s knihou, ktorá spustí minihru na kreslenie siluety.
--	HUD musí zobrazovať počet mincí, fragmentov kľúča, herný čas a minimapu.
+-	Aplikácia správne vykresľuje 3D scénu bludiska v reálnom čase, vrátane objektov scény (zbierateľné mince a fragmenty kľúča, nepriatelia, textúry).
+-	Pohyb hráča po scéne – bludisku – zabezpečujú klávesy W, A, S, D, pohyb kamery je realizovaný pomocou myši. 
+-	Herné mechaniky:
+ -	Detekcia kolízií s mincami, ktoré sú po zbere odstránené, aktualizácia skóre hráča.
+ -	Aktivácia 3D puzzle minihry pri interakcii hráča s fragmentom kľúča. 
+ -	Aktivácia NPC a pohyblivých prekážok po spustení hry -  pohyb NPC po preddefinovaných trasách.
+ -	Logika prostredia, ktorá zahŕňa vysúvanie hrotov v stanovených časových intervaloch; platformu s cyklickým pohybom a odomknutie brány po splnení podmienok. 
+ -	Detekcia kolízií s nepriateľmi a pascami, po ktorej je zablokovaný pohyb hráča na určitý časový interval. 
+ -	 Detekcia interakcie hráča s knihou spustí minihru na kreslenie siluety. Po úspešnom vyriešení minihry sa pohyb hráča opäť aktivuje.
+-	HUD zobrazuje počet mincí, fragmentov kľúča, herný čas a minimapu v reálnom čase.
 -	Pauzovacie menu musí umožňovať pokračovanie, reštart, výber levelu, uloženie a ukončenie hry.
--	Hra musí prehrávať zvukové efekty pre kroky, zber mince, otváranie brán a kolíziu s duchom.
+-	Hra prehráva zvukové efekty pre kroky, zber mince, otváranie brán a kolíziu s duchom v reálnom čase
+
 
 ### Nefunkčné požiadavky
--	Výkon: Aplikácia musí dosahovať priemerný počet snímok za sekundu (FPS) aspoň 30 na referenčnom hardvéri pre plynulý zážitok.
--	Použiteľnosť: Odozva na vstupy z klávesa a z myša musí byť okamžitá, bez citeľného oneskorenia.
+-	Výkon: Pre zabezpečenie plynulosti hry musí aplikácia dosahovať na referenčnom hardvéri minimálne 30 FPS (Frame Per Second).
+-	Použiteľnosť: Okamžitá odozva na vstupy z klávesnice a myši, bez výrazného oneskorenia. 
 -	Kompatibilita: Aplikácia musí byť spustiteľná na operačných systémoch Windows a Linux bez zmeny zdrojového kódu.
--	Udržateľnosť: Kód musí byť čitateľný, dobre štruktúrovaný a modulárny, herné jadro oddelené od GUI, aby umožňoval ľahké úpravy a rozširovanie.
+-	Udržateľnosť: Kód musí byť čitateľný, dobre štruktúrovaný a modulárny, herné jadro oddelené od GUI, aby ho bolo možné upravovať a rozširovať.
 
 
 ### Diagram prípadov použitia
@@ -465,6 +468,10 @@ Minimálne FPS v behu 1 dosiahlo hodnotu 14,0, čo je výrazne nižšie ako v os
 | Text (ms) | 0,48 | 0,50 | 0,48 | 0,49 | 0,49 | **0,49** |
 
 Na druhej úrovni boli výsledky wxPython stabilnejšie ako na prvej — priemerné FPS sa pohybovalo v rozsahu 40,3–42,2 a latencia vstupu bola konzistentná (0,58–0,66 ms). Čas štartu zostal vysoký (2 913–3 270 ms), pričom beh 1 bol mierne odľahlý oproti ostatným.
+
+---
+
+Textúry použité pre brány, minimapu a platformy sú vlastnou tvorbou. Textúry pre podlahu, steny a mince pochádzajú z bezplatných zdrojov dostupných na platforme Freepik. Zvukové efekty použité v projekte boli získané z databázy Freesound.
 
 ---
 
