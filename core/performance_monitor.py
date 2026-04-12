@@ -225,16 +225,14 @@ class PerformanceMonitor:
             result['input_latency'] = {
                 'median_latency_ms': f"{median_latency:.2f}",
             }
-
         return result
 
     def format_summary_text(self) -> str:
         summary = self.frozen_stats if self.frozen_stats else self.get_performance_summary()
 
         text = "────────────────────────────────────\n"
-        text += "        FRAMEWORK TEST SUMMARY\n"
+        text += "        PERFORMANCE SUMMARY\n"
         text += "────────────────────────────────────\n\n"
-        text += f"Framework: {summary['framework']}\n"
         text += f"Resolution: {summary['resolution']}\n\n"
 
         text += "PERFORMANCE\n"
@@ -246,25 +244,18 @@ class PerformanceMonitor:
         text += "MEMORY\n"
         text += f"• Peak RAM Usage: {summary['memory']['peak_ram_usage']}\n\n"
 
-        text += "STARTUP\n"
         text += f"• Startup Time: {summary['startup']['startup_time']}\n\n"
 
-        # Input latency — framework event dispatch + loop scheduling
         if 'input_latency' in summary:
             lat = summary['input_latency']
-            text += "INPUT LATENCY\n"
             text += f"• Median: {lat['median_latency_ms']}ms\n\n"
 
-        # Text rendering performance — framework-specific
         if 'text_rendering' in summary:
             tex = summary['text_rendering']
-            text += "TEXT RENDERING\n"
             text += f"• Avg Texture Time: {tex['avg_texture_time_ms']}ms\n\n"
 
-        # Texture loading time
         if 'texture_loading' in summary:
             tex_load = summary['texture_loading']
-            text += "TEXTURE LOADING\n"
             text += f"• Load Time: {tex_load['load_time_ms']}ms\n\n"
 
         text += "SCENE LOAD\n"

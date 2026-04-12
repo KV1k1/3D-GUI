@@ -412,7 +412,6 @@ def _grid_verts() -> List[float]:
 
 
 def _upload(raw: List[float]) -> Tuple[int, int]:
-    """Upload vertex data (x,y,z,r,g,b,a per vertex) into a new VAO/VBO."""
     if not raw:
         return 0, 0
     n = len(raw) // 7
@@ -440,7 +439,6 @@ _R_COL = (1.0, 0.271, 0.0, 1.0)   # red
 
 
 def _make_pieces(kind: str) -> List[dict]:
-    """Initial piece positions. Pieces at z=0.5 sit on grid (matching Kivy/PySide6)."""
     k = (kind or 'KP').upper()
     if k == 'KP':
         return [
@@ -483,8 +481,6 @@ def _make_target(kind: str) -> List[dict]:
     ]
 
 
-# _AsmGLCanvas  –  core-profile GL canvas
-
 _GL_ATTRS = [
     wx.glcanvas.WX_GL_RGBA,
     wx.glcanvas.WX_GL_DOUBLEBUFFER,
@@ -496,18 +492,6 @@ _GL_ATTRS = [
 
 
 class _AsmGLCanvas(wx.glcanvas.GLCanvas):
-    """
-    Core-profile OpenGL canvas for one 3-D view panel (reference or assembly).
-
-    Scene data is stored as (vao, vtx_count) pairs plus translation matrices so
-    that the same VAOs can be reused with different positions without re-uploading.
-
-    public API (called by Assembly3DMinigame):
-      set_scene(vaos, mats, gvao=0, gvtx=0)   – set piece VAOs + grid VAO
-      set_camera(dist, elev, azim, azim_extra, fov)
-      request_redraw()
-    """
-
     def __init__(self, parent: wx.Window, *,
                  bg_dark: bool = True,
                  orbit: bool = False):
@@ -519,7 +503,7 @@ class _AsmGLCanvas(wx.glcanvas.GLCanvas):
         ]
         super().__init__(parent, attribList=attribs)
 
-        # Try to obtain a core-profile 3.3 context
+        # core profile 3.3 context
         try:
             ca = glcanvas.GLContextAttrs()
             ca = ca.PlatformDefaults().CoreProfile().OGLVersion(3, 3).EndList()
@@ -545,7 +529,6 @@ class _AsmGLCanvas(wx.glcanvas.GLCanvas):
         self._gvao: int = 0                       # grid VAO
         self._gvtx: int = 0                       # grid vertex count
 
-        # Orbit drag
         self._dragging = False
         self._last_mouse: Optional[Tuple[int, int]] = None
 
@@ -558,12 +541,9 @@ class _AsmGLCanvas(wx.glcanvas.GLCanvas):
             self.Bind(wx.EVT_LEFT_UP,   self._on_left_up)
             self.Bind(wx.EVT_MOTION,    self._on_motion)
 
-        # Refresh timer so animation / flash stays smooth even without user input
         self._timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, lambda _e: self.Refresh(False), self._timer)
         self._timer.Start(33)   # ~30 fps
-
-    # ── orbit drag ────────────────────────────────────────────────────────────
 
     def _on_left_down(self, evt: wx.MouseEvent) -> None:
         self._dragging = True
@@ -596,8 +576,6 @@ class _AsmGLCanvas(wx.glcanvas.GLCanvas):
         self._cam_elev_extra = max(-89.0, min(89.0, self._cam_elev_extra))
         self.Refresh(False)
 
-    # ── public API ────────────────────────────────────────────────────────────
-
     def set_scene(self, vaos: List[Tuple[int, int]], mats: List[List[float]],
                   gvao: int = 0, gvtx: int = 0) -> None:
         self._vaos = vaos
@@ -617,8 +595,6 @@ class _AsmGLCanvas(wx.glcanvas.GLCanvas):
     def request_redraw(self) -> None:
         self.Refresh(False)
 
-    # ── GL lifecycle ──────────────────────────────────────────────────────────
-
     def _ensure(self) -> None:
         if self._initialized:
             return
@@ -635,8 +611,6 @@ class _AsmGLCanvas(wx.glcanvas.GLCanvas):
             print(f'[_AsmGLCanvas] shader compile failed: {e}')
         self._initialized = True
 
-    # ── paint ─────────────────────────────────────────────────────────────────
-
     def _on_paint(self, _evt: wx.PaintEvent) -> None:
         _ = wx.PaintDC(self)
         self._ensure()
@@ -646,7 +620,6 @@ class _AsmGLCanvas(wx.glcanvas.GLCanvas):
         if w < 2 or h < 2:
             return
 
-        # Clear with background colour
         if self._bg_dark:
             GL.glClearColor(0.314, 0.314, 0.333, 1.0)   # #505055
         else:
@@ -699,16 +672,6 @@ class _AsmGLCanvas(wx.glcanvas.GLCanvas):
 
 
 class Assembly3DMinigame(wx.Dialog):
-    """
-    3-D Assembly Minigame dialog.
-
-    Usage (same as before):
-        dlg = Assembly3DMinigame(parent, kind='KP')
-        if dlg.ShowModal() == wx.ID_OK:
-            ...
-        # or call reset(kind=...) to reuse the same instance.
-    """
-
     GRID_MIN = -4
     GRID_MAX = 4
     Z_MIN = 0
@@ -724,7 +687,6 @@ class Assembly3DMinigame(wx.Dialog):
 
         self.selected_piece: Optional[int] = None
 
-        # VAO lists - separate for each canvas since VAOs cannot be shared between contexts
         # (vao, vtx) per piece for asm_view
         self._piece_vaos: List[Tuple[int, int]] = []
         # (vao, vtx) per piece for ref_view
@@ -735,7 +697,6 @@ class Assembly3DMinigame(wx.Dialog):
         self._ref_vaos_ref: List[Tuple[int, int]] = []
         self._gvao: int = 0
         self._gvtx: int = 0
-        # grid for ref_view (not used but kept for consistency)
         self._gvao_ref: int = 0
         self._gl_built = False
 
@@ -749,16 +710,12 @@ class Assembly3DMinigame(wx.Dialog):
         self._build_scene_for_kind()
         self._update_feedback()
 
-        # Center on parent like PySide6
         try:
             self.CentreOnParent()
         except Exception:
             pass
 
-        # Build GL after the window is shown so context is ready
         self.Bind(wx.EVT_SHOW, self._on_show)
-
-    # ── show / close ──────────────────────────────────────────────────────────
 
     def _on_show(self, evt: wx.ShowEvent) -> None:
         if evt.IsShown():
@@ -779,15 +736,12 @@ class Assembly3DMinigame(wx.Dialog):
             pass
         return super().Destroy()
 
-    # ── UI construction ───────────────────────────────────────────────────────
-
     def _build_ui(self) -> None:
         self.SetBackgroundColour(wx.Colour(74, 74, 80))
 
         root = wx.BoxSizer(wx.HORIZONTAL)
         self.SetSizer(root)
 
-        # ── Left: Reference panel ─────────────────────────────────────────────
         left_panel = wx.Panel(self)
         left_panel.SetBackgroundColour(wx.Colour(74, 74, 80))
         left = wx.BoxSizer(wx.VERTICAL)
@@ -808,10 +762,9 @@ class Assembly3DMinigame(wx.Dialog):
         left.Add(ref_hdr, 0, wx.EXPAND | wx.BOTTOM, 8)
 
         self.ref_view = _AsmGLCanvas(left_panel, bg_dark=True, orbit=True)
-        self.ref_view.set_camera(dist=8.0, elev=20.0, azim=30.0, fov=60.0)
+        self.ref_view.set_camera(dist=12.0, elev=20.0, azim=30.0, fov=60.0)
         left.Add(self.ref_view, 1, wx.EXPAND)
 
-        # ── Right: Assembly panel ─────────────────────────────────────────────
         right_panel = wx.Panel(self)
         right_panel.SetBackgroundColour(wx.Colour(74, 74, 80))
         right = wx.BoxSizer(wx.VERTICAL)
@@ -931,8 +884,6 @@ class Assembly3DMinigame(wx.Dialog):
                     lambda _e: self._move_selected_piece(0, 0, -1))
         z_col_s.Add(btn_zm, 0, wx.ALIGN_CENTER)
 
-    # ── scene / GL ────────────────────────────────────────────────────────────
-
     def _build_scene_for_kind(self) -> None:
         self.pieces = _make_pieces(self.kind)
         self.target_structure = _make_target(self.kind)
@@ -973,11 +924,9 @@ class Assembly3DMinigame(wx.Dialog):
         if self._gl_built:
             return
 
-        # Ensure both canvases have initialized their GL contexts
         self.ref_view._ensure()
         self.asm_view._ensure()
 
-        # Upload piece VAOs for asm_view context
         self.asm_view.SetCurrent(self.asm_view._ctx)
         self._piece_vaos = []
         for p in self.pieces:
@@ -985,7 +934,6 @@ class Assembly3DMinigame(wx.Dialog):
             raw = _cube(col) if p['type'] == 'cube' else _pyramid(col)
             self._piece_vaos.append(_upload(raw))
 
-        # Upload target VAOs for asm_view context (not used but kept)
         self._ref_vaos = []
         for i, t in enumerate(self.target_structure):
             col = self.pieces[i]['color'] if i < len(
@@ -1034,8 +982,6 @@ class Assembly3DMinigame(wx.Dialog):
         self.asm_view.set_scene(self._piece_vaos, self._asm_mats_from_pieces(),
                                 self._gvao, self._gvtx)
 
-    # ── flash timer ──────────────────────────────────────────────────────────
-
     def _on_flash_timer(self, _evt: wx.TimerEvent) -> None:
         """Rebuild the selected piece's VAO with a flashing green colour."""
         if not self._gl_built:
@@ -1051,11 +997,10 @@ class Assembly3DMinigame(wx.Dialog):
         orig_col = p['color']
         col = (0.15, 0.95, 0.25, float(orig_col[3])) if flash else orig_col
 
-        # Re-upload just this piece's VAO
+        # Re-upload just this pieces VAO
         self.asm_view.SetCurrent(self.asm_view._ctx)
         raw = _cube(col) if p['type'] == 'cube' else _pyramid(col)
         old_vao, _ = self._piece_vaos[idx]
-        # Delete old VAO to avoid leaking (best-effort)
         try:
             GL.glDeleteVertexArrays(1, [old_vao])
         except Exception:
@@ -1064,8 +1009,6 @@ class Assembly3DMinigame(wx.Dialog):
 
         self.asm_view.set_scene(self._piece_vaos, self._asm_mats_from_pieces(),
                                 self._gvao, self._gvtx)
-
-    # ── piece interaction ─────────────────────────────────────────────────────
 
     def _select_piece(self, idx: int) -> None:
         # Restore original color for previously selected piece before changing selection
@@ -1137,8 +1080,6 @@ class Assembly3DMinigame(wx.Dialog):
         else:
             self.feedback_label.set_text(
                 'Select piece → Use arrows to move → Z+/- for height', mode='normal')
-
-    # ── check / congratulations ───────────────────────────────────────────────
 
     def _check_assembly(self) -> None:
         def adj(positions):

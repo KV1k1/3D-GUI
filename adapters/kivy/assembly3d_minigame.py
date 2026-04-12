@@ -483,9 +483,9 @@ class KivyAssembly3DMinigame(ModalView):
         self._asm_mats: List[List[float]] = []
         self._gvao = 0
         self._gvtx = 0
-        self._pieces = _make_pieces(self.kind)
-        self._target = _make_target(self.kind)
-        self._placed = [False]*len(self._pieces)
+        self._pieces = []  # Will be set in reset() to avoid showing wrong puzzle briefly
+        self._target = []  # Will be set in reset() to avoid showing wrong puzzle briefly
+        self._placed = []  # Will be set in reset() to avoid showing wrong puzzle briefly
         self._selected = None
         self._last_t = time.perf_counter()
         self._flash_t = 0.
@@ -532,7 +532,7 @@ class KivyAssembly3DMinigame(ModalView):
                 size=lambda w, v: setattr(self._tbbg, 'size', v))
         tb.add_widget(Label(text='3D Assembly Minigame', bold=True, font_size='13sp',
                             color=(0.9, 0.9, 0.9, 1), halign='left', valign='middle'))
-        xb = Button(text='✕', font_size='14sp', size_hint=(None, 1), width=36,
+        xb = Button(text='X', font_size='14sp', size_hint=(None, 1), width=36,
                     background_normal='', background_color=_QUIT_R, color=_WHITE)
         xb.bind(on_press=lambda *_: self._finish(False))
         tb.add_widget(xb)

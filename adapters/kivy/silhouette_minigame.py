@@ -153,19 +153,7 @@ class KivySilhouetteMinigame(ModalView):
         self._hard_mode = hard_mode
         self._callback = None
         self._size = 6
-        patterns = _build_patterns(self._size)
-        if self._hard_mode:
-            # Ghost 4 pattern
-            self._target = [
-                [0, 1, 0, 0, 0, 1],
-                [1, 0, 1, 0, 1, 0],
-                [0, 1, 0, 1, 0, 1],
-                [0, 0, 1, 0, 1, 0],
-                [0, 1, 0, 1, 0, 1],
-                [1, 0, 1, 0, 1, 0],
-            ]
-        else:
-            self._target = random.choice(patterns)
+        self._target = []  # Will be set in on_open to avoid showing wrong puzzle briefly
         self._cells = []
         self._panel_bg = None
         self._title_label = None
@@ -310,7 +298,7 @@ class KivySilhouetteMinigame(ModalView):
 
         # Buttons
         btn_row = BoxLayout(orientation='horizontal',
-                            size_hint_y=None, height=40, spacing=10, padding=10)
+                            size_hint_y=None, height=55, spacing=10, padding=10)
         reset_btn = Button(
             text='Reset', font_size=14,
             background_normal='', background_color=(0.25, 0.25, 0.26, 1.0),

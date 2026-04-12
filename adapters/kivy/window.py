@@ -1,6 +1,6 @@
-from .kivy_assembly3d import KivyAssembly3DMinigame
-from .kivy_silhouette import KivySilhouetteMinigame
-from .kivy_renderer import KivyRenderer
+from .assembly3d_minigame import KivyAssembly3DMinigame
+from .silhouette_minigame import KivySilhouetteMinigame
+from .renderer_opengl import KivyRenderer
 from core.performance_monitor import PerformanceMonitor
 from core.game_core import GameCore
 import OpenGL.GL as GL
@@ -233,10 +233,29 @@ class _ClosingAnimWidget(Widget):
 
         with self.canvas:
             if prog < 1.0:
-                bar_h = h * prog * 0.5
+                # Circular iris animation like PySide - draw black area between inner and outer circles
+                cx = w * 0.5
+                cy = h * 0.5
+                max_r = math.sqrt(cx * cx + cy * cy) + 4
+                ease = prog * prog
+                inner_r = max_r * (1.0 - ease)
+                outer_r = max_r + 4
+                steps = 64
+
                 Color(0, 0, 0, 1)
-                Rectangle(pos=(0, h - bar_h), size=(w, bar_h))  # Top bar
-                Rectangle(pos=(0, 0), size=(w, bar_h))  # Bottom bar
+                for i in range(steps):
+                    a0 = (i / steps) * 2 * math.pi
+                    a1 = ((i + 1) / steps) * 2 * math.pi
+                    x0i = cx + math.cos(a0) * inner_r
+                    y0i = cy + math.sin(a0) * inner_r
+                    x1i = cx + math.cos(a1) * inner_r
+                    y1i = cy + math.sin(a1) * inner_r
+                    x0o = cx + math.cos(a0) * outer_r
+                    y0o = cy + math.sin(a0) * outer_r
+                    x1o = cx + math.cos(a1) * outer_r
+                    y1o = cy + math.sin(a1) * outer_r
+                    Triangle(points=[x0i, y0i, x0o, y0o, x1o, y1o])
+                    Triangle(points=[x0i, y0i, x1i, y1i, x1o, y1o])
             else:
                 Color(0, 0, 0, 1)
                 Rectangle(pos=(0, 0), size=(w, h))
@@ -306,213 +325,9 @@ class _CamIconWidget(Button):
         if now < self._cooldown_until:
             rem = int(math.ceil(self._cooldown_until - now))
             self._cd_text = f'{rem}s'
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.core = None
-        self._until = 0.0
-
-        self._static_layout_id = None
-        self._static_size = None
-        self._static_cell = 0
-        self._static_ox = 0
-        self._static_oy = 0
-        self._static_mw = 0
-        self._static_mh = 0
-        self._static_rows = 0
-        self._static_cols = 0
-
-        self._static_canvas = None
-        self._dynamic_canvas = None  # Will hold entities
-
-    def on_touch_down(self, touch):
-        return False if self.opacity == 0 else super().on_touch_down(touch)
-
-    def _ensure_static_layer(self):
-        if not self.core:
-            return False
-
-        layout = self.core.layout
-        rows = len(layout)
-        cols = len(layout[0]) if rows else 0
-        if rows == 0 or cols == 0:
-            return False
-
-        W, H = Window.width, Window.height
-        cell = max(1, min(int(W * 0.85 / max(cols, 1)),
-                          int((H - 40) / max(rows, 1))))
-        mw, mh = cols*cell, rows*cell
-        ox = (W - mw)//2
-        oy = 20 + ((H - 40) - mh)//2
-
-        current_layout_id = id(layout)
-        current_size = (W, H)
-
-        needs_rebuild = (
-            self._static_layout_id != current_layout_id or
-            self._static_size != current_size or
-            self._static_canvas is None
-        )
-
-        if not needs_rebuild:
-            return True  # Static layer is still valid
-
-        self._static_layout_id = current_layout_id
-        self._static_size = current_size
-        self._static_cell = cell
-        self._static_ox = ox
-        self._static_oy = oy
-        self._static_mw = mw
-        self._static_mh = mh
-        self._static_rows = rows
-        self._static_cols = cols
-
-        if self._static_canvas:
-            self.canvas.remove(self._static_canvas)
-        self._static_canvas = Canvas()
-
-        walls = self.core.walls
-        floors = self.core.floors
-
-        with self._static_canvas:
-            Color(10/255, 10/255, 12/255, 210/255)
-            Rectangle(pos=(ox, oy), size=(mw, mh))
-
-            Color(230/255, 230/255, 230/255, 1)
-            Line(rectangle=(ox, oy, mw, mh), width=1.5)
-
-            wall_positions = []
-            floor_positions = []
-            other_positions = []
-
-            for r in range(rows):
-                for c in range(cols):
-                    rx = ox + c*cell
-                    ry = oy + (rows-1-r)*cell
-                    pos_size = (rx, ry, cell+1, cell+1)
-
-                    if (r, c) in walls:
-                        wall_positions.append(pos_size)
-                    elif (r, c) in floors:
-                        floor_positions.append(pos_size)
-                    else:
-                        other_positions.append(pos_size)
-
-            if wall_positions:
-                Color(45/255, 45/255, 55/255, 1)
-                for pos_size in wall_positions:
-                    Rectangle(pos=(pos_size[0], pos_size[1]), size=(
-                        pos_size[2], pos_size[3]))
-
-            if floor_positions:
-                Color(125/255, 125/255, 135/255, 1)
-                for pos_size in floor_positions:
-                    Rectangle(pos=(pos_size[0], pos_size[1]), size=(
-                        pos_size[2], pos_size[3]))
-
-            if other_positions:
-                Color(15/255, 15/255, 18/255, 1)
-                for pos_size in other_positions:
-                    Rectangle(pos=(pos_size[0], pos_size[1]), size=(
-                        pos_size[2], pos_size[3]))
-
-        self.canvas.add(self._static_canvas)
-        return True
-
-    def redraw(self):
-        if not self.core:
-            return
-
-        if not self._ensure_static_layer():
-            return
-
-        ox, oy = self._static_ox, self._static_oy
-        cell = self._static_cell
-        rows = self._static_rows
-        mw, mh = self._static_mw, self._static_mh
-
-        if self._dynamic_canvas:
-            self.canvas.remove(self._dynamic_canvas)
-        self._dynamic_canvas = Canvas()
-
-        with self._dynamic_canvas:
-            csz = max(6, int(cell*0.35))
-            Color(255/255, 215/255, 0, 1)
-            for coin in self.core.coins.values():
-                if coin.taken:
-                    continue
-                cr, cc = coin.cell
-                Ellipse(pos=(ox+cc*cell+cell//2-csz//2,
-                             oy+(rows-1-cr)*cell+cell//2-csz//2), size=(csz, csz))
-
-            GCOLS = {1: (1, .314, .235, 1), 2: (.314, 1, .549, 1), 3: (.431, .667, 1, 1),
-                     4: (1, .863, .314, 1), 5: (1, .353, 1, 1)}
-            gsz = max(10, int(cell*0.6))
-            for g in self.core.ghosts.values():
-                s = float(getattr(g, 'size_scale', 1.0) or 1.0)
-                gsz_scaled = int(max(8, gsz * s))
-                Color(*GCOLS.get(g.id, (1, .471, .118, 1)))
-                Ellipse(pos=(ox+int(g.x*cell)+cell//2-gsz_scaled//2,
-                             oy+(rows-1-int(g.z))*cell+cell//2-gsz_scaled//2), size=(gsz_scaled, gsz_scaled))
-
-                eye_size = max(2, int(gsz_scaled * 0.15))
-                eye_ox = gsz_scaled * 0.25
-                eye_oy = gsz_scaled * 0.1
-                gx = ox+int(g.x*cell)+cell//2
-                gy = oy+(rows-1-int(g.z))*cell+cell//2
-
-                for ex in (gx - eye_ox, gx + eye_ox):
-                    ey = gy - eye_oy
-                    Color(1, 1, 1, 1)
-                    Ellipse(pos=(ex - eye_size//2, ey - eye_size//2),
-                            size=(eye_size, eye_size))
-                    pupil = max(1, int(eye_size * 0.5))
-                    Color(0, 0, 0, 1)
-                    Ellipse(pos=(ex - pupil//2, ey - pupil//2),
-                            size=(pupil, pupil))
-
-            pr = int(self.core.player.z)
-            pc = int(self.core.player.x)
-            px = ox + pc*cell + cell//2
-            py = oy + (rows-1-pr)*cell + cell//2
-            psz = max(12, int(cell*0.7))
-            half = psz//2
-
-            Color(50/255, 255/255, 50/255, 1)
-            Triangle(points=[px, py-half, px+half, py, px, py+half])
-            Triangle(points=[px, py-half, px, py+half, px-half, py])
-
-            dot = max(4, psz//3)
-            Color(1, 1, 1, 1)
-            Ellipse(pos=(px-dot//2, py-dot//2), size=(dot, dot))
-
-            yaw = float(getattr(self.core.player, 'yaw', 0.0))
-            fx = math.sin(yaw)
-            fz = -math.cos(yaw)  # Negative because Y is flipped in minimap
-            line_len = max(6, int(cell * 0.75))
-            Color(255/255, 220/255, 110/255, 1)
-            Line(points=[px, py, px+int(fx*line_len),
-                 py+int(fz*line_len)], width=2)
-
-            rem = max(0.0, float(self._until) - time.perf_counter())
-            ctext = f'MAP: {int(rem + 0.5)}s'
-            from kivy.core.text import Label as CoreLabel
-            lbl = CoreLabel(text=ctext, font_size=14,
-                            bold=True, color=(1, 1, 1, 1))
-            lbl.refresh()
-            tex = lbl.texture
-            tw, th = tex.size
-            tx = ox + mw - tw - 10
-            ty = oy + mh - th - 8
-            Color(0, 0, 0, 0.7)
-            Rectangle(pos=(tx - 3, ty - 2), size=(tw + 6, th + 4))
-            Color(1, 1, 1, 1)
-            Rectangle(pos=(tx, ty), size=(tw, th), texture=tex)
-
-        self.canvas.add(self._dynamic_canvas)
-
-    def force_redraw(self):
-        self._static_layout_id = None
+        else:
+            self._cd_text = ''
+        self._draw_cd_overlay()
 
 
 class _PausePanel(FloatLayout):
@@ -777,7 +592,7 @@ class _TutorialPanel(FloatLayout):
         title_row.add_widget(self._title_lbl)
 
         close_btn = Button(
-            text='✕', font_size='16sp',
+            text='X', font_size='16sp',
             size_hint=(None, 1), width=36,
             background_normal='', background_color=(0.35, 0.35, 0.38, 1),
             color=(220/255, 220/255, 220/255, 1),
@@ -883,9 +698,9 @@ class _StatsScreenPanel(FloatLayout):
             fs_body = int(max(10.0, min(14.0, line_h - 4.0)))
             fs_header = fs_body + 1
         except Exception:
-            line_h = 22.0
-            fs_body = 12
-            fs_header = 13
+            line_h = 26.0
+            fs_body = 10
+            fs_header = 11
 
         try:
             w = float(self.width or 1.0)
@@ -902,7 +717,9 @@ class _StatsScreenPanel(FloatLayout):
             col_hdr = (255/255, 210/255, 60/255, 1)
             col_txt = (210/255, 210/255, 210/255, 1)
             hint_col = (150/255, 150/255, 150/255, 1)
-            hint_fs = 14
+            hint_fs = 13
+            fs_body = 18
+            fs_header = 19
         else:
             col_sep = (100/255, 100/255, 100/255, 200/255)
             col_hdr = (255/255, 220/255, 80/255, 1)
@@ -956,9 +773,15 @@ class _TheEndPanel(FloatLayout):
                   pos=lambda w, v: setattr(self._bg, 'pos', v))
         self._lbl = Label(text='THE END', font_size='68sp', bold=True,
                           size_hint=(1, 1), halign='center', valign='middle',
-                          color=(1, 1, 1, 1))
+                          color=(1, 210/255, 60/255, 1))
         self._lbl.bind(size=self._lbl.setter('text_size'))
         self.add_widget(self._lbl)
+        self._hint = Label(text='Press ESC to continue', font_size='13sp',
+                           size_hint=(None, None), size=(Window.width, 30.0),
+                           pos=(0.0, 16.0),
+                           halign='center', valign='middle', color=(150/255, 150/255, 150/255, 1))
+        self._hint.bind(size=self._hint.setter('text_size'))
+        self.add_widget(self._hint)
 
 
 class _HUDOverlay(FloatLayout):
@@ -1299,7 +1122,210 @@ class _HUDOverlay(FloatLayout):
 class _MinimapWidget(FloatLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.core = None
         self._until = 0.0
+
+        self._static_layout_id = None
+        self._static_size = None
+        self._static_cell = 0
+        self._static_ox = 0
+        self._static_oy = 0
+        self._static_mw = 0
+        self._static_mh = 0
+        self._static_rows = 0
+        self._static_cols = 0
+
+        self._static_canvas = None
+        self._dynamic_canvas = None
+
+    def on_touch_down(self, touch):
+        return False if self.opacity == 0 else super().on_touch_down(touch)
+
+    def _ensure_static_layer(self):
+        if not self.core:
+            return False
+
+        layout = self.core.layout
+        rows = len(layout)
+        cols = len(layout[0]) if rows else 0
+        if rows == 0 or cols == 0:
+            return False
+
+        W, H = Window.width, Window.height
+        cell = max(1, min(int(W * 0.85 / max(cols, 1)),
+                          int((H - 40) / max(rows, 1))))
+        mw, mh = cols*cell, rows*cell
+        ox = (W - mw)//2
+        oy = 20 + ((H - 40) - mh)//2
+
+        current_layout_id = id(layout)
+        current_size = (W, H)
+
+        needs_rebuild = (
+            self._static_layout_id != current_layout_id or
+            self._static_size != current_size or
+            self._static_canvas is None
+        )
+
+        if not needs_rebuild:
+            return True
+
+        self._static_layout_id = current_layout_id
+        self._static_size = current_size
+        self._static_cell = cell
+        self._static_ox = ox
+        self._static_oy = oy
+        self._static_mw = mw
+        self._static_mh = mh
+        self._static_rows = rows
+        self._static_cols = cols
+
+        if self._static_canvas:
+            self.canvas.remove(self._static_canvas)
+        self._static_canvas = Canvas()
+
+        walls = self.core.walls
+        floors = self.core.floors
+
+        with self._static_canvas:
+            Color(10/255, 10/255, 12/255, 210/255)
+            Rectangle(pos=(ox, oy), size=(mw, mh))
+
+            Color(230/255, 230/255, 230/255, 1)
+            Line(rectangle=(ox, oy, mw, mh), width=1.5)
+
+            wall_positions = []
+            floor_positions = []
+            other_positions = []
+
+            for r in range(rows):
+                for c in range(cols):
+                    rx = ox + c*cell
+                    ry = oy + (rows-1-r)*cell
+                    pos_size = (rx, ry, cell+1, cell+1)
+
+                    if (r, c) in walls:
+                        wall_positions.append(pos_size)
+                    elif (r, c) in floors:
+                        floor_positions.append(pos_size)
+                    else:
+                        other_positions.append(pos_size)
+
+            if wall_positions:
+                Color(45/255, 45/255, 55/255, 1)
+                for pos_size in wall_positions:
+                    Rectangle(pos=(pos_size[0], pos_size[1]), size=(
+                        pos_size[2], pos_size[3]))
+
+            if floor_positions:
+                Color(125/255, 125/255, 135/255, 1)
+                for pos_size in floor_positions:
+                    Rectangle(pos=(pos_size[0], pos_size[1]), size=(
+                        pos_size[2], pos_size[3]))
+
+            if other_positions:
+                Color(15/255, 15/255, 18/255, 1)
+                for pos_size in other_positions:
+                    Rectangle(pos=(pos_size[0], pos_size[1]), size=(
+                        pos_size[2], pos_size[3]))
+
+        self.canvas.add(self._static_canvas)
+        return True
+
+    def redraw(self):
+        if not self.core:
+            return
+
+        if not self._ensure_static_layer():
+            return
+
+        ox, oy = self._static_ox, self._static_oy
+        cell = self._static_cell
+        rows = self._static_rows
+        mw, mh = self._static_mw, self._static_mh
+
+        if self._dynamic_canvas:
+            self.canvas.remove(self._dynamic_canvas)
+        self._dynamic_canvas = Canvas()
+
+        with self._dynamic_canvas:
+            csz = max(6, int(cell*0.35))
+            Color(255/255, 215/255, 0, 1)
+            for coin in self.core.coins.values():
+                if coin.taken:
+                    continue
+                cr, cc = coin.cell
+                Ellipse(pos=(ox+cc*cell+cell//2-csz//2,
+                             oy+(rows-1-cr)*cell+cell//2-csz//2), size=(csz, csz))
+
+            GCOLS = {1: (1, .314, .235, 1), 2: (.314, 1, .549, 1), 3: (.431, .667, 1, 1),
+                     4: (1, .863, .314, 1), 5: (1, .353, 1, 1)}
+            gsz = max(10, int(cell*0.6))
+            for g in self.core.ghosts.values():
+                s = float(getattr(g, 'size_scale', 1.0) or 1.0)
+                gsz_scaled = int(max(8, gsz * s))
+                Color(*GCOLS.get(g.id, (1, .471, .118, 1)))
+                Ellipse(pos=(ox+g.x*cell+cell//2-gsz_scaled//2,
+                             oy+(rows-1-g.z)*cell+cell//2-gsz_scaled//2), size=(gsz_scaled, gsz_scaled))
+
+                eye_size = max(2, int(gsz_scaled * 0.15))
+                eye_ox = gsz_scaled * 0.25
+                eye_oy = gsz_scaled * 0.1
+                gx = ox+g.x*cell+cell//2
+                gy = oy+(rows-1-g.z)*cell+cell//2
+
+                for ex in (gx - eye_ox, gx + eye_ox):
+                    ey = gy - eye_oy
+                    Color(1, 1, 1, 1)
+                    Ellipse(pos=(ex - eye_size//2, ey - eye_size//2),
+                            size=(eye_size, eye_size))
+                    pupil = max(1, int(eye_size * 0.5))
+                    Color(0, 0, 0, 1)
+                    Ellipse(pos=(ex - pupil//2, ey - pupil//2),
+                            size=(pupil, pupil))
+
+            pr = int(self.core.player.z)
+            pc = int(self.core.player.x)
+            px = ox + pc*cell + cell//2
+            py = oy + (rows-1-pr)*cell + cell//2
+            psz = max(12, int(cell*0.7))
+            half = psz//2
+
+            Color(50/255, 255/255, 50/255, 1)
+            Triangle(points=[px, py-half, px+half, py, px, py+half])
+            Triangle(points=[px, py-half, px, py+half, px-half, py])
+
+            dot = max(4, psz//3)
+            Color(1, 1, 1, 1)
+            Ellipse(pos=(px-dot//2, py-dot//2), size=(dot, dot))
+
+            yaw = float(getattr(self.core.player, 'yaw', 0.0))
+            fx = math.sin(yaw)
+            fz = -math.cos(yaw)
+            line_len = max(6, int(cell * 0.75))
+            Color(255/255, 220/255, 110/255, 1)
+            Line(points=[px, py, px+int(fx*line_len),
+                 py+int(fz*line_len)], width=2)
+
+            rem = max(0.0, float(self._until) - time.perf_counter())
+            ctext = f'MAP: {int(rem + 0.5)}s'
+            from kivy.core.text import Label as CoreLabel
+            lbl = CoreLabel(text=ctext, font_size=14,
+                            bold=True, color=(1, 1, 1, 1))
+            lbl.refresh()
+            tex = lbl.texture
+            tw, th = tex.size
+            tx = ox + mw - tw - 10
+            ty = oy + mh - th - 8
+            Color(0, 0, 0, 0.7)
+            Rectangle(pos=(tx - 3, ty - 2), size=(tw + 6, th + 4))
+            Color(1, 1, 1, 1)
+            Rectangle(pos=(tx, ty), size=(tw, th), texture=tex)
+
+        self.canvas.add(self._dynamic_canvas)
+
+    def force_redraw(self):
+        self._static_layout_id = None
 
 
 class KivyGameWindow(FloatLayout):
@@ -1543,7 +1569,7 @@ class KivyGameWindow(FloatLayout):
                 )
         moved = False
         if not paused and not getattr(self.core, 'simulation_frozen', False) and not self.core.screen_closing and not self.core.game_won:
-            spd = 0.09 if self._current_level_id == 'level1' else 0.11
+            spd = 4.5 if self._current_level_id == 'level1' else 5.5
             dx = dz = 0.0
             if 'w' in self.keys_pressed:
                 dz += 1.0
@@ -1559,8 +1585,8 @@ class KivyGameWindow(FloatLayout):
                 dx /= length
                 dz /= length
 
-            dx *= spd
-            dz *= spd
+            dx *= spd * dt
+            dz *= spd * dt
             if dx or dz:
                 try:
                     moved = bool(self.core.move_player(dx, dz))
@@ -1687,7 +1713,8 @@ class KivyGameWindow(FloatLayout):
 
     def _try_open_minimap(self):
         now = time.perf_counter()
-        if now < self._hud._map_btn._cooldown_until:
+        cooldown = getattr(self._hud._map_btn, '_cooldown_until', 0.0)
+        if now < cooldown:
             return
         self._hud.open_minimap(10.0)
         self._hud._map_btn._cooldown_until = now + 30.0
@@ -1843,7 +1870,7 @@ class KivyGameWindow(FloatLayout):
                 if not self._lore_flags.get('coins_half') and not self._persist_seen.get(k):
                     self._lore_flags['coins_half'] = True
                     self._persist_seen[k] = True
-                    self._show_lore('Halfway.' if self._current_level_id == 'level1'
+                    self._show_lore('Halfway there.' if self._current_level_id == 'level1'
                                     else 'The maze likes it when I collect.')
         except Exception:
             pass
@@ -2065,6 +2092,13 @@ class KivyGameWindow(FloatLayout):
         except Exception:
             pass
 
+        # Trigger screen close animation for both levels
+        try:
+            self.core.screen_closing = True
+            self.core.screen_close_progress = 0.0
+        except Exception:
+            pass
+
         if self._current_level_id == 'level1':
             try:
                 unlocked = set(self._progress.get(
@@ -2112,10 +2146,7 @@ class KivyGameWindow(FloatLayout):
             import traceback
             traceback.print_exc()
 
-        if self._current_level_id == 'level2':
-            self.show_end_screen(summary_text)
-        else:
-            self.show_stats_screen(summary_text)
+        self.show_stats_screen(summary_text)
 
     def show_stats_screen(self, text: str) -> None:
         self._stats_text = str(text or '')
@@ -2134,16 +2165,20 @@ class KivyGameWindow(FloatLayout):
 
     def show_end_screen(self, text: str) -> None:
         self._stats_text = str(text or '')
-        self._stats_visible = True
+        self._stats_visible = False
         self._end_screen_visible = True
+        self._show_the_end = True
         self._level_complete = True
         try:
-            self._stats_panel.set_text(self._stats_text, end_mode=True)
-            self._stats_panel.opacity = 1.0
+            self._stats_panel.opacity = 0.0
         except Exception:
             pass
         try:
-            self._hud._stats.set_text(self._stats_text, end_mode=True)
+            self._the_end.opacity = 1.0
+        except Exception:
+            pass
+        try:
+            self._hud._stats.set_text('')
         except Exception:
             pass
 

@@ -614,9 +614,9 @@ void main(){ FragColor=texture(uTex,vUV); }
             remaining = max(0.0, self._minimap_cooldown_until - now)
             self._gl_rect(float(ix), float(iy),
                           float(icon_size), float(icon_size), 0, 0, 0, 0.62)
-            self._gl_text(float(ix + 10), float(iy + 20),
-                          f'{int(math.ceil(remaining))}s',
-                          font_size=HUD_FS_MED, bold=True, color=(255, 210, 90, 255))
+            self._gl_text_center(float(ix), float(iy), float(icon_size), float(icon_size),
+                                 f'{int(math.ceil(remaining))}s',
+                                 font_size=HUD_FS_SMALL, bold=False, color=(255, 210, 90, 255))
 
         if now < self._minimap_until:
             self._draw_minimap_overlay_gl(w, h)
@@ -933,7 +933,7 @@ void main(){ FragColor=texture(uTex,vUV); }
             self._gl_outline_rect(float(bx), float(by), float(btn_w), float(btn_h),
                                   color=(220, 220, 220, 255))
             self._gl_text_center(float(bx), float(by), float(btn_w), float(btn_h),
-                                 label, font_size=HUD_FS_MED, bold=True,
+                                 label, font_size=HUD_FS_MED, bold=False,
                                  color=(255, 255, 255, 255))
 
     def _draw_level_select_modal_gl(self, w: int, h: int) -> None:
@@ -1098,7 +1098,7 @@ void main(){ FragColor=texture(uTex,vUV); }
     def _draw_the_end_gl(self, w: int, h: int) -> None:
         self._gl_rect(0, 0, float(w), float(h), 0, 0, 0, 1)
         self._gl_text_center(0, 0, float(w), float(h), 'THE END',
-                             font_size=68, bold=True, color=(255, 255, 255, 255))
+                             font_size=68, bold=True, color=(255, 210, 60, 255))
         self._gl_text_center(0, float(h - 46), float(w), 30,
                              'Press ESC to continue',
                              font_size=13, bold=False, color=(150, 150, 150, 255))
@@ -1329,8 +1329,7 @@ class WxGameWindow(wx.Frame):
 
         self.core = GameCore(level_id=last_level)
 
-        self._asset_dir = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), '..', '..', 'assets'))
+        self._asset_dir = os.path.abspath('assets')
         self._audio = _SimpleAudio(self._asset_dir)
 
         self._ghost_sound_active = True
@@ -1470,7 +1469,7 @@ class WxGameWindow(wx.Frame):
                 if not self._lore_flags.get('coins_half') and not self._persist_seen.get(k):
                     self._lore_flags['coins_half'] = True
                     self._persist_seen[k] = True
-                    self._show_lore_line('Halfway.' if self._current_level_id == 'level1'
+                    self._show_lore_line('Halfway there.' if self._current_level_id == 'level1'
                                          else 'The maze likes it when I collect.')
         except Exception:
             pass
@@ -1545,9 +1544,8 @@ class WxGameWindow(wx.Frame):
             self._save_progression()
 
     def _on_checkpoint_reached(self, _data: dict) -> None:
-        if getattr(self.core, 'screen_closing', False) or getattr(self.core, 'game_won', False):
-            return
-        self._set_paused(True)
+        self.core.simulation_frozen = True
+        self._set_footsteps_playing(False)
         self._last_update_time = time.perf_counter()
         self.canvas.Refresh(False)
 
@@ -1825,11 +1823,11 @@ class WxGameWindow(wx.Frame):
                         'Collect all coins and key fragments to unlock the exit.\n'
                         'Avoid hazards. If you get caught, you will be sent to jail.')
 
-        if paused or self.canvas._modal_visible:
+        if paused or self.canvas._modal_visible or getattr(self.core, 'simulation_frozen', False):
             self.canvas.Refresh(False)
             return
 
-        move_speed = 0.09 if self._current_level_id == 'level1' else 0.11
+        move_speed = 4.5 if self._current_level_id == 'level1' else 5.5
         dx = dz = 0.0
         if ord('W') in self.keys_pressed:
             dz += 1.0
@@ -1845,8 +1843,9 @@ class WxGameWindow(wx.Frame):
             dx /= length
             dz /= length
 
-        dx *= move_speed
-        dz *= move_speed
+        # Scale movement by delta time for frame-rate independent speed
+        dx *= move_speed * dt
+        dz *= move_speed * dt
 
         moved = False
         if dx != 0.0 or dz != 0.0:
@@ -1909,15 +1908,21 @@ class WxGameWindow(wx.Frame):
         try:
             if not self._perf_pdf_exported:
                 from core.pdf_export import export_performance_pdf
+                performance_data = self.performance_monitor.get_performance_summary()
                 export_performance_pdf(
                     framework='wxpython',
                     level_id=self._current_level_id,
-                    performance_data=self.performance_monitor.get_performance_summary(),
+                    performance_data=performance_data,
                     out_dir=os.path.abspath('performance_reports'),
                 )
                 self._perf_pdf_exported = True
+                print(f'[wxPython] PDF report exported to performance_reports/')
+        except ImportError as e:
+            print(f'[wxPython] PDF export not available: {e}')
         except Exception as e:
             print(f'[wxPython] PDF export failed: {e}')
+            import traceback
+            traceback.print_exc()
 
         if self._current_level_id == 'level2':
             self.canvas.show_end_screen(summary_text)
