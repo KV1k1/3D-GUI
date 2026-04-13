@@ -1311,7 +1311,7 @@ class WxGameWindow(wx.Frame):
         self.performance_monitor = PerformanceMonitor(framework='wxPython')
 
         screen = wx.Display().GetClientArea()
-        super().__init__(None, title='Within the Walls (WxPython)',
+        super().__init__(None, title='Within the Walls (wxPython)',
                          size=(screen.GetWidth(), screen.GetHeight()))
         self.Show()
         self.Center()

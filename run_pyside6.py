@@ -1,3 +1,4 @@
+import sys
 from PySide6.QtCore import Qt, QCoreApplication
 from PySide6.QtGui import QSurfaceFormat
 from adapters.pyside6.window import run
@@ -15,4 +16,10 @@ if __name__ == '__main__':
         QSurfaceFormat.setDefaultFormat(fmt)
     except Exception:
         pass
-    raise SystemExit(run())
+    try:
+        raise SystemExit(int(run() or 0))
+    except Exception:
+        import traceback
+        print("PySide6 crashed:")
+        traceback.print_exc()
+        sys.exit(1)
