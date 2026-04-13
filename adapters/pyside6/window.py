@@ -1028,6 +1028,7 @@ class PySide6GameWindow(QMainWindow):
         self.gl._show_the_end = False
         self.gl._stats_text = ''
         self.gl._stats_visible = False
+        self._solved_fragments.clear()
 
         old_startup_time = self._perf.startup_time_ms
         old_texture_load_time = self._perf.texture_load_time_ms
