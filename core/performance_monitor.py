@@ -248,7 +248,7 @@ class PerformanceMonitor:
 
         if 'input_latency' in summary:
             lat = summary['input_latency']
-            text += f"• Median input latency: {lat['median_latency_ms']}ms\n\n"
+            text += f"• Median Input Latency: {lat['median_latency_ms']}ms\n\n"
 
         if 'text_rendering' in summary:
             tex = summary['text_rendering']
