@@ -1,24 +1,20 @@
-"""
-OpenGL renderer for Kivy with modern GLSL.
-"""
-
-from __future__ import annotations
 
 import ctypes
 import math
 import os
 import time
 from array import array as _array
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, Callable
 
 import OpenGL.GL as GL
 
 from core.game_core import GameCore
 from kivy.core.text import Label as CoreLabel
+from kivy.graphics import (
+    Callback, Color, Ellipse, Rectangle, Line, Triangle,
+    Fbo, ClearColor, ClearBuffers
+)
 
-# ---------------------------------------------------------------------------
-# Constants matching the original renderer
-# ---------------------------------------------------------------------------
 _FOG_START   = 22.0
 _FOG_END     = 40.0
 _SKY_COLOR   = (0.05, 0.05, 0.08, 1.0)
@@ -30,15 +26,13 @@ _ENTITY_R2   = 18.0 ** 2
 _GLOW_R2     = 12.0 ** 2
 
 
-# ---------------------------------------------------------------------------
-# GLSL shaders
-# ---------------------------------------------------------------------------
 _TEXTURED_VERT = b"""
 #version 330 core
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec2 aUV;
 out vec2 vUV;
 out float vFogFactor;
+out vec3 vWorldPos;
 uniform mat4 uMVP;
 uniform float uFogStart;
 uniform float uFogEnd;
@@ -48,6 +42,7 @@ void main(){
     float dist = abs(world.z);
     vFogFactor = clamp((uFogEnd - dist) / (uFogEnd - uFogStart), 0.0, 1.0);
     vUV = aUV;
+    vWorldPos = aPos;
 }
 """
 
@@ -55,12 +50,40 @@ _TEXTURED_FRAG = b"""
 #version 330 core
 in vec2 vUV;
 in float vFogFactor;
+in vec3 vWorldPos;
 out vec4 FragColor;
 uniform sampler2D uTex;
 uniform vec4 uFogColor;
+uniform vec3 uPlayerPos;
+uniform float uTime;
+uniform bool uEnableDynamicLight;
 void main(){
     vec4 texColor = texture(uTex, vUV);
-    FragColor = mix(uFogColor, texColor, vFogFactor);
+    
+    if (uEnableDynamicLight) {
+        // Dynamic player light - softer effect with ambient darkening outside radius
+        float lightDist = distance(vWorldPos, uPlayerPos);
+        float lightRadius = 8.0;
+        float lightIntensity = smoothstep(lightRadius, 0.0, lightDist);
+        
+        // Ambient level: 70% at edge, 100% at center
+        float ambientLevel = 0.7 + lightIntensity * 0.3;
+        vec3 baseColor = texColor.rgb * ambientLevel;
+        
+        // Add warm light near player (subtle, not harsh)
+        vec3 lightColor = vec3(1.0, 0.95, 0.85);
+        vec3 litColor = baseColor + lightColor * lightIntensity * 0.15;
+        
+        // Pulsing light effect - very subtle
+        float pulse = 0.98 + 0.02 * sin(uTime * 2.0);
+        litColor *= pulse;
+        
+        vec4 finalColor = vec4(litColor, texColor.a);
+        FragColor = mix(uFogColor, finalColor, vFogFactor);
+    } else {
+        // No dynamic lighting - use base color at full brightness
+        FragColor = mix(uFogColor, texColor, vFogFactor);
+    }
 }
 """
 
@@ -70,6 +93,7 @@ layout(location=0) in vec3 aPos;
 layout(location=1) in vec4 aColor;
 out vec4 vColor;
 out float vFogFactor;
+out vec3 vWorldPos;
 uniform mat4 uMVP;
 uniform float uFogStart;
 uniform float uFogEnd;
@@ -79,6 +103,7 @@ void main(){
     float dist = abs(world.z);
     vFogFactor = clamp((uFogEnd - dist) / (uFogEnd - uFogStart), 0.0, 1.0);
     vColor = aColor;
+    vWorldPos = aPos;
 }
 """
 
@@ -86,22 +111,46 @@ _COLORED_FRAG = b"""
 #version 330 core
 in vec4 vColor;
 in float vFogFactor;
+in vec3 vWorldPos;
 out vec4 FragColor;
 uniform vec4 uFogColor;
+uniform vec3 uPlayerPos;
+uniform float uTime;
+uniform bool uEnableFlicker;
 void main(){
-    FragColor = mix(uFogColor, vColor, vFogFactor);
+    vec4 finalColor = vColor;
+    
+    if (uEnableFlicker) {
+        // Lamp flickering effect when player is close
+        // Use vertical position for lamp glow detection (lamps are at ceiling height)
+        float lampHeight = 2.0; // Approximate lamp height
+        vec3 lampPos = vec3(vWorldPos.x, lampHeight, vWorldPos.z);
+        float lightDist = distance(lampPos, uPlayerPos);
+        float flickerRadius = 6.0;
+        float flickerIntensity = smoothstep(flickerRadius, 0.0, lightDist);
+        
+        if (flickerIntensity > 0.0) {
+            // Flicker every 2.5 seconds
+            float flickerCycle = mod(uTime, 2.5);
+            float flicker = 1.0;
+            if (flickerCycle < 0.15) {
+                // Quick flicker off during the 2.5 second cycle
+                flicker = 0.3 + 0.7 * sin(flickerCycle * 40.0);
+            }
+            finalColor.rgb *= flicker;
+        }
+    }
+    
+    FragColor = mix(uFogColor, finalColor, vFogFactor);
 }
 """
 
 
-# ---------------------------------------------------------------------------
-# Matrix helpers (column-major, matching OpenGL convention)
-# ---------------------------------------------------------------------------
 def _mat_identity() -> List[float]:
     return [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
 
 def _mat_mul(a: List[float], b: List[float]) -> List[float]:
-    """Multiply two 4x4 column-major matrices."""
+    # Multiply two 4x4 column-major matrices.
     out = [0.0]*16
     for col in range(4):
         for row in range(4):
@@ -175,7 +224,7 @@ def _rot_pt_z(x: float, y: float, z: float, a: float) -> tuple[float, float, flo
 
 
 def _flip_rgba_v(pixels: bytes, w: int, h: int) -> bytes:
-    """Flip an RGBA pixel buffer vertically (top<->bottom)."""
+    # flip RGBA pixel buffer (top<->bottom).
     if not pixels or w <= 0 or h <= 0:
         return pixels
     row_bytes = int(w) * 4
@@ -187,9 +236,6 @@ def _flip_rgba_v(pixels: bytes, w: int, h: int) -> bytes:
     return bytes(out)
 
 
-# ---------------------------------------------------------------------------
-# Low-level helpers
-# ---------------------------------------------------------------------------
 def _compile_shader(src: bytes, kind) -> int:
     sh = GL.glCreateShader(kind)
     GL.glShaderSource(sh, src)
@@ -210,10 +256,7 @@ def _build_program(vert: bytes, frag: bytes) -> int:
     return prog
 
 def _load_texture_from_path(path: str) -> Optional[int]:
-    """Load a PNG/JPG using Kivy's CoreImage.
-
-    Uses GL_LINEAR (no mipmaps).
-    """
+    # load PNG/JPG using CoreImage
     if not os.path.exists(path):
         return None
     try:
@@ -236,7 +279,7 @@ def _load_texture_from_path(path: str) -> Optional[int]:
         return None
 
 def _make_fallback_texture(color_rgba: Tuple[int,int,int,int] = (180, 90, 60, 255)) -> int:
-    """Generate a simple solid-color fallback texture."""
+    # simple solid color fallback texture
     data = bytes(color_rgba) * (64 * 64)
     tex = GL.glGenTextures(1)
     GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
@@ -249,7 +292,7 @@ def _make_fallback_texture(color_rgba: Tuple[int,int,int,int] = (180, 90, 60, 25
     return int(tex)
 
 def _upload_vao_textured(raw: _array) -> Tuple[int, int]:
-    """Upload float array (x,y,z,u,v per vertex) into a new VAO/VBO. Returns (vao, vtx_count)."""
+    # Upload float array (x,y,z,u,v per vertex) into a new VAO/VBO. Returns (vao, vtx_count).
     if not raw:
         return 0, 0
     vtx_count = len(raw) // 5
@@ -270,7 +313,7 @@ def _upload_vao_textured(raw: _array) -> Tuple[int, int]:
 
 
 def _update_dynamic_vao_textured(vao: int, vbo: int, raw: _array) -> Tuple[int, int]:
-    """Update/reuse a dynamic textured VAO/VBO. Returns (vao, vtx_count)."""
+    # Update/reuse a dynamic textured VAO/VBO. Returns (vao, vtx_count).
     if not raw:
         return vao, 0
     vtx_count = len(raw) // 5
@@ -290,7 +333,7 @@ def _update_dynamic_vao_textured(vao: int, vbo: int, raw: _array) -> Tuple[int, 
     return int(vao), int(vtx_count)
 
 def _upload_vao_colored(raw: _array) -> Tuple[int, int]:
-    """Upload float array (x,y,z,r,g,b,a per vertex) into a new VAO/VBO. Returns (vao, vtx_count)."""
+    # Upload float array (x,y,z,r,g,b,a per vertex) into a new VAO/VBO. Returns (vao, vtx_count).
     if not raw:
         return 0, 0
     vtx_count = len(raw) // 7
@@ -317,11 +360,8 @@ def _delete_vao(vao: int) -> None:
             pass
 
 
-# ---------------------------------------------------------------------------
-# Geometry helper: emit quads/triangles into _array buffers
-# ---------------------------------------------------------------------------
 class _GeoBuilder:
-    """Accumulates textured (5-float) or colored (7-float) vertex data."""
+    # Accumulates textured (5-float) or colored (7-float) vertex data.
 
     def __init__(self, textured: bool):
         self._tex = textured
@@ -341,7 +381,7 @@ class _GeoBuilder:
         self.data.extend([x0,y0,z0, r,g,b,a, x1,y1,z1, r,g,b,a, x2,y2,z2, r,g,b,a])
 
     def tri_col_vc(self, p0, c0, p1, c1, p2, c2):
-        """Triangle with per-vertex color (needed for smooth glow falloff)."""
+        # Triangle with per-vertex color (needed for smooth glow falloff).
         x0,y0,z0 = p0; x1,y1,z1 = p1; x2,y2,z2 = p2
         r0,g0,b0,a0 = c0; r1,g1,b1,a1 = c1; r2,g2,b2,a2 = c2
         self.data.extend([
@@ -351,7 +391,7 @@ class _GeoBuilder:
         ])
 
     def cube_col(self, cx, cy, cz, sx, sy, sz, c):
-        """Axis-aligned box centered at (cx,cy,cz) with half-extents (sx,sy,sz)."""
+        # Axis-aligned box centered at (cx,cy,cz) with half-extents (sx,sy,sz).
         x0,x1 = cx-sx, cx+sx
         y0,y1 = cy-sy, cy+sy
         z0,z1 = cz-sz, cz+sz
@@ -361,6 +401,29 @@ class _GeoBuilder:
         self.quad_col((x1,y0,z1),(x1,y0,z0),(x1,y1,z0),(x1,y1,z1), c)
         self.quad_col((x0,y1,z1),(x1,y1,z1),(x1,y1,z0),(x0,y1,z0), c)
         self.quad_col((x0,y0,z0),(x1,y0,z0),(x1,y0,z1),(x0,y0,z1), c)
+
+    def cube_tex(self, cx, cy, cz, sx, sy, sz, uv_scale=1.0):
+        x0,x1 = cx-sx, cx+sx
+        y0,y1 = cy-sy, cy+sy
+        z0,z1 = cz-sz, cz+sz
+        # Front
+        self.quad_tex((x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1),
+                      (0.0,0.0),(uv_scale,0.0),(uv_scale,uv_scale),(0.0,uv_scale))
+        # Back
+        self.quad_tex((x1,y0,z0),(x0,y0,z0),(x0,y1,z0),(x1,y1,z0),
+                      (0.0,0.0),(uv_scale,0.0),(uv_scale,uv_scale),(0.0,uv_scale))
+        # Left
+        self.quad_tex((x0,y0,z0),(x0,y0,z1),(x0,y1,z1),(x0,y1,z0),
+                      (0.0,0.0),(uv_scale,0.0),(uv_scale,uv_scale),(0.0,uv_scale))
+        # Right
+        self.quad_tex((x1,y0,z1),(x1,y0,z0),(x1,y1,z0),(x1,y1,z1),
+                      (0.0,0.0),(uv_scale,0.0),(uv_scale,uv_scale),(0.0,uv_scale))
+        # Top
+        self.quad_tex((x0,y1,z1),(x1,y1,z1),(x1,y1,z0),(x0,y1,z0),
+                      (0.0,0.0),(uv_scale,0.0),(uv_scale,uv_scale),(0.0,uv_scale))
+        # Bottom
+        self.quad_tex((x0,y0,z0),(x1,y0,z0),(x1,y0,z1),(x0,y0,z1),
+                      (0.0,0.0),(uv_scale,0.0),(uv_scale,uv_scale),(0.0,uv_scale))
 
     def disc_fan_col(self, cx, cy, cz, radius, segments, c, normal_up=True):
         TWO_PI = math.pi * 2.0
@@ -374,7 +437,7 @@ class _GeoBuilder:
                 self.tri_col((cx,cy,cz),(x1,cy,z1),(x0,cy,z0), c)
 
     def disc_fan_tex(self, cx, cy, cz, radius, segments, uv_center=(0.5, 0.5), uv_radius=0.5, normal_up=True):
-        """Textured disc in the XZ plane (like coin faces)."""
+        # Textured disc in the XZ plane (like coin faces).
         TWO_PI = math.pi * 2.0
         uc, vc = uv_center
         for i in range(segments):
@@ -397,7 +460,7 @@ class _GeoBuilder:
             self.quad_col((x0,cy0,z0),(x1,cy0,z1),(x1,cy1,z1),(x0,cy1,z0), c)
 
     def coin_col(self, cx, cy, cz, radius=0.14, thickness=0.04, segments=16):
-        """Gold coin at (cx, cy, cz), flat along Y."""
+        # Gold coin at (cx, cy, cz), flat along Y.
         y0, y1 = cy - thickness/2.0, cy + thickness/2.0
         TWO_PI = math.pi * 2.0
         gold1 = (1.0, 0.84, 0.18, 0.98)
@@ -412,7 +475,7 @@ class _GeoBuilder:
         self.disc_fan_col(cx, y0, cz, radius, segments, gold1, normal_up=False)
 
     def key_col(self, cx, cy, cz, scale=1.0):
-        """Simple key silhouette (ring + shaft + teeth)."""
+        # Simple key silhouette (ring + shaft + teeth).
         s = scale
         SILVER = (0.72, 0.72, 0.82, 0.95)
         self.cylinder_side_col(cx+0.23*s, cy-0.06*s, cz, cy+0.18*s, 0.16*s, 16, SILVER)
@@ -420,11 +483,54 @@ class _GeoBuilder:
         for tx, th in ((-0.34*s, 0.06*s), (-0.25*s, 0.045*s), (-0.18*s, 0.035*s)):
             self.cube_col(cx+tx, cy+0.02*s, cz, 0.03*s, th, 0.08*s, SILVER)
 
-    def ghost_col(self, cx, cy, cz, scale, color, anim_t, segments: int = 26):
-        """Ghost shape.
+    def key_col_custom(self, cx, cy, cz, scale=1.0, color=(0.72, 0.72, 0.82, 0.95)):
+        s = scale
+        self.ring_col(cx+0.23*s, cy+0.06*s, cz, 0.16*s, 0.11*s, 0.035*s, 24, color)
+        self.cube_col(cx-0.12*s, cy+0.06*s, cz, 0.26*s, 0.03*s, 0.04*s, color)
+        for tx, th in ((-0.34*s, 0.12*s), (-0.25*s, 0.09*s), (-0.18*s, 0.07*s)):
+            self.cube_col(cx+tx, cy+0.02*s, cz, 0.03*s, th*0.5, 0.04*s, color)
 
-        segments: pass 26 (fast_mode=True) or 40 (fast_mode=False)
-        """
+    def ring_col(self, cx, cy, cz, outer_r, inner_r, thickness, segments, color):
+        TWO_PI = math.pi * 2
+        for i in range(segments):
+            a0, a1 = TWO_PI * (i / segments), TWO_PI * ((i + 1) / segments)
+            c0, s0, c1, s1 = math.cos(a0), math.sin(a0), math.cos(a1), math.sin(a1)
+            
+            # Outer face
+            self.quad_col(
+                (cx + outer_r*c0, cy - thickness, cz + outer_r*s0),
+                (cx + outer_r*c1, cy - thickness, cz + outer_r*s1),
+                (cx + outer_r*c1, cy + thickness, cz + outer_r*s1),
+                (cx + outer_r*c0, cy + thickness, cz + outer_r*s0),
+                color
+            )
+            # Inner face
+            self.quad_col(
+                (cx + inner_r*c1, cy - thickness, cz + inner_r*s1),
+                (cx + inner_r*c0, cy - thickness, cz + inner_r*s0),
+                (cx + inner_r*c0, cy + thickness, cz + inner_r*s0),
+                (cx + inner_r*c1, cy + thickness, cz + inner_r*s1),
+                color
+            )
+            # Top face
+            self.quad_col(
+                (cx + inner_r*c0, cy + thickness, cz + inner_r*s0),
+                (cx + inner_r*c1, cy + thickness, cz + inner_r*s1),
+                (cx + outer_r*c1, cy + thickness, cz + outer_r*s1),
+                (cx + outer_r*c0, cy + thickness, cz + outer_r*s0),
+                color
+            )
+            # Bottom face
+            self.quad_col(
+                (cx + outer_r*c0, cy - thickness, cz + outer_r*s0),
+                (cx + outer_r*c1, cy - thickness, cz + outer_r*s1),
+                (cx + inner_r*c1, cy - thickness, cz + inner_r*s1),
+                (cx + inner_r*c0, cy - thickness, cz + inner_r*s0),
+                color
+            )
+
+    def ghost_col(self, cx, cy, cz, scale, color, anim_t, segments: int = 26):
+        # Ghost shape
         r = 0.20 * scale
         seg = segments
         body_layers = 11
@@ -436,7 +542,7 @@ class _GeoBuilder:
                 return r*0.62*math.cos(t*math.pi), r*0.95*math.sin(t*math.pi)
             return -r*0.25*(t-0.5)*2.0, r*0.95
 
-        # Body dome
+        # Body
         for layer in range(1, body_layers):
             y_prev, r_prev = y_and_r((layer-1)/(body_layers-1))
             y_curr, r_curr = y_and_r(layer/(body_layers-1))
@@ -451,7 +557,7 @@ class _GeoBuilder:
                     (cx+ca0*r_curr, cy+y_curr, cz+sa0*r_curr),
                     color)
 
-        # Tail / skirt (animated with continuous sin)
+        # Tail
         for layer in range(tail_layers):
             layer_ratio  = layer / tail_layers
             prev_ratio   = (layer-1) / tail_layers
@@ -491,7 +597,7 @@ class _GeoBuilder:
                     (cx+ca0*rc0, y_curr_abs, cz+sa0*rc0),
                     color)
 
-        # Eyes (two quads facing +Z)
+        # Eyes
         eye_y   = cy + r*0.22
         eye_z_f = r*1.05
         eye_x_o = r*0.34
@@ -520,7 +626,7 @@ class _GeoBuilder:
             self.tri_col((x0,y_base,z0),(x1,y_base,z1),(cx,y_tip,cz), RED)
 
     def gate_bars_col(self, gx, gy_center, gz, wall_h, y_offset, is_jail):
-        """Vertical bars for a gate."""
+        # Vertical bars for a gate
         GRAY = (0.70, 0.70, 0.75, 1.0)
         bar_h = wall_h
         bar_y_center = gy_center + y_offset
@@ -530,11 +636,22 @@ class _GeoBuilder:
             else:
                 bx = gx; bz = gz + i * 0.18
             self.cube_col(bx, bar_y_center, bz, 0.035, bar_h*0.5, 0.06, GRAY)
-        cb = (0.65, 0.65, 0.70, 1.0)
+
+    def gate_bars_tex(self, gx, gy_center, gz, wall_h, y_offset, is_jail):
+        # Textured bars
+        bar_h = wall_h
+        bar_y_center = gy_center + y_offset
+        for i in range(-2, 3):
+            if is_jail:
+                bx = gx + i * 0.18; bz = gz
+            else:
+                bx = gx; bz = gz + i * 0.18
+
+            self.cube_tex(bx, bar_y_center, bz, 0.035, bar_h*0.5, 0.06, uv_scale=2.0)
         if is_jail:
-            self.cube_col(gx, bar_y_center + bar_h*0.42, gz, 0.47, 0.06, 0.08, cb)
+            self.cube_tex(gx, bar_y_center + bar_h*0.42, gz, 0.47, 0.06, 0.08, uv_scale=2.0)
         else:
-            self.cube_col(gx, bar_y_center + bar_h*0.42, gz, 0.08, 0.06, 0.47, cb)
+            self.cube_tex(gx, bar_y_center + bar_h*0.42, gz, 0.08, 0.06, 0.47, uv_scale=2.0)
 
     def platform_col(self, cx, cy, cz):
         BROWN = (0.6, 0.4, 0.2, 1.0)
@@ -544,6 +661,14 @@ class _GeoBuilder:
         self.cube_col(cx,       cy+0.15, cz-0.35, 0.41, 0.10, 0.025, DARK)
         self.cube_col(cx+0.35,  cy+0.15, cz,      0.025, 0.10, 0.41, DARK)
         self.cube_col(cx-0.35,  cy+0.15, cz,      0.025, 0.10, 0.41, DARK)
+
+    def platform_tex(self, cx, cy, cz):
+        # Textured moving platform
+        self.cube_tex(cx, cy+0.05, cz, 0.4, 0.05, 0.4, uv_scale=1.0)
+        self.cube_tex(cx,       cy+0.15, cz+0.35, 0.41, 0.10, 0.025, uv_scale=1.0)
+        self.cube_tex(cx,       cy+0.15, cz-0.35, 0.41, 0.10, 0.025, uv_scale=1.0)
+        self.cube_tex(cx+0.35,  cy+0.15, cz,      0.025, 0.10, 0.41, uv_scale=1.0)
+        self.cube_tex(cx-0.35,  cy+0.15, cz,      0.025, 0.10, 0.41, uv_scale=1.0)
 
     def table_book_col(self, cx, cy, cz, glow_pulse):
         BROWN = (0.35, 0.22, 0.10, 1.0)
@@ -555,6 +680,18 @@ class _GeoBuilder:
         self.cube_col(cx, cy+0.48, cz, 0.14, 0.02, 0.10, BOOK)
         GLOW = (0.95, 0.85, 0.35, min(0.6, glow_pulse))
         self.disc_fan_col(cx, cy+0.01, cz, 0.55, 16, GLOW)
+
+    def table_tex_book_col(self, cx, cy, cz, glow_pulse):
+        # Table texture
+        self.cube_tex(cx, cy+0.40, cz, 0.425, 0.04, 0.30, uv_scale=1.0)
+        for lx in (-0.35, 0.35):
+            for lz in (-0.22, 0.22):
+                self.cube_tex(cx+lx, cy+0.20, cz+lz, 0.04, 0.20, 0.04, uv_scale=1.0)
+
+    def table_book_col_glow(self, cx, cy, cz, glow_pulse):
+        # Book only (no glow)
+        BOOK = (0.12, 0.12, 0.14, 1.0)
+        self.cube_col(cx, cy+0.48, cz, 0.14, 0.02, 0.10, BOOK)
 
     def lamp_col(self, cx, cz, ceil_h):
         DARK  = (0.10, 0.10, 0.12, 1.0)
@@ -607,9 +744,6 @@ class _GeoBuilder:
             self.quad_col((x,cy-h,cz-w),(x,cy-h,cz+w),(x,cy+h,cz+w),(x,cy+h,cz-w), DARK)
 
 
-# ---------------------------------------------------------------------------
-# Main renderer class
-# ---------------------------------------------------------------------------
 class KivyRenderer:
     def __init__(self, core: GameCore):
         self.core = core
@@ -629,12 +763,13 @@ class KivyRenderer:
         self._tex_floor: Optional[int] = None
         self._tex_coin: Optional[int] = None
         self._jail_map_texture: Optional[int] = None
+        self._jail_map_fbo = None  # Keep Fbo reference to prevent GC
 
-        # Static world VAOs (built once)
+        # Static world VAOs
         self._wall_vao:  int = 0;  self._wall_vtx:  int = 0
         self._floor_vao: int = 0;  self._floor_vtx: int = 0
 
-        # Dynamic VAO (rebuilt every frame for entities)
+        # Dynamic VAO
         self._dyn_vao: int = 0;  self._dyn_vtx: int = 0
         self._dyn_vbo: int = 0
 
@@ -643,18 +778,25 @@ class KivyRenderer:
         self._dyn_tex_vtx: int = 0
         self._dyn_tex_vbo: int = 0
 
-        # Text texture cache with 200-entry LRU eviction
+        # Text texture cache with 200 entry max
         self._text_tex_cache: Dict[str, Tuple[int, int, int]] = {}
 
         # Lamp VAO (static, built once)
         self._lamp_vao: int = 0; self._lamp_vtx: int = 0
         self._lamps: List[Tuple[int, int]] = []
 
+        # Ghost particle
+        from collections import deque as _deque
+        self._ghost_trails: Dict[int, Any] = {}
+        self._ghost_trail_deque = _deque  # keep reference for later use
+        self._ghost_trail_last_sample: Dict[int, float] = {}
+        _TRAIL_SAMPLE_INTERVAL = 0.05  # seconds between trail position samples
+        self._TRAIL_SAMPLE_INTERVAL = _TRAIL_SAMPLE_INTERVAL
+        self._TRAIL_MAX_POINTS = 60    # max positions stored per ghost
+
         self._gl_ready = False
 
-    # ------------------------------------------------------------------
     def initialize(self) -> None:
-        """Must be called from inside a Kivy GL Callback."""
         start_time = time.perf_counter()
 
         self._anim_t = 0.0
@@ -679,6 +821,20 @@ class KivyRenderer:
             GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
             GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
 
+        self._tex_gate = _load_texture_from_path(os.path.join('assets', 'jail.jpg'))
+        if self._tex_gate:
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._tex_gate)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+
+        self._tex_platform = _load_texture_from_path(os.path.join('assets', 'wood.jpg'))
+        if self._tex_platform:
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self._tex_platform)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+
         self._build_world_vao()
         self._build_lamp_vao()
 
@@ -694,10 +850,20 @@ class KivyRenderer:
         self._gl_ready = True
 
         load_time = time.perf_counter() - start_time
+        
+        # texture loading time PerformanceMonitor
+        tex_load_ms = load_time * 1000
+        try:
+            perf = getattr(self.core, '_performance_monitor', None)
+            if perf:
+                perf.record_texture_load_time(tex_load_ms)
+        except Exception:
+            pass
+        
+        # OpenGL info PDF report
         try:
             from core.pdf_export import get_system_collector
             collector = get_system_collector()
-            collector.record_texture_load_time(load_time)
             try:
                 vendor   = GL.glGetString(GL.GL_VENDOR)
                 renderer = GL.glGetString(GL.GL_RENDERER)
@@ -711,10 +877,6 @@ class KivyRenderer:
         print("[KivyRenderer] initialized")
 
     def _get_text_texture(self, text: str) -> Optional[Tuple[int, int, int]]:
-        """Return (tex_id, w_px, h_px) for a given label text.
-
-        Cache limited to 200 entries with LRU-style eviction.
-        """
         t = str(text or '')
         if not t:
             return None
@@ -722,7 +884,7 @@ class KivyRenderer:
         if cached:
             return cached
 
-        # 200-entry LRU eviction
+        # 200 entry LRU eviction
         if len(self._text_tex_cache) >= 200:
             keys_to_remove = list(self._text_tex_cache.keys())[:50]
             for key in keys_to_remove:
@@ -733,6 +895,7 @@ class KivyRenderer:
                 except Exception:
                     pass
 
+        tex_start = time.perf_counter()
         try:
             lbl = CoreLabel(text=t, font_size=22, bold=True, color=(255/255, 235/255, 120/255, 1))
             lbl.refresh()
@@ -753,11 +916,22 @@ class KivyRenderer:
             GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
             out = (int(gl_tex), int(w), int(h))
             self._text_tex_cache[t] = out
+
+            # Record texture generation time (ms)
+            tex_duration_ms = (time.perf_counter() - tex_start) * 1000
+            try:
+                perf = getattr(self.core, '_performance_monitor', None)
+                if perf:
+                    perf.record_texture_generation(tex_duration_ms)
+            except Exception:
+                pass
+
             return out
         except Exception:
             return None
 
     def _get_jail_map_texture(self) -> int:
+        # sector map texture FBO
         if self._jail_map_texture is not None:
             return int(self._jail_map_texture)
 
@@ -776,129 +950,129 @@ class KivyRenderer:
         ox = (w - map_w) * 0.5
         oy = (h - map_h) * 0.5
 
-        data = bytearray(w * h * 4)
-
-        def fill_rect(x0: int, y0: int, x1: int, y1: int, rgba: Tuple[int, int, int, int]) -> None:
-            x0 = max(0, min(w, x0)); x1 = max(0, min(w, x1))
-            y0 = max(0, min(h, y0)); y1 = max(0, min(h, y1))
-            if x1 <= x0 or y1 <= y0:
-                return
-            r, g, b, a = rgba
-            for py in range(y0, y1):
-                row = py * w * 4
-                for px in range(x0, x1):
-                    off = row + px * 4
-                    data[off:off+4] = bytes((r, g, b, a))
-
-        def blit_rgba(src: bytes, sw: int, sh: int, dst_x: int, dst_y: int) -> None:
-            if sw <= 0 or sh <= 0:
-                return
-            for sy in range(sh):
-                dy = dst_y + sy
-                if dy < 0 or dy >= h:
-                    continue
-                for sx in range(sw):
-                    dx = dst_x + sx
-                    if dx < 0 or dx >= w:
+        # FBO for off-screen rendering
+        from kivy.graphics import Fbo, ClearColor, ClearBuffers, Color, Rectangle
+        fbo = Fbo(size=(w, h), with_depthbuffer=False)
+        
+        # canvas instructions for map
+        with fbo:
+            ClearColor(0.196, 0.165, 0.141, 1.0)  # (50, 42, 36) / 255
+            ClearBuffers()
+            
+            palette = {
+                'A': (0.314, 0.471, 0.784),  # (80, 120, 200)
+                'B': (0.706, 0.510, 0.314),  # (180, 130, 80)
+                'C': (0.314, 0.706, 0.392),  # (80, 180, 100)
+                'D': (0.431, 0.706, 0.706),  # (110, 180, 180)
+                'E': (0.706, 0.392, 0.549),  # (180, 100, 140)
+                'F': (0.706, 0.706, 0.353),  # (180, 180, 90)
+                'G': (0.627, 0.392, 0.745),  # (160, 100, 190)
+                'H': (0.588, 0.588, 0.588),  # (150, 150, 150)
+            }
+            
+            walls = getattr(self.core, 'walls', set()) or set()
+            sid_for = getattr(self.core, 'sector_id_for_cell', None)
+            
+            acc: Dict[str, Tuple[float, float, int]] = {}
+            for r in range(grid_h):
+                for c in range(grid_w):
+                    if (r, c) in walls:
                         continue
-                    si = (sy * sw + sx) * 4
-                    a = src[si + 3]
-                    if a == 0:
-                        continue
-                    di = (dy * w + dx) * 4
-                    ia = 255 - a
-                    data[di+0] = (src[si+0]*a + data[di+0]*ia) // 255
-                    data[di+1] = (src[si+1]*a + data[di+1]*ia) // 255
-                    data[di+2] = (src[si+2]*a + data[di+2]*ia) // 255
-                    data[di+3] = min(255, a + (data[di+3]*ia) // 255)
-
-        fill_rect(0, 0, w, h, (50, 42, 36, 255))
-
-        palette: Dict[str, Tuple[int, int, int, int]] = {
-            'A': (80, 120, 200, 255), 'B': (180, 130, 80, 255),
-            'C': (80, 180, 100, 255), 'D': (110, 180, 180, 255),
-            'E': (180, 100, 140, 255), 'F': (180, 180, 90, 255),
-            'G': (160, 100, 190, 255), 'H': (150, 150, 150, 255),
-        }
-
-        walls = getattr(self.core, 'walls', set()) or set()
-        sid_for = getattr(self.core, 'sector_id_for_cell', None)
-        for r in range(grid_h):
-            for c in range(grid_w):
-                if (r, c) in walls:
-                    continue
-                try:
-                    sid = str(sid_for((r, c)) or '') if callable(sid_for) else ''
-                except Exception:
-                    sid = ''
-                col = palette.get(sid)
-                if not col:
-                    continue
-                x0 = int(ox + c * cell); y0 = int(oy + r * cell)
-                x1 = int(ox + (c+1)*cell); y1 = int(oy + (r+1)*cell)
-                fill_rect(x0, y0, max(x0+1, x1), max(y0+1, y1), col)
-
-        acc: Dict[str, Tuple[float, float, int]] = {}
-        if callable(sid_for):
-            for rr in range(grid_h):
-                for cc in range(grid_w):
                     try:
-                        sid = str(sid_for((rr, cc)) or '')
+                        sid = str(sid_for((r, c)) or '') if callable(sid_for) else ''
                     except Exception:
                         sid = ''
-                    if not sid:
+                    col = palette.get(sid)
+                    if not col:
                         continue
                     sx, sy, n = acc.get(sid, (0.0, 0.0, 0))
-                    acc[sid] = (sx + float(rr), sy + float(cc), n + 1)
-
-        for sid, (sx, sy, n) in acc.items():
-            if n <= 0:
-                continue
-            cr = sx / float(n); cc = sy / float(n)
-            px = ox + (cc + 0.5) * cell
-            py = oy + (cr + 0.5) * cell
-            lbl = CoreLabel(text=str(sid)[:1], font_size=56, bold=True, color=(10/255, 10/255, 12/255, 1))
-            lbl.refresh()
-            t = lbl.texture
-            if not t:
-                continue
-            tw, th = map(int, t.size)
-            blit_rgba(t.pixels, tw, th, int(px - tw * 0.5), int(py - th * 0.5))
-
-        if getattr(self.core, 'exit_cells', None):
-            try:
-                er, ec = self.core.exit_cells[0]
-                px = ox + (float(ec) + 0.5) * cell + 5
-                py = oy + (float(er) + 0.5) * cell
-                fill_rect(int(px-32), int(py-13), int(px+32), int(py+13), (210, 190, 175, 200))
-                lbl = CoreLabel(text='exit', font_size=26, bold=True, color=(15/255, 15/255, 16/255, 1))
+                    acc[sid] = (sx + float(r), sy + float(c), n + 1)
+                    x0 = int(ox + c * cell)
+                    y0 = int(oy + r * cell)
+                    cell_size = int(cell) + 1  # +1 for overlap
+                    Color(*col)
+                    Rectangle(pos=(x0, h - y0 - cell_size), size=(cell_size, cell_size))
+            
+            for sid, (sx, sy, n) in acc.items():
+                if n <= 0:
+                    continue
+                cr = sx / float(n)
+                cc = sy / float(n)
+                px = ox + (cc + 0.5) * cell
+                py = oy + (cr + 0.5) * cell
+                label = str(sid)[:1]
+                
+                lbl = CoreLabel(text=label, font_size=56, bold=True, 
+                               color=(0.039, 0.039, 0.047, 1.0))  # (10, 10, 12)
                 lbl.refresh()
-                t = lbl.texture
-                if t:
-                    tw, th = map(int, t.size)
-                    blit_rgba(t.pixels, tw, th, int(px - tw*0.5), int(py - th*0.5))
-            except Exception:
-                pass
+                tex = lbl.texture
+                if tex:
+                    tw, th = tex.size
+                    lx = int(px - tw / 2)
+                    ly = int(h - py - th / 2)  # Flip Y for OpenGL
+                    Color(1, 1, 1, 1)
+                    Rectangle(pos=(lx, ly), size=(tw, th), texture=tex)
+            
+            # exit label
+            if getattr(self.core, 'exit_cells', None):
+                try:
+                    er, ec = self.core.exit_cells[0]
+                    px = ox + (float(ec) + 0.5) * cell + 5
+                    py = oy + (float(er) + 0.5) * cell
+                    
+                    rect_w, rect_h = 64, 26
+                    Color(0.824, 0.745, 0.686, 0.784)  # (210, 190, 175, 200)
+                    Rectangle(pos=(int(px - rect_w//2), h - int(py + rect_h//2)), 
+                             size=(rect_w, rect_h))
+                    
+                    lbl = CoreLabel(text="exit", font_size=22, bold=True,
+                                   color=(0.059, 0.059, 0.063, 1.0))  # (15, 15, 16)
+                    lbl.refresh()
+                    tex = lbl.texture
+                    if tex:
+                        tw, th = tex.size
+                        lx = int(px - tw / 2)
+                        ly = int(h - py - th / 2 - 2)
+                        Color(1, 1, 1, 1)
+                        Rectangle(pos=(lx, ly), size=(tw, th), texture=tex)
+                except Exception:
+                    pass
 
+        # Render and get pixels
+        fbo.draw()
+        pixels = fbo.pixels  # RGBA bytes, bottom-up
+        fbo.clear()
+        
+        # Flip vertically
+        pixels_flipped = _flip_rgba_v(pixels, w, h)
+        
+        # OpenGL texture
         tex_id = GL.glGenTextures(1)
         if not tex_id:
             return 0
-        GL.glBindTexture(GL.GL_TEXTURE_2D, int(tex_id))
+        
+        GL.glBindTexture(GL.GL_TEXTURE_2D, tex_id)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
-        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
-        GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA, int(w), int(h), 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, bytes(data))
-        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
-        self._jail_map_texture = int(tex_id)
+        
+        try:
+            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA, w, h, 0,
+                           GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, pixels_flipped)
+        except Exception:
+            GL.glDeleteTextures(1, [tex_id])
+            return 0
+        finally:
+            GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        
+        self._jail_map_texture = tex_id
         return int(tex_id)
 
     def resize(self, w: int, h: int) -> None:
         self.width  = max(1, w)
         self.height = max(1, h)
 
-    # ------------------------------------------------------------------
     def _build_world_vao(self) -> None:
         _delete_vao(self._wall_vao)
         _delete_vao(self._floor_vao)
@@ -918,14 +1092,15 @@ class KivyRenderer:
             cx, cz = c + 0.5, r + 0.5
             for (dr, dc, face) in [(-1,0,'N'),(1,0,'S'),(0,-1,'W'),(0,1,'E')]:
                 if not solid(r+dr, c+dc):
+                    # UV tiling: horizontal wraps once (0-1), vertical tiles by wall height (0-wall_h)
                     if face == 'N':
-                        wb.quad_tex((cx-0.5,0,cz-0.5),(cx+0.5,0,cz-0.5),(cx+0.5,wall_h,cz-0.5),(cx-0.5,wall_h,cz-0.5),(0,0),(1,0),(1,1),(0,1))
+                        wb.quad_tex((cx-0.5,0,cz-0.5),(cx+0.5,0,cz-0.5),(cx+0.5,wall_h,cz-0.5),(cx-0.5,wall_h,cz-0.5),(0,0),(1,0),(1,wall_h),(0,wall_h))
                     elif face == 'S':
-                        wb.quad_tex((cx+0.5,0,cz+0.5),(cx-0.5,0,cz+0.5),(cx-0.5,wall_h,cz+0.5),(cx+0.5,wall_h,cz+0.5),(0,0),(1,0),(1,1),(0,1))
+                        wb.quad_tex((cx+0.5,0,cz+0.5),(cx-0.5,0,cz+0.5),(cx-0.5,wall_h,cz+0.5),(cx+0.5,wall_h,cz+0.5),(0,0),(1,0),(1,wall_h),(0,wall_h))
                     elif face == 'W':
-                        wb.quad_tex((cx-0.5,0,cz+0.5),(cx-0.5,0,cz-0.5),(cx-0.5,wall_h,cz-0.5),(cx-0.5,wall_h,cz+0.5),(0,0),(1,0),(1,1),(0,1))
+                        wb.quad_tex((cx-0.5,0,cz+0.5),(cx-0.5,0,cz-0.5),(cx-0.5,wall_h,cz-0.5),(cx-0.5,wall_h,cz+0.5),(0,0),(1,0),(1,wall_h),(0,wall_h))
                     else:
-                        wb.quad_tex((cx+0.5,0,cz-0.5),(cx+0.5,0,cz+0.5),(cx+0.5,wall_h,cz+0.5),(cx+0.5,wall_h,cz-0.5),(0,0),(1,0),(1,1),(0,1))
+                        wb.quad_tex((cx+0.5,0,cz-0.5),(cx+0.5,0,cz+0.5),(cx+0.5,wall_h,cz+0.5),(cx+0.5,wall_h,cz-0.5),(0,0),(1,0),(1,wall_h),(0,wall_h))
             exposed = any(not solid(r+dr, c+dc) for dr,dc in ((-1,0),(1,0),(0,-1),(0,1)))
             if exposed and wall_h < ceil_h:
                 wb.quad_tex((cx-0.5,wall_h,cz+0.5),(cx+0.5,wall_h,cz+0.5),(cx+0.5,wall_h,cz-0.5),(cx-0.5,wall_h,cz-0.5),(0,0),(1,0),(1,1),(0,1))
@@ -934,14 +1109,15 @@ class KivyRenderer:
             cx, cz = c+0.5, r+0.5
             for (dr, dc, face) in [(-1,0,'N'),(1,0,'S'),(0,-1,'W'),(0,1,'E')]:
                 if not inside(r+dr, c+dc):
+                    # UV tiling: horizontal wraps once (0-1), vertical tiles by wall height (0-wall_h)
                     if face == 'N':
-                        wb.quad_tex((cx-0.5,0,cz-0.5),(cx+0.5,0,cz-0.5),(cx+0.5,wall_h,cz-0.5),(cx-0.5,wall_h,cz-0.5),(0,0),(1,0),(1,1),(0,1))
+                        wb.quad_tex((cx-0.5,0,cz-0.5),(cx+0.5,0,cz-0.5),(cx+0.5,wall_h,cz-0.5),(cx-0.5,wall_h,cz-0.5),(0,0),(1,0),(1,wall_h),(0,wall_h))
                     elif face == 'S':
-                        wb.quad_tex((cx+0.5,0,cz+0.5),(cx-0.5,0,cz+0.5),(cx-0.5,wall_h,cz+0.5),(cx+0.5,wall_h,cz+0.5),(0,0),(1,0),(1,1),(0,1))
+                        wb.quad_tex((cx+0.5,0,cz+0.5),(cx-0.5,0,cz+0.5),(cx-0.5,wall_h,cz+0.5),(cx+0.5,wall_h,cz+0.5),(0,0),(1,0),(1,wall_h),(0,wall_h))
                     elif face == 'W':
-                        wb.quad_tex((cx-0.5,0,cz+0.5),(cx-0.5,0,cz-0.5),(cx-0.5,wall_h,cz-0.5),(cx-0.5,wall_h,cz+0.5),(0,0),(1,0),(1,1),(0,1))
+                        wb.quad_tex((cx-0.5,0,cz+0.5),(cx-0.5,0,cz-0.5),(cx-0.5,wall_h,cz-0.5),(cx-0.5,wall_h,cz+0.5),(0,0),(1,0),(1,wall_h),(0,wall_h))
                     else:
-                        wb.quad_tex((cx+0.5,0,cz-0.5),(cx+0.5,0,cz+0.5),(cx+0.5,wall_h,cz+0.5),(cx+0.5,wall_h,cz-0.5),(0,0),(1,0),(1,1),(0,1))
+                        wb.quad_tex((cx+0.5,0,cz-0.5),(cx+0.5,0,cz+0.5),(cx+0.5,wall_h,cz+0.5),(cx+0.5,wall_h,cz-0.5),(0,0),(1,0),(1,wall_h),(0,wall_h))
 
         self._wall_vao, self._wall_vtx = _upload_vao_textured(wb.data)
 
@@ -954,7 +1130,7 @@ class KivyRenderer:
         self._floor_vao, self._floor_vtx = _upload_vao_textured(fb.data)
 
     def _build_lamp_vao(self) -> None:
-        """Pre-build ceiling lamp geometry (static per level)."""
+        # Prebuild ceiling lamp
         _delete_vao(self._lamp_vao)
         ceil_h = float(self.core.ceiling_height)
         floors = self.core.floors
@@ -962,9 +1138,43 @@ class KivyRenderer:
 
         def is_floor(r, c): return (r,c) in floors and (r,c) not in walls
 
+        # exclusion zones for lamp
+        exclusion_zones = set()
+        
+        # all gate cells
+        exclusion_zones.update(self.core.gate_cells)
+        
+        # 'd' gate
+        gate_cells = []
+        if hasattr(self.core, 'layout') and self.core.layout:
+            for r, row in enumerate(self.core.layout):
+                for c, char in enumerate(row):
+                    if char == 'd':
+                        gate_cells.append((r, c))
+        
+        # Exclude from start cells to nearest gate
+        for start_cell in self.core.start_cells:
+            if gate_cells:
+                nearest_gate = min(gate_cells, key=lambda g: abs(g[0] - start_cell[0]) + abs(g[1] - start_cell[1]))
+                min_r, max_r = min(start_cell[0], nearest_gate[0]), max(start_cell[0], nearest_gate[0])
+                min_c, max_c = min(start_cell[1], nearest_gate[1]), max(start_cell[1], nearest_gate[1])
+                for r in range(min_r, max_r + 1):
+                    for c in range(min_c, max_c + 1):
+                        exclusion_zones.add((r, c))
+        
+        # Exclude from exit cells to nearest gate
+        for exit_cell in self.core.exit_cells:
+            if gate_cells:
+                nearest_gate = min(gate_cells, key=lambda g: abs(g[0] - exit_cell[0]) + abs(g[1] - exit_cell[1]))
+                min_r, max_r = min(exit_cell[0], nearest_gate[0]), max(exit_cell[0], nearest_gate[0])
+                min_c, max_c = min(exit_cell[1], nearest_gate[1]), max(exit_cell[1], nearest_gate[1])
+                for r in range(min_r, max_r + 1):
+                    for c in range(min_c, max_c + 1):
+                        exclusion_zones.add((r, c))
+
         candidates = []
         for (r, c) in floors:
-            if (r,c) in walls: continue
+            if (r,c) in walls or (r,c) in exclusion_zones: continue
             if is_floor(r,c-1) and is_floor(r,c+1) and not is_floor(r,c-2) and not is_floor(r,c+2):
                 candidates.append((r,c)); continue
             if is_floor(r-1,c) and is_floor(r+1,c) and not is_floor(r-2,c) and not is_floor(r+2,c):
@@ -984,11 +1194,18 @@ class KivyRenderer:
             gb.lamp_col(c+0.5, r+0.5, ceil_h)
         self._lamp_vao, self._lamp_vtx = _upload_vao_colored(gb.data)
 
-    # ------------------------------------------------------------------
     def _set_fog_uniforms(self, prog: int) -> None:
         GL.glUniform1f(GL.glGetUniformLocation(prog, b"uFogStart"), _FOG_START)
         GL.glUniform1f(GL.glGetUniformLocation(prog, b"uFogEnd"),   _FOG_END)
         GL.glUniform4f(GL.glGetUniformLocation(prog, b"uFogColor"), *_SKY_COLOR)
+        # dynamic light and flickering - player pos, time
+        player = self.core.player
+        GL.glUniform3f(GL.glGetUniformLocation(prog, b"uPlayerPos"), float(player.x), float(player.y), float(player.z))
+        GL.glUniform1f(GL.glGetUniformLocation(prog, b"uTime"), self._anim_t)
+        if prog == self._tex_prog:
+            GL.glUniform1i(GL.glGetUniformLocation(prog, b"uEnableDynamicLight"), 1)
+        if prog == self._col_prog:
+            GL.glUniform1i(GL.glGetUniformLocation(prog, b"uEnableFlicker"), 0)
 
     def _set_no_fog_uniforms(self, prog: int) -> None:
         try:
@@ -1027,7 +1244,7 @@ class KivyRenderer:
         if not raw:
             return
         vtx = len(raw) // 7
-        data = (ctypes.c_float * len(raw))(*raw)
+        data = raw.tobytes()
         stride = 7 * 4
         GL.glUseProgram(self._col_prog)
         self._set_mvp(self._col_prog, mvp)
@@ -1036,7 +1253,35 @@ class KivyRenderer:
             self._dyn_vao = GL.glGenVertexArrays(1)
         GL.glBindVertexArray(self._dyn_vao)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._dyn_vbo)
-        GL.glBufferData(GL.GL_ARRAY_BUFFER, ctypes.sizeof(data), data, GL.GL_STREAM_DRAW)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, len(data), data, GL.GL_STREAM_DRAW)
+        GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(0))
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(1, 4, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(12))
+        GL.glEnableVertexAttribArray(1)
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, vtx)
+        GL.glBindVertexArray(0)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+
+    def _draw_dynamic_col_with_flicker(self, raw: _array, mvp: List[float]) -> None:
+        if not raw:
+            return
+        vtx = len(raw) // 7
+        data = raw.tobytes()
+        stride = 7 * 4
+        GL.glUseProgram(self._col_prog)
+        self._set_mvp(self._col_prog, mvp)
+        GL.glUniform1f(GL.glGetUniformLocation(self._col_prog, b"uFogStart"), _FOG_START)
+        GL.glUniform1f(GL.glGetUniformLocation(self._col_prog, b"uFogEnd"),   _FOG_END)
+        GL.glUniform4f(GL.glGetUniformLocation(self._col_prog, b"uFogColor"), *_SKY_COLOR)
+        player = self.core.player
+        GL.glUniform3f(GL.glGetUniformLocation(self._col_prog, b"uPlayerPos"), float(player.x), float(player.y), float(player.z))
+        GL.glUniform1f(GL.glGetUniformLocation(self._col_prog, b"uTime"), self._anim_t)
+        GL.glUniform1i(GL.glGetUniformLocation(self._col_prog, b"uEnableFlicker"), 1)
+        if self._dyn_vao == 0:
+            self._dyn_vao = GL.glGenVertexArrays(1)
+        GL.glBindVertexArray(self._dyn_vao)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._dyn_vbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, len(data), data, GL.GL_STREAM_DRAW)
         GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(0))
         GL.glEnableVertexAttribArray(0)
         GL.glVertexAttribPointer(1, 4, GL.GL_FLOAT, GL.GL_FALSE, stride, ctypes.c_void_p(12))
@@ -1080,6 +1325,21 @@ class KivyRenderer:
         px = float(player.x); py = float(player.y) + _CAMERA_H; pz = float(player.z)
         yaw = float(player.yaw); pitch = float(player.pitch)
 
+        # camera sway
+        sway_time = self._anim_t * 3.0
+        sway_offset_x = 0.0
+        sway_offset_y = 0.0
+        if not hasattr(self, '_prev_player_pos'):
+            self._prev_player_pos = (px, pz)
+        prev_px, prev_pz = self._prev_player_pos
+        moved = math.sqrt((px - prev_px)**2 + (pz - prev_pz)**2) > 0.001
+        self._prev_player_pos = (px, pz)
+        if moved:
+            sway_offset_y = math.sin(sway_time * 2.0) * 0.08
+            sway_offset_x = math.cos(sway_time) * 0.04
+        py += sway_offset_y
+        px += sway_offset_x
+
         lx = px + math.sin(yaw)*math.cos(pitch)
         ly = py + math.sin(pitch)
         lz = pz + math.cos(yaw)*math.cos(pitch)
@@ -1114,7 +1374,9 @@ class KivyRenderer:
         GL.glUseProgram(self._col_prog)
         self._set_fog_uniforms(self._col_prog)
         self._set_mvp(self._col_prog, vp)
+        GL.glUniform1i(GL.glGetUniformLocation(self._col_prog, b"uEnableFlicker"), 1)
         self._draw_vao(self._lamp_vao, self._lamp_vtx)
+        GL.glUniform1i(GL.glGetUniformLocation(self._col_prog, b"uEnableFlicker"), 0)
 
         self._draw_entities(vp)
 
@@ -1122,17 +1384,20 @@ class KivyRenderer:
         GL.glDisable(GL.GL_DEPTH_TEST)
         GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
 
-    # ------------------------------------------------------------------
     def _draw_entities(self, vp: List[float]) -> None:
-        # Ghost segment count matches PySide6 and wxPython exactly
         ghost_segments = 26 if self._fast_mode else 40
 
-        gb          = _GeoBuilder(textured=False)
+        gb_bg       = _GeoBuilder(textured=False)
+        gb_fg       = _GeoBuilder(textured=False)
         gb_coin_tex = _GeoBuilder(textured=True)
+        gb_gate_tex = _GeoBuilder(textured=True)
+        gb_platform_tex = _GeoBuilder(textured=True)
+        gb_table_tex = _GeoBuilder(textured=True)
         gb_sign_tex: Dict[int, _array] = {}
         gb_glow     = _GeoBuilder(textured=False)
         gb_ghost    = _GeoBuilder(textured=False)
         gb_arrow    = _GeoBuilder(textured=False)
+        gb_dust     = _GeoBuilder(textured=False)
         anim = self._anim_t
         TWO_PI = math.pi * 2.0
 
@@ -1200,7 +1465,7 @@ class KivyRenderer:
             for i in range(0, len(tmp.data), 7):
                 x,y,z = tmp.data[i],tmp.data[i+1],tmp.data[i+2]
                 x,y,z = _rot_pt_x(x,y,z,ax); x,y,z = _rot_pt_y(x,y,z,spin)
-                gb.data.extend([x+cx,y+cy,z+cz,tmp.data[i+3],tmp.data[i+4],tmp.data[i+5],tmp.data[i+6]])
+                gb_fg.data.extend([x+cx,y+cy,z+cz,tmp.data[i+3],tmp.data[i+4],tmp.data[i+5],tmp.data[i+6]])
             if self._tex_coin:
                 ttmp = _GeoBuilder(textured=True)
                 inner_r = 0.14*0.92; thickness = 0.04
@@ -1223,17 +1488,29 @@ class KivyRenderer:
             cx, cz = c+0.5, r+0.5
             if (cx-px)**2+(cz-pz)**2 > _ENTITY_R2: continue
             kind = getattr(frag,'kind','')
+            
+            if kind == 'KH':
+                base, glow_rgb = (0.55, 0.95, 1.0, 0.95), (0.65, 1.0, 1.0)
+            elif kind == 'KP':
+                base, glow_rgb = (0.9, 0.65, 1.0, 0.95), (0.95, 0.75, 1.0)
+            else:
+                base, glow_rgb = (0.75, 1.0, 0.65, 0.95), (0.85, 1.0, 0.75)
+            
             base_y = (ceil_h-0.85) if kind=='KP' else 1.18
             seed = float(sum((i+1)*ord(ch) for i,ch in enumerate(str(getattr(frag,'id','')))) % 997)
             bob = 0.08*math.sin(anim*2.4+seed)
             spin_y = (anim*140.0+seed*37.0)*(math.pi/180.0)
+            
             tmp = _GeoBuilder(textured=False)
-            tmp.key_col(0.0,0.0,0.0,scale=1.05)
+            tmp.key_col_custom(0.0,0.0,0.0,scale=1.05,color=base)
             az = math.pi*0.5; cy = base_y+bob
             for i in range(0, len(tmp.data), 7):
                 x,y,z = tmp.data[i],tmp.data[i+1],tmp.data[i+2]
                 x,y,z = _rot_pt_z(x,y,z,az); x,y,z = _rot_pt_y(x,y,z,spin_y)
-                gb.data.extend([x+cx,y+cy,z+cz,tmp.data[i+3],tmp.data[i+4],tmp.data[i+5],tmp.data[i+6]])
+                gb_fg.data.extend([x+cx,y+cy,z+cz,tmp.data[i+3],tmp.data[i+4],tmp.data[i+5],tmp.data[i+6]])
+            
+            if (cx-px)**2+(cz-pz)**2 <= _GLOW_R2:
+                radial_sprite_glow_col(cx, base_y+bob+0.05, cz, 0.55, glow_rgb, 0.12)
 
         # --- Ghosts ---
         ghost_colors = {
@@ -1241,6 +1518,46 @@ class KivyRenderer:
             3:(0.45,0.65,1.0,0.82), 4:(1.0,0.85,0.25,0.82),
             5:(0.95,0.35,1.0,0.82),
         }
+
+        # Trail constants
+        _TRAIL_FADE_DIST  = 4.0
+        _TRAIL_START_DIST = 1.0
+        _TRAIL_FULL_DIST  = 1.8 
+        _TRAIL_BASE_ALPHA = 0.55
+
+        def _sparkle_star(bx, by, bz, size, cr, cg, cb, alpha):
+            if alpha <= 0.005 or size <= 0.0:
+                return
+            h = size * 0.5
+            phase = (bx * 7.3 + bz * 13.7 + by * 3.1 + anim * 2.5)
+            ca0 = math.cos(phase);          sa0 = math.sin(phase)
+            ca1 = math.cos(phase + 1.047);  sa1 = math.sin(phase + 1.047)
+            ca2 = math.cos(phase + 2.094);  sa2 = math.sin(phase + 2.094)
+            twinkle = 0.65 + 0.35 * math.sin(anim * 8.0 + bx * 5.1 + bz * 3.7)
+            a = alpha * twinkle
+            col_c = (cr, cg, cb, a)
+            col_e = (cr, cg, cb, 0.0)
+            # Arm 0 (XZ plane rotated by phase)
+            p0 = (bx - ca0*h, by,      bz - sa0*h)
+            p1 = (bx + ca0*h, by,      bz + sa0*h)
+            p2 = (bx,         by + h,  bz)
+            p3 = (bx,         by - h,  bz)
+            gb_glow.tri_col_vc(p0, col_e, p2, col_c, p1, col_e)
+            gb_glow.tri_col_vc(p0, col_e, p1, col_e, p3, col_c)
+            # Arm 1 (rotated 60)
+            q0 = (bx - ca1*h, by,      bz - sa1*h)
+            q1 = (bx + ca1*h, by,      bz + sa1*h)
+            gb_glow.tri_col_vc(q0, col_e, p2, col_c, q1, col_e)
+            gb_glow.tri_col_vc(q0, col_e, q1, col_e, p3, col_c)
+            # Arm 2 (rotated 120)
+            r0 = (bx - ca2*h, by,      bz - sa2*h)
+            r1 = (bx + ca2*h, by,      bz + sa2*h)
+            gb_glow.tri_col_vc(r0, col_e, p2, col_c, r1, col_e)
+            gb_glow.tri_col_vc(r0, col_e, r1, col_e, p3, col_c)
+
+        import time as _time
+        now_t = _time.perf_counter()
+
         for g in self.core.ghosts.values():
             gx=float(g.x); gz=float(g.z)
             if (gx-px)**2+(gz-pz)**2 > _ENTITY_R2: continue
@@ -1251,7 +1568,6 @@ class KivyRenderer:
             base_col = ghost_colors.get(g.id,(1.0,0.55,0.15,0.92))
             col = (base_col[0],base_col[1],base_col[2],0.92)
             tmp = _GeoBuilder(textured=False)
-            # Pass ghost_segments so body+tail use the same count as PySide6/wxPython
             tmp.ghost_col(0.0,0.0,0.0,1.0,col,anim,segments=ghost_segments)
             yaw_g = float(getattr(g,'yaw',0.0) or 0.0)
             sx,sy,sz = 2.10*s, 2.75*s, 2.10*s
@@ -1265,6 +1581,56 @@ class KivyRenderer:
             radial_sprite_glow_col(gx,glow_y,gz,0.55*s,(col[0],col[1],col[2]),0.12)
             radial_sprite_glow_col(gx,glow_y,gz,0.95*s,(col[0],col[1],col[2]),0.05)
 
+            # --- Ghost particle trail ---
+            gid = g.id
+            if gid not in self._ghost_trails:
+                from collections import deque as _dq
+                self._ghost_trails[gid] = _dq(maxlen=self._TRAIL_MAX_POINTS)
+                self._ghost_trail_last_sample[gid] = now_t
+
+            trail = self._ghost_trails[gid]
+            last_t = self._ghost_trail_last_sample.get(gid, now_t)
+
+            # Sample a new position every _TRAIL_SAMPLE_INTERVAL seconds
+            if now_t - last_t >= self._TRAIL_SAMPLE_INTERVAL:
+                trail.append((gx, gy, gz, now_t))
+                self._ghost_trail_last_sample[gid] = now_t
+
+            # Draw trail (furthest to closest)
+            cr, cg, cb = base_col[0], base_col[1], base_col[2]
+            for tx, ty, tz, _ts in trail:
+                dist = math.sqrt((tx - gx)**2 + (tz - gz)**2)
+                if dist < _TRAIL_START_DIST or dist > _TRAIL_FADE_DIST:
+                    continue
+                if dist <= _TRAIL_FULL_DIST:
+                    fade = (dist - _TRAIL_START_DIST) / (_TRAIL_FULL_DIST - _TRAIL_START_DIST)
+                else:
+                    fade = 1.0 - (dist - _TRAIL_FULL_DIST) / (_TRAIL_FADE_DIST - _TRAIL_FULL_DIST)
+                fade = max(0.0, min(1.0, fade))
+
+
+                skip_thresh = fade  # 1.0 = always draw, 0.0 = never
+                hash_val = (tx * 31.7 + tz * 17.3 + gid * 7.1) % 1.0
+                if hash_val > skip_thresh:
+                    continue
+
+                alpha = _TRAIL_BASE_ALPHA * fade
+                p_size = 0.04 + 0.10 * fade * s
+
+                jitter_x = math.sin(tx * 11.3 + tz * 7.9 + gid) * 0.18 * s
+                jitter_z = math.cos(tx * 7.1 + tz * 13.1 + gid) * 0.18 * s
+                jitter_y = math.sin(tx * 5.7 + tz * 9.3) * 0.06 * s
+                particle_y = ty - 0.75 + jitter_y
+
+                _sparkle_star(tx + jitter_x, particle_y, tz + jitter_z,
+                              p_size, cr, cg, cb, alpha)
+
+                if fade > 0.5:
+                    jx2 = math.cos(tx * 13.9 + tz * 5.7 + gid * 2) * 0.12 * s
+                    jz2 = math.sin(tx * 9.3 + tz * 11.1 + gid * 3) * 0.12 * s
+                    _sparkle_star(tx + jx2, particle_y * 0.5 + ty * 0.5, tz + jz2,
+                                  p_size * 0.55, cr, cg, cb, alpha * 0.7)
+
         # --- Ceiling lamp glow ---
         ceil_h = float(self.core.ceiling_height)
         for r, c in (getattr(self,'_lamps',None) or []):
@@ -1275,30 +1641,67 @@ class KivyRenderer:
             for scale,a in ((1.0,0.08),(1.4,0.05),(1.9,0.03),(2.6,0.015)):
                 billboard_quad_col(lx,ay,lz,base*scale,base*scale,(0.98,0.95,0.82,a))
 
+        # --- Floating dust particles ---
+        dust_count = 50
+        dust_radius = 8.0
+        dust_height_range = 2.5
+        dust_color = (0.8, 0.8, 0.85, 0.4)
+        for i in range(dust_count):
+            seed = i * 73.7
+            angle = (seed + anim * 0.3) % TWO_PI
+            radius = 2.0 + (seed * 0.1 % (dust_radius - 2.0))
+            dx = px + math.cos(angle) * radius
+            dz = pz + math.sin(angle) * radius
+            dy = 0.5 + (seed * 0.5 % dust_height_range) + math.sin(anim * 0.5 + seed) * 0.3
+            
+            size = 0.008 + (seed * 0.01 % 0.01)
+            alpha = 0.2 + 0.3 * math.sin(anim * 1.5 + seed)
+            particle_color = (dust_color[0], dust_color[1], dust_color[2], alpha)
+            
+            gb_dust.quad_col(
+                (dx - size, dy - size, dz),
+                (dx + size, dy - size, dz),
+                (dx + size, dy + size, dz),
+                (dx - size, dy + size, dz),
+                particle_color
+            )
+
         # --- Spikes ---
         spikes = getattr(self.core,'spikes',None) or []
         if spikes:
             h_factor = float(self.core.spike_height_factor()) if hasattr(self.core,'spike_height_factor') else 0.0
             for sp in spikes:
                 r,c = sp.cell
-                gb.spike_col(c+0.5,r+0.5,0.85*h_factor)
+                gb_bg.spike_col(c+0.5,r+0.5,0.85*h_factor)
 
         # --- Gates ---
         wall_h = float(self.core.wall_height)
         for gate in self.core.gates.values():
             for (r,c) in gate.cells:
-                gb.gate_bars_col(c+0.5,wall_h/2.0,r+0.5,wall_h,gate.y_offset,gate.id=='jail')
+                if self._tex_gate:
+                    gb_gate_tex.gate_bars_tex(c+0.5,wall_h/2.0,r+0.5,wall_h,gate.y_offset,gate.id=='jail')
+                else:
+                    gb_bg.gate_bars_col(c+0.5,wall_h/2.0,r+0.5,wall_h,gate.y_offset,gate.id=='jail')
 
-        # --- Moving platforms ---
+        # --- Moving platform ---
         for plat in getattr(self.core,'platforms',[]):
             r,c = plat.cell
-            gb.platform_col(c+0.5,plat.y_offset,r+0.5)
+            if self._tex_platform:
+                gb_platform_tex.platform_tex(c+0.5,plat.y_offset,r+0.5)
+            else:
+                gb_bg.platform_col(c+0.5,plat.y_offset,r+0.5)
 
         # --- Jail table + book ---
         if getattr(self.core,'jail_book_cell',None):
             jr,jc = self.core.jail_book_cell
+            cx,cz = jc+0.5,jr+0.5
             pulse = 0.16+0.06*math.sin(anim*2.2)
-            gb.table_book_col(jc+0.5,0.0,jr+0.5,pulse)
+            radial_sprite_glow_col(cx,0.6,cz,0.9,(1.0,0.9,0.4),0.5)
+            if self._tex_platform:
+                gb_table_tex.table_tex_book_col(cx,0.0,cz,pulse)
+            else:
+                gb_bg.table_book_col(cx,0.0,cz,pulse)
+            gb_bg.table_book_col_glow(cx,0.0,cz,pulse)
 
         # --- Checkpoint arrow ---
         arrow = getattr(self.core,'checkpoint_arrow',None)
@@ -1315,7 +1718,7 @@ class KivyRenderer:
         sector_signs = getattr(self.core,'sector_signs',{}) or {}
         for sid,(cell,facing) in sector_signs.items():
             r,c = cell
-            gb.sign_col(c+0.5,1.65,r+0.5,facing,0.48,0.18)
+            gb_bg.sign_col(c+0.5,1.65,r+0.5,facing,0.48,0.18)
             label = f"SECTOR {str(sid)[:1]}"
             info = self._get_text_texture(label)
             if info:
@@ -1337,6 +1740,8 @@ class KivyRenderer:
 
         # --- Jail painting ---
         painting = getattr(self.core,'jail_painting',None)
+        jail_painting_arr = None
+        jail_tex = None
         if painting:
             (pr_cell,pc_cell),facing = painting
             cx,cz,cy = pc_cell+0.5,pr_cell+0.5,1.55
@@ -1359,34 +1764,50 @@ class KivyRenderer:
 
             def wall_quad_col(cx0,cy0,cz0,w0,h0,facing0,col0,off0=0.49):
                 if facing0=='N':
-                    z=cz0-off0; gb.quad_col((cx0-w0,cy0+h0,z),(cx0+w0,cy0+h0,z),(cx0+w0,cy0-h0,z),(cx0-w0,cy0-h0,z),col0)
+                    z=cz0-off0; gb_bg.quad_col((cx0-w0,cy0+h0,z),(cx0+w0,cy0+h0,z),(cx0+w0,cy0-h0,z),(cx0-w0,cy0-h0,z),col0)
                 elif facing0=='S':
-                    z=cz0+off0; gb.quad_col((cx0+w0,cy0+h0,z),(cx0-w0,cy0+h0,z),(cx0-w0,cy0-h0,z),(cx0+w0,cy0-h0,z),col0)
+                    z=cz0+off0; gb_bg.quad_col((cx0+w0,cy0+h0,z),(cx0-w0,cy0+h0,z),(cx0-w0,cy0-h0,z),(cx0+w0,cy0-h0,z),col0)
                 elif facing0=='W':
-                    x=cx0-off0; gb.quad_col((x,cy0+h0,cz0+w0),(x,cy0+h0,cz0-w0),(x,cy0-h0,cz0-w0),(x,cy0-h0,cz0+w0),col0)
+                    x=cx0-off0; gb_bg.quad_col((x,cy0+h0,cz0+w0),(x,cy0+h0,cz0-w0),(x,cy0-h0,cz0-w0),(x,cy0-h0,cz0+w0),col0)
                 else:
-                    x=cx0+off0; gb.quad_col((x,cy0+h0,cz0-w0),(x,cy0+h0,cz0+w0),(x,cy0-h0,cz0+w0),(x,cy0-h0,cz0-w0),col0)
+                    x=cx0+off0; gb_bg.quad_col((x,cy0+h0,cz0-w0),(x,cy0+h0,cz0+w0),(x,cy0-h0,cz0+w0),(x,cy0-h0,cz0-w0),col0)
 
             wall_quad_col(cx,cy,cz,0.78,0.50,facing,(0.30,0.20,0.10,1.0))
             wall_quad_col(cx,cy,cz,0.72,0.44,facing,(0.08,0.08,0.10,0.98))
-            tex = self._get_jail_map_texture()
-            if tex:
-                arr = gb_sign_tex.get(int(tex))
-                if arr is None:
-                    arr = _array('f'); gb_sign_tex[int(tex)] = arr
+            jail_tex = self._get_jail_map_texture()
+            if jail_tex:
                 tw,th=0.70,0.41; off=0.473
+                off_z = off - 0.02  # 0.02 units in front of wall
                 if facing=='N':
-                    z=cz-off; pts=[(cx-tw,cy+th,z,0.0,0.0),(cx+tw,cy+th,z,1.0,0.0),(cx+tw,cy-th,z,1.0,1.0),(cx-tw,cy-th,z,0.0,1.0)]
+                    z=cz-off_z; pts=[(cx-tw,cy+th,z,0.0,0.0),(cx+tw,cy+th,z,1.0,0.0),(cx+tw,cy-th,z,1.0,1.0),(cx-tw,cy-th,z,0.0,1.0)]
                 elif facing=='S':
-                    z=cz+off; pts=[(cx+tw,cy+th,z,0.0,0.0),(cx-tw,cy+th,z,1.0,0.0),(cx-tw,cy-th,z,1.0,1.0),(cx+tw,cy-th,z,0.0,1.0)]
+                    z=cz+off_z; pts=[(cx+tw,cy+th,z,0.0,0.0),(cx-tw,cy+th,z,1.0,0.0),(cx-tw,cy-th,z,1.0,1.0),(cx+tw,cy-th,z,0.0,1.0)]
                 elif facing=='W':
-                    x=cx-off; pts=[(x,cy+th,cz+tw,0.0,0.0),(x,cy+th,cz-tw,1.0,0.0),(x,cy-th,cz-tw,1.0,1.0),(x,cy-th,cz+tw,0.0,1.0)]
+                    x=cx-off_z; pts=[(x,cy+th,cz+tw,0.0,0.0),(x,cy+th,cz-tw,1.0,0.0),(x,cy-th,cz-tw,1.0,1.0),(x,cy-th,cz+tw,0.0,1.0)]
                 else:
-                    x=cx+off; pts=[(x,cy+th,cz-tw,0.0,0.0),(x,cy+th,cz+tw,1.0,0.0),(x,cy-th,cz+tw,1.0,1.0),(x,cy-th,cz-tw,0.0,1.0)]
+                    x=cx+off_z; pts=[(x,cy+th,cz-tw,0.0,0.0),(x,cy+th,cz+tw,1.0,0.0),(x,cy-th,cz+tw,1.0,1.0),(x,cy-th,cz-tw,0.0,1.0)]
                 (x0,y0,z0,u0,v0),(x1,y1,z1,u1,v1),(x2,y2,z2,u2,v2),(x3,y3,z3,u3,v3) = pts
-                arr.extend([x0,y0,z0,u0,v0,x1,y1,z1,u1,v1,x2,y2,z2,u2,v2,x0,y0,z0,u0,v0,x2,y2,z2,u2,v2,x3,y3,z3,u3,v3])
+                jail_painting_arr = _array('f')
+                jail_painting_arr.extend([x0,y0,z0,u0,v0,x1,y1,z1,u1,v1,x2,y2,z2,u2,v2,x0,y0,z0,u0,v0,x2,y2,z2,u2,v2,x3,y3,z3,u3,v3])
+            else:
+                pass
+        else:
+            pass
 
-        self._draw_dynamic_col(gb.data, vp)
+        self._draw_dynamic_col(gb_bg.data, vp)
+
+        if gb_sign_tex:
+            GL.glUseProgram(self._tex_prog)
+            for tex_id, arr in gb_sign_tex.items():
+                self._draw_dynamic_tex(arr, vp, tex_id)
+
+        # jail painting WITH depth test 
+        if jail_painting_arr is not None and jail_tex:
+            GL.glUseProgram(self._tex_prog)
+            self._draw_dynamic_tex(jail_painting_arr, vp, jail_tex)
+
+        if gb_fg.data:
+            self._draw_dynamic_col(gb_fg.data, vp)
 
         if gb_arrow.data:
             try:
@@ -1401,6 +1822,26 @@ class KivyRenderer:
             except Exception:
                 pass
 
+        # Render coins
+        if self._tex_coin and gb_coin_tex.data:
+            GL.glUseProgram(self._tex_prog)
+            self._draw_dynamic_tex(gb_coin_tex.data, vp, self._tex_coin)
+
+        # Render gate bars
+        if self._tex_gate and gb_gate_tex.data:
+            GL.glUseProgram(self._tex_prog)
+            self._draw_dynamic_tex(gb_gate_tex.data, vp, self._tex_gate)
+
+        # Render platforms
+        if self._tex_platform and gb_platform_tex.data:
+            GL.glUseProgram(self._tex_prog)
+            self._draw_dynamic_tex(gb_platform_tex.data, vp, self._tex_platform)
+
+        # Render jail table
+        if self._tex_platform and gb_table_tex.data:
+            GL.glUseProgram(self._tex_prog)
+            self._draw_dynamic_tex(gb_table_tex.data, vp, self._tex_platform)
+
         if gb_ghost.data:
             GL.glDepthMask(False)
             self._draw_dynamic_col(gb_ghost.data, vp)
@@ -1409,22 +1850,23 @@ class KivyRenderer:
         if gb_glow.data:
             GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE)
             GL.glDepthMask(False)
-            self._draw_dynamic_col(gb_glow.data, vp)
+            self._draw_dynamic_col_with_flicker(gb_glow.data, vp)
             GL.glDepthMask(True)
             GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
 
-        if self._tex_coin and gb_coin_tex.data:
-            GL.glUseProgram(self._tex_prog)
-            self._draw_dynamic_tex(gb_coin_tex.data, vp, self._tex_coin)
+        # Render dust particles
+        if gb_dust.data:
+            GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+            GL.glDepthMask(False)
+            GL.glDisable(GL.GL_DEPTH_TEST)
+            self._draw_dynamic_col(gb_dust.data, vp)
+            GL.glEnable(GL.GL_DEPTH_TEST)
+            GL.glDepthMask(True)
+            GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
 
-        if gb_sign_tex:
-            GL.glUseProgram(self._tex_prog)
-            for tex_id, arr in gb_sign_tex.items():
-                self._draw_dynamic_tex(arr, vp, tex_id)
 
-    # ------------------------------------------------------------------
     def rebuild_geometry(self) -> None:
-        """Call after level transition to rebuild static VAOs."""
+        # rebuild static VAOs.
         if not self._gl_ready:
             return
         self._build_world_vao()
@@ -1454,6 +1896,7 @@ class KivyRenderer:
         if getattr(self, '_jail_map_texture', None):
             try: GL.glDeleteTextures(1, [int(self._jail_map_texture)])
             except Exception: pass
+            self._jail_map_texture = None
 
         for tex_id, _, _ in getattr(self, '_text_tex_cache', {}).values():
             try: GL.glDeleteTextures(1, [int(tex_id)])

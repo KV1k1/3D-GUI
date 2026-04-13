@@ -17,37 +17,22 @@ from kivy.core.window import Window
 def _build_patterns(n: int = 6):
     def empty():
         return [[0]*n for _ in range(n)]
-
     def add_rect(p, r0, c0, r1, c1):
         for r in range(r0, r1+1):
             for c in range(c0, c1+1):
                 if 0 <= r < n and 0 <= c < n:
                     p[r][c] = 1
     patterns = []
-    p = empty()
-    add_rect(p, 1, 1, 1, 4)
-    add_rect(p, 2, 3, 4, 3)
-    add_rect(p, 4, 1, 4, 2)
+    p = empty(); add_rect(p,1,1,1,4); add_rect(p,2,3,4,3); add_rect(p,4,1,4,2)
     patterns.append(p)
-    p = empty()
-    add_rect(p, 1, 2, 4, 3)
-    add_rect(p, 1, 1, 1, 4)
+    p = empty(); add_rect(p,1,2,4,3); add_rect(p,1,1,1,4)
     patterns.append(p)
-    p = empty()
-    add_rect(p, 1, 2, 4, 3)
-    add_rect(p, 0, 2, 1, 3)
-    add_rect(p, 4, 1, 4, 4)
+    p = empty(); add_rect(p,1,2,4,3); add_rect(p,0,2,1,3); add_rect(p,4,1,4,4)
     patterns.append(p)
-    p = empty()
-    add_rect(p, 2, 1, 3, 4)
-    add_rect(p, 1, 2, 4, 3)
+    p = empty(); add_rect(p,2,1,3,4); add_rect(p,1,2,4,3)
     patterns.append(p)
-    p = empty()
-    add_rect(p, 1, 1, 1, 4)
-    add_rect(p, 1, 1, 4, 1)
-    add_rect(p, 4, 1, 4, 4)
-    add_rect(p, 2, 4, 4, 4)
-    add_rect(p, 2, 2, 2, 3)
+    p = empty(); add_rect(p,1,1,1,4); add_rect(p,1,1,4,1)
+    add_rect(p,4,1,4,4); add_rect(p,2,4,4,4); add_rect(p,2,2,2,3)
     patterns.append(p)
     return patterns
 
@@ -79,11 +64,10 @@ class PatternDisplay(Widget):
         pad_scaled = pad * scale
         ox = self.x + (self.width - total_size * scale) / 2
         oy = self.y + (self.height - total_size * scale) / 2
-
+        
         with self.canvas:
             Color(0.176, 0.176, 0.176, 1)
-            Rectangle(pos=(ox, oy), size=(
-                total_size * scale, total_size * scale))
+            Rectangle(pos=(ox, oy), size=(total_size * scale, total_size * scale))
             for r, row in enumerate(self._pattern):
                 for c, val in enumerate(row):
                     px = ox + pad_scaled + c * cell
@@ -94,8 +78,7 @@ class PatternDisplay(Widget):
                         Color(0.376, 0.376, 0.376, 1)
                     Rectangle(pos=(px, py), size=(cell - 2, cell - 2))
             Color(1.0, 0.84, 0.0, 0.5)
-            Line(rectangle=(ox, oy, total_size *
-                 scale, total_size * scale), width=1.5)
+            Line(rectangle=(ox, oy, total_size * scale, total_size * scale), width=1.5)
 
 
 class _CellButton(Button):
@@ -106,8 +89,8 @@ class _CellButton(Button):
         self._on = False
         self.size_hint = (None, None)
         self.size = (46, 46)
-        self.background_normal = ''
-        self.background_down = ''
+        self.background_normal  = ''
+        self.background_down    = ''
         self.text = ''
         self._update_style()
 
@@ -122,13 +105,13 @@ class _CellButton(Button):
     def set_off(self):
         self._on = False
         self._update_style()
-
+        
     def _update_style(self):
         if self._on:
             self.background_color = (1.0, 0.84, 0.0, 1.0)
         else:
             self.background_color = (0.25, 0.25, 0.26, 1.0)
-
+            
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
             if self._on:
@@ -136,7 +119,7 @@ class _CellButton(Button):
             else:
                 self.background_color = (0.21, 0.21, 0.21, 1.0)
         return super().on_touch_down(touch)
-
+        
     def on_touch_up(self, touch):
         self._update_style()
         return super().on_touch_up(touch)
@@ -192,7 +175,6 @@ class KivySilhouetteMinigame(ModalView):
         with root.canvas.before:
             Color(0.18, 0.18, 0.22, 0.98)
             self._panel_bg = Rectangle(pos=root.pos, size=root.size)
-
         def _upd_panel_bg(w, v=None):
             if self._panel_bg is None:
                 return
@@ -204,10 +186,9 @@ class KivySilhouetteMinigame(ModalView):
                 Line(rectangle=(w.x, w.y, w.width, w.height), width=1.25)
         root.bind(pos=_upd_panel_bg, size=_upd_panel_bg)
 
-        header = BoxLayout(orientation='horizontal',
-                           size_hint_y=None, height=35, spacing=8, padding=8)
+        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=35, spacing=8, padding=8)
         header.background_color = (0.25, 0.25, 0.26, 1.0)
-
+        
         # Title in header
         title_text = 'Silhouette Matching'
         if self._hard_mode:
@@ -219,7 +200,7 @@ class KivySilhouetteMinigame(ModalView):
             color=(1.0, 0.84, 0.0, 1.0), bold=True,
             size_hint_x=1,
         )
-
+        
         close_btn = Button(
             text='X', font_size=14,
             size_hint=(None, 1), width=30,
@@ -227,18 +208,17 @@ class KivySilhouetteMinigame(ModalView):
             color=(1.0, 1.0, 1.0, 1.0),
         )
         close_btn.bind(on_press=lambda *_: self._finish(False))
-
+        
         header.add_widget(self._title_label)
         header.add_widget(close_btn)
         root.add_widget(header)
 
         # Main content area
         content = BoxLayout(orientation='vertical', padding=8, spacing=8)
-
-        instructions = BoxLayout(
-            orientation='horizontal', size_hint_y=None, height=50, padding=8)
+        
+        instructions = BoxLayout(orientation='horizontal', size_hint_y=None, height=50, padding=8)
         instructions.background_color = (0.25, 0.25, 0.26, 1.0)
-
+        
         inst_text = 'Match the silhouette to unlock the jail gate'
         if self._hard_mode:
             inst_text = 'Match this harder silhouette!'
@@ -254,11 +234,11 @@ class KivySilhouetteMinigame(ModalView):
 
         # Grid area
         body = BoxLayout(orientation='horizontal', spacing=8)
-
+        
         left = BoxLayout(orientation='vertical', size_hint_x=1, spacing=6)
         target_container = BoxLayout(orientation='vertical', padding=12)
         target_container.background_color = (0.25, 0.25, 0.26, 1.0)
-
+        
         self._target_display = PatternDisplay(self._target)
         target_container.add_widget(self._target_display)
         left.add_widget(target_container)
@@ -267,7 +247,7 @@ class KivySilhouetteMinigame(ModalView):
         right = BoxLayout(orientation='vertical', size_hint_x=2, spacing=6)
         grid_container = BoxLayout(orientation='vertical', padding=12)
         grid_container.background_color = (0.25, 0.25, 0.26, 1.0)
-
+        
         grid = GridLayout(cols=self._size, spacing=6, size_hint=(1, 1))
         self._cells = []
         for r in range(self._size):
@@ -282,7 +262,7 @@ class KivySilhouetteMinigame(ModalView):
         right.add_widget(grid_container)
         body.add_widget(right)
         content.add_widget(body)
-
+        
         self._status = Label(
             text='Click the squares to draw the silhouette',
             font_size=14,
@@ -290,22 +270,20 @@ class KivySilhouetteMinigame(ModalView):
             color=(1.0, 0.84, 0.0, 1.0),
             size_hint_y=None, height=30,
         )
-        status_container = BoxLayout(
-            orientation='horizontal', size_hint_y=None, height=40, padding=6)
+        status_container = BoxLayout(orientation='horizontal', size_hint_y=None, height=40, padding=6)
         status_container.background_color = (0.25, 0.25, 0.26, 1.0)
         status_container.add_widget(self._status)
         content.add_widget(status_container)
 
         # Buttons
-        btn_row = BoxLayout(orientation='horizontal',
-                            size_hint_y=None, height=55, spacing=10, padding=10)
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=55, spacing=10, padding=10)
         reset_btn = Button(
             text='Reset', font_size=14,
             background_normal='', background_color=(0.25, 0.25, 0.26, 1.0),
             size_hint_x=None, width=80,
         )
         reset_btn.bind(on_press=self._reset)
-
+        
         unlock_btn = Button(
             text='[b]Unlock[/b]', markup=True, font_size=14,
             background_normal='', background_color=(0.29, 0.71, 0.50, 1.0),
@@ -313,20 +291,20 @@ class KivySilhouetteMinigame(ModalView):
             size_hint_x=None, width=80,
         )
         unlock_btn.bind(on_press=self._check)
-
+        
         quit_btn = Button(
             text='Quit', font_size=14,
             background_normal='', background_color=(0.94, 0.27, 0.27, 1.0),
             size_hint_x=None, width=80,
         )
         quit_btn.bind(on_press=lambda *_: self._finish(False))
-
+        
         btn_row.add_widget(reset_btn)
         btn_row.add_widget(Widget(size_hint_x=1))  # Spacer
         btn_row.add_widget(unlock_btn)
         btn_row.add_widget(quit_btn)
         content.add_widget(btn_row)
-
+        
         root.add_widget(content)
 
         self.add_widget(root)
