@@ -3,7 +3,6 @@
 
 
 ## Obsah
-- [O projekte](#o-projekte)
 - [Ciele práce](#ciele-práce)
 - [Návrh systému](#návrh-systému)
 - [Architektúra riešenia](#architektúra-riešenia)
@@ -14,13 +13,13 @@
 
 ## Ciele práce
 
-Hlavným cieľom tejto bakalárskej práce je praktické porovnanie a vyhodnotenie vybraných GUI frameworkov v programovacom jazyku Python pre vizualizáciu 3D objektov, so zameraním na ich využitie v hernom vývoji. Čiastkové ciele:
+Hlavným cieľom tejto práce je praktické porovnanie a vyhodnotenie vybraných GUI frameworkov v programovacom jazyku Python pre vizualizáciu 3D objektov, so zameraním na ich využitie v hernom vývoji. Čiastkové ciele:
 
-1. **Analýza a výber frameworkov** – preskúmať aktuálny stav využívania 3D vizualizácie v rámci Python GUI frameworkov a na základe komparatívnej analýzy vybrať tri, ktoré najlepšie reprezentujú rôzne úrovne funkcionality.
-2. **Návrh a implementácia herného prototypu** – navrhnúť architektúru jednoduchej desktopovej hry s integrovanou 3D vizualizáciou, ktorá využíva princípy objektovo-orientovaného programovania a modulárny dizajn.
-3. **Implementácia prototypu v jednotlivých frameworkoch** – vytvoriť tri implementácie rovnakého herného prototypu vo vybraných frameworkoch so zachovaním zhodnej funkcionality, mechaník a 3D scény.
-4. **Testovanie a vyhodnotenie** – vykonať sadu kvantitatívnych a kvalitatívnych metrík na všetkých troch verziách herného prototypu.
-5. **Formulovanie záverov a odporúčaní** – na základe výsledkov zhodnotiť efektivitu jednotlivých frameworkov a vytvoriť odporúčanie pre výber vhodnej technológie.
+1.	Porovnať existujúce riešenia na vizualizáciu 3D objektov v počítačových hrách (knižnice, GUI frameworky).
+2.	Porovnať a zhodnotiť GUI frameworky jazyka Python pre vizualizáciu 3D objektov v počítačových hrách na základe vopred zvolených kritérií.
+3.	Vytvoriť jednotný prototyp 3D objektu vo všetkých vybraných frameworkoch.
+4.	Implementovať vytvorený prototyp do jednoduchej počítačovej hry.
+5.	Otestovať prototyp a kriticky zhodnotiť dosiahnuté výsledky.
 
 ---
 
@@ -52,7 +51,7 @@ Táto trojica frameworkov pokrýva široké spektrum – od tradičného natívn
 ### Nefunkčné požiadavky
 -	Výkon: Pre zabezpečenie plynulosti hry musí aplikácia dosahovať na referenčnom hardvéri minimálne 30 FPS (Frame Per Second).
 -	Použiteľnosť: Okamžitá odozva na vstupy z klávesnice a myši, bez výrazného oneskorenia. 
--	Kompatibilita: Aplikácia musí byť spustiteľná na operačných systémoch Windows a Linux bez zmeny zdrojového kódu.
+-	Kompatibilita: Aplikácia musí byť spustiteľná na operačných systémoch Windows bez zmeny zdrojového kódu.
 -	Udržateľnosť: Kód musí byť čitateľný, dobre štruktúrovaný a modulárny, herné jadro oddelené od GUI, aby ho bolo možné upravovať a rozširovať.
 
 
@@ -102,22 +101,26 @@ Celý herný svet vychádza z textových definícií máp uložených v súbore 
 ```python
 def _parse_maps(self) -> None:
     for r, row in enumerate(self.layout):
-        for c, char in enumerate(row):
-            if char == '#':
+        for c in range(self.width):
+            ch = row[c]
+            if ch == '#':
                 self.walls.add((r, c))
-            elif char in '.SEdJ':
+            else:
                 self.floors.add((r, c))
-            if char == 'd':
-                self.gate_cells.add((r, c))
-            if char == 'S':
-                self.start_cells.append((r, c))
-            if char == 'E':
-                self.exit_cells.append((r, c))
 
+            if ch == 'S':
+                self.start_cells.append((r, c))
+            elif ch == 'E':
+                self.exit_cells.append((r, c))
+            elif ch == 'd':
+                self.gate_cells.add((r, c))
+
+    overlay_width = self.width
     for r, row in enumerate(self.overlay):
-        for c, char in enumerate(row):
-            if char in '12345':
-                self.ghost_paths.setdefault(int(char), []).append((r, c))
+        for c in range(overlay_width):
+            ch = row[c]
+            if ch in '12345':
+                self.ghost_paths[int(ch)].append((r, c))
 ```
 
 ### Mince
@@ -134,15 +137,15 @@ Bunky sú kategorizované podľa geometrie chodby:
 total_coins = self.coins_required
 center_coins   = min(total_coins // 2, len(center_cells))     # 50% v strede
 remaining      = total_coins - center_coins
-isolated_coins = min(remaining // 2, len(isolated_cells))     # 25% v izolovaných
+isolated_coins = min(remaining // 2, len(isolated_cells))     # 25% v izolovaných pozíciách
 edge_coins     = remaining - isolated_coins                    # 25% na okrajoch
 ```
 
 ### FPS kamera
 Kamera bola implementovaná ako pohľad z prvej osoby (FPS) s dvoma stupňami voľnosti, kde orientáciu určujú uhly `yaw` (rotácia okolo osi Y) a `pitch` (sklon nahor/nadol). Z týchto uhlov sa vypočíta smer pohľadu a zostaví sa pohľadová matica pomocou konštrukcie look-at:
-
+```
 MVP = P · V · M
-
+```
 kde M je modelová, V pohľadová a P projekčná matica.
 
 Rotácia kamery je riadená pohybom myši aktualizáciou uhlov yaw a pitch:
@@ -156,21 +159,29 @@ pitch += −dy × sensitivity
 kde *dx* a *dy* predstavujú zmenu pozície kurzora v pixeloch a sensitivity určuje citlivosť rotácie.
 *PySide6* a *wxPython* podporujú mouse warping, ktorý umožňuje neobmedzenú rotáciu kamery. *Kivy* udáva pozíciu myši so súradnicovým systémom, kde y rastie nahor, takže pri výpočte `pitch` je potrebné invertovať znamienko a *mouse warping* nie je dostupný, čo zastavuje rotáciu pri okraji okna.
 
-### 4.1 Kolízny rádius
+### Kolízny rádius
 
 Hráč má kolízny rádius **0,30 jednotky**:
 ```python
 def _can_move_to(self, x: float, z: float) -> bool:
     radius = 0.30
-    for rr in range(cell_r-1, cell_r+2):
-        for cc in range(cell_c-1, cell_c+2):
+    for rr in range(cell_r - 1, cell_r + 2):
+        for cc in range(cell_c - 1, cell_c + 2):
             if (rr, cc) not in self.walls:
                 continue
-            minx, maxx = cc, cc+1.0
-            minz, maxz = rr, rr+1.0
-            dx = max(0.0, minx-x, x-maxx)
-            dz = max(0.0, minz-z, z-maxz)
-            if dx*dx + dz*dz < radius*radius:
+            minx, maxx = cc, cc + 1.0
+            minz, maxz = rr, rr + 1.0
+            dx = 0.0
+            if x < minx:
+                dx = minx - x
+            elif x > maxx:
+                dx = x - maxx
+            dz = 0.0
+            if z < minz:
+                dz = minz - z
+            elif z > maxz:
+                dz = z - maxz
+            if dx * dx + dz * dz < radius * radius:
                 return False
 ```
 
@@ -178,7 +189,7 @@ def _can_move_to(self, x: float, z: float) -> bool:
 - Využiteľná šírka chodby (3 bunky): 3,0 − 0,60 = 2,40 jednotky
 
 ### Načítanie textúr
-Každý framework poskytuje iný mechanizmus na prípravu obrazových dát pre OpenGL.
+Každý framework poskytuje iný mechanizmus na prípravu obrazových dát pre *OpenGL*.
 
 *PySide* poskytuje triedu `QImage` s priamou podporou formátu `RGBA8888`. Po konverzii je pixel buffer dostupný a dá sa priamo odovzdať `glTexImage2D`:
 
@@ -197,9 +208,9 @@ glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
 return int(tex_id)
 ```
 
-**wxPython** ukladá RGB a alpha kanál do dvoch samostatných polí. Ich zlúčenie si vyžadovalo vektorizáciu pomocou NumPy, pretože slučka v čistom Pythone bola príliš pomalá na načítanie textúr pri štarte.
+**wxPython** ukladá RGB a alpha kanál do dvoch samostatných polí. Ich zlúčenie si vyžadovalo vektorizáciu pomocou *NumPy*, pretože slučka v čistom Pythone bola príliš pomalá na načítanie textúr pri štarte.
 
-**Kivy** má najjednoduchšie načítanie – `KivyCoreImage` interně nahrá textúru do GPU. Keďže Kivy používa vlastný OpenGL kontext a Core Profile, bolo potrebné vytvoriť samostatný GL handle pre PyOpenGL:
+**Kivy** má najjednoduchšie načítanie – `KivyCoreImage` interně nahrá textúru do GPU. Keďže *Kivy* používa vlastný *OpenGL* kontext a Core Profile, bolo potrebné vytvoriť samostatný GL handle pre *PyOpenGL*:
 
 ```python
 img = KivyCoreImage(path)
@@ -244,7 +255,7 @@ for ghost in self.core.ghosts.values():
 
 
 Keď hráč skončí vo väzení, na stene väzenskej cely sa zobrazí mapa celého labyrintu so sektormi pre orientáciu. Mapa sa generuje raz a uloží ako GPU textúra. Implementácia závisí od frameworku:
-Frameworky *PySide6* a *wxPython* ponúkajú plnohodnotný off-screen kresliaci kontext (`QPainter` / `wx.MemoryDC`) umožňuje vykresliť farebné oblasti a písmená sektora do `QImage` / `wx.Bitmap` a následne nahrať do GPU:
+Frameworky *PySide* a *wxPython* ponúkajú plnohodnotný off-screen kresliaci kontext (`QPainter` / `wx.MemoryDC`) umožňuje vykresliť farebné oblasti a písmená sektora do `QImage` / `wx.Bitmap` a následne nahrať do GPU:
 ```python
 #PySide QPainter
 img = QImage(640, 420, QImage.Format_RGBA8888)
@@ -263,7 +274,7 @@ ptr  = img.constBits()
 data = ptr.tobytes()[:size]  # pixel buffer pre GPU
 # nahranie do GPU...
 ```
-Kivy natívny 2D kresliaci kontext mimo obrazovky neponúka, avšak disponuje triedou Fbo (Framebuffer Object), ktorá umožňuje off-screen OpenGL renderovanie:
+*Kivy* natívny 2D kresliaci kontext mimo obrazovky neponúka, avšak disponuje triedou `Fbo` (Framebuffer Object), ktorá umožňuje off-screen *OpenGL* renderovanie:
 ```python
 fbo = Fbo(size=(640, 420), with_depthbuffer=False)
 with fbo:
@@ -278,7 +289,7 @@ pixels = fbo.pixels  # RGBA data
 
 Spočiatku sa steny vykresľovali v immediate mode. Každú snímku sa geometria posielala z CPU do GPU znova. Na Úrovni 2 s väčším bludiskom to viedlo k 12-18 snímkam za sekundu. Riešením bol prechod na **Vertex Buffer Objects (VBO)**. Celá statická geometria stien a podláh sa nahrala do pamäte GPU jednorazovo pri inicializácii.
 
-Kivy vyžaduje OpenGL ES 2.0 Core Profile, ktorý nepodporuje immediate mode ani `GL_QUADS`, preto každý štvorec musel byť rozdelený na dva trojuholníky a všetka geometria sa zostavuje do streaming bufferov. Tento prístup bol následne aplikovaný aj na PySide6 a wxPython pre dynamické entity, aby porovnanie nebolo zaujaté rozdielom OpenGL profilov.
+*Kivy* vyžaduje *OpenGL ES 2.0 Core Profile*, ktorý nepodporuje immediate mode ani `GL_QUADS`, preto každý štvorec musel byť rozdelený na dva trojuholníky a všetka geometria sa zostavuje do streaming bufferov. Tento prístup bol následne aplikovaný aj na *PySide* a *wxPython* pre dynamické entity, aby porovnanie nebolo zaujaté rozdielom *OpenGL* profilov.
 
 ### Duchovia a ich superschopnosti
 
@@ -296,36 +307,32 @@ Hra obsahuje dve minihry:
 
 - **3D puzzle** - po zbere fragmentu kľúča; hráč presúva farebné diely šiestimi smermi, kým nezodpovedajú referenčnej zostave. Správnosť sa overuje grafom susednosti:
 ```python
-def neighbors_from_positions(positions):
-    adj = {i: set() for i in range(len(positions))}
-    ipos = [np.round(p).astype(int) for p in positions]
-    for i in range(len(ipos)):
-        for j in range(i + 1, len(ipos)):
-            diff = np.abs(ipos[i] - ipos[j])
-            # Susedia = líšia sa presne o 1 v jednej osi
-            if (np.sum(diff == 1) == 1) and (np.sum(diff == 0) == 2):
-                adj[i].add(j); adj[j].add(i)
-    return adj
-
-correct = all(placed_adj[i] == target_adj[i] for i in range(len(target)))[
+def adj(positions):
+    a = {i: set() for i in range(len(positions))}
+    ip = [[round(v) for v in pos] for pos in positions]
+    for i in range(len(ip)):
+        for j in range(i + 1, len(ip)):
+            diff = [abs(ip[i][k] - ip[j][k]) for k in range(3)]
+            if sum(1 for d in diff if d == 1) == 1 and sum(1 for d in diff if d == 0) == 2:
+                a[i].add(j); a[j].add(i)
+    return a
 ```
 - **Silhouette puzzle** - vo väzení po chytení duchom; hráč kliknutím na mriežku 6×6 reprodukuje referenčný tvar.
 ```python
-  def _check(self):
-    current = [[1 if self._cells[r][c].isChecked() else 0
-                for c in range(self._size)]
-               for r in range(self._size)]
+def _check(self):
+    current = self._read_grid()
     if current == self._target:
-        self.accept()[
+        self.accept()  # PySide/wxPython
+        # Kivy: self._finish(True)
 ```
 
-V *PySide* a *wxPython* sú minihry implementované ako natívne modálne dialógy. Kivy natívne modálne okná nepodporuje, preto minihry sú implementované ako `FloatLayout` prekrytia.
+V *PySide* a *wxPython* sú minihry implementované ako natívne modálne dialógy.  Kivy používa vlastný natívny modálny systém `ModalView`, ktorý je ekvivalentom modálnych dialógov v *Kivy* ekosystéme.
 
 ### Zvuk
 
-PySide6 a Kivy poskytujú plnohodnotné viackanálové zvukové rozhranie (`QSoundEffect`, `SoundLoader`).
+*PySide* a *Kivy* poskytujú plnohodnotné viackanálové zvukové rozhranie (`QSoundEffect`, `SoundLoader`).
 
-wxPython disponuje iba jednokanálovým `wx.adv.Sound`. Aby sa prioritné zvuky (brána, duch) nevynechali, bol implementovaný systém, ktorý kroky dočasne preruší a po ich skončení ich obnoví na hlavnom vlákne cez `wx.CallLater`:
+*wxPython* disponuje iba jednokanálovým `wx.adv.Sound`. Aby sa prioritné zvuky (brána, duch) nevynechali, bol implementovaný systém, ktorý kroky dočasne preruší a po ich skončení ich obnoví na hlavnom vlákne cez `wx.CallLater`:
 
 ```python
 def _play_priority_sfx(self, snd, *, cooldown_s):
@@ -338,12 +345,12 @@ def _resume_footsteps_if_needed(self):
     if not self._footsteps_requested:
         return
     if time.perf_counter() < self._sfx_until:
-        return   # iný zvuk predĺžil okno
+        return
     if not self._footsteps_playing:
         self._start_footsteps_loop()
 ```
 
-Napriek tomuto riešeniu zvuk v wxPython zostal nestabilný – pri niektorých behoch sa zvuky krokov prestali prehrávať bez zjavného dôvodu. `wx.adv.Sound` je tenká vrstva nad systémovým zvukovým rozhraním bez vlastného bufferovania či chybovej obnovy.
+Napriek tomuto riešeniu zvuk v *wxPython* zostal nestabilný – pri niektorých behoch sa zvuky krokov prestali prehrávať bez zjavného dôvodu. `wx.adv.Sound` je tenká vrstva nad systémovým zvukovým rozhraním bez vlastného bufferovania či chybovej obnovy.
 
 ### Rozdiely medzi frameworkmi v implementácii
 
@@ -362,20 +369,59 @@ Napriek tomuto riešeniu zvuk v wxPython zostal nestabilný – pri niektorých 
 
 ### Metodika
 
-Pre každý framework bolo vykonaných 5 opakovaní na Úrovni 1 a 5 opakovaní na Úrovni 2. Každé opakovanie predstavovalo kompletné dokončenie úrovne. Pri testovaní bol sledovaný preddefinovaný priebeh, aby sa zabezpečila porovnateľnosť hrania, pričom menšie odchýlky boli nevyhnutné kvôli charakteru hry.
+Pre každý framework bolo vykonaných 5 opakovaní na Úrovni 1 a 5 opakovaní na Úrovni 2. Každé meranie predstavovalo kompletné dokončenie úrovne. Pri testovaní bol sledovaný preddefinovaný priebeh, aby sa zabezpečila porovnateľnosť hrania, pričom menšie odchýlky boli nevyhnutné kvôli charakteru hry.
 Testovanie prebiehalo na rovnakom hardvéri: AMD Ryzen 5 3600, 16 GB RAM, NVIDIA GeForce GTX 1660 Super, Windows 10.
 
-Výkon meria trieda `PerformanceMonitor`.
-Priemerné FPS – aritmetický priemer všetkých platných hodnôt FPS zaznamenaných počas celého behu,
-minimálne / maximálne FPS – krajné hodnoty z filtrovanej histórie,
-vstupová latencia – medián času medzi doručením udalosti frameworkom a aplikáciou zmeny stavu,
-využitie pamäte – maximálna hodnota RAM v megabajtoch počas behu,
-čas štartu – doba od inicializácie po prvú vykreslenú snímku v milisekundách,
-čas načítania textúr – doba inicializácie herných assetov pri štarte,
-priemerný čas generovania textových textúr – priemerná doba vytvárania textových nápisov v milisekundách.
+Výkon meria trieda `PerformanceMonitor`:
+- Priemerné FPS – aritmetický priemer všetkých platných hodnôt FPS zaznamenaných počas celého behu.
+- Minimálne / maximálne FPS – krajné hodnoty z filtrovanej histórie.
+- Vstupová latencia – medián času medzi doručením udalosti frameworkom a aplikáciou zmeny stavu.
+- Využitie pamäte – maximálna hodnota RAM v megabajtoch počas behu.
+- Čas štartu – doba od inicializácie po prvú vykreslenú snímku v milisekundách.
+- Čas načítania textúr – doba inicializácie herných assetov pri štarte.
+- Priemerný čas generovania textových textúr – priemerná doba vytvárania textových nápisov v milisekundách.
+
+Snímky mimo rozsahu 2–200 FPS sú pri výpočte filtrované ako neplatné.
+```python
+def record_frame(self, is_pause_frame: bool = False) -> None:
+    now = time.perf_counter()
+    if self._first_frame:
+        self._first_frame = False
+    else:
+        interval = now - self.last_frame_time
+        if not is_pause_frame:
+            self._record_interval(interval)  # FPS = 1.0 / interval
+    self.last_frame_time = now
+    self._sample_memory()
+
+def get_performance_summary(self) -> Dict[str, Any]:
+    if self.fps_history:
+        filtered_fps = [fps for fps in self.fps_history if 2 <= fps <= 200]
+        if filtered_fps:
+            min_fps = min(filtered_fps)
+            max_fps = max(filtered_fps)
+```
+
+ Vstupová latencia sa meria ako čas medzi doručením udalosti frameworkom a aplikáciou zmeny stavu, pričom sa používa medián namiesto priemeru pre robustnosť voči odľahlým hodnotám:
+```python
+def record_input_event(self) -> None:
+    self._pending_input_time = time.perf_counter()
+
+def record_input_processed(self) -> None:
+    if self._pending_input_time is not None:
+        latency = time.perf_counter() - self._pending_input_time
+        if 0.0 < latency < 0.5:
+            self.input_latencies.append(latency)
+        self._pending_input_time = None
+
+def median_input_latency_ms(self) -> float:
+    if not self.input_latencies:
+        return 0.0
+    return statistics.median(self.input_latencies) * 1000.0
+```
 
 
-### PySide6 — Úroveň 1
+### PySide — Úroveň 1
  
 | Metrika | Beh 1 | Beh 2 | Beh 3 | Beh 4 | Beh 5 | Priemer |
 |---|---|---|---|---|---|---|
@@ -388,9 +434,9 @@ priemerný čas generovania textových textúr – priemerná doba vytvárania t
 | Textúry (ms) | 842,4 | 850,3 | 838,3 | 854,5 | 854,4 | **847,96** |
 | Text (ms) | 0,25 | 0,25 | 0,26 | 0,25 | 0,26 | **0,25** |
  
-Priemerné FPS sa pohybovalo medzi 48,7 a 61,0, pričom nižšie hodnoty v behoch 1 a 5 môžu súvisieť s interným bufferovaním Qt6. Variabilita spotreby RAM v rozsahu 270–431 MB naznačuje podobný jav. Medián latencie vstupu bol vo všetkých piatich behoch takmer identický (16,51–16,59 ms), čo zodpovedá architektúre QTimer s intervalom 16 ms.
+Priemerné FPS sa pohybovalo medzi 48,7 a 61,0, pričom nižšie hodnoty v meraniach 1 a 5 môžu súvisieť s interným bufferovaním Qt6. Variabilita spotreby RAM v rozsahu 270–431 MB naznačuje podobný jav. Medián latencie vstupu bol vo všetkých piatich meraniach takmer identický (16,51–16,59 ms), čo zodpovedá architektúre `QTimer` s intervalom 16 ms.
 
-### PySide6 — Úroveň 2
+### PySide — Úroveň 2
  
 | Metrika | Beh 1 | Beh 2 | Beh 3 | Beh 4 | Beh 5 | Priemer |
 |---|---|---|---|---|---|---|
@@ -403,7 +449,7 @@ Priemerné FPS sa pohybovalo medzi 48,7 a 61,0, pričom nižšie hodnoty v behoc
 | Textúry (ms) | 825,1 | 840,5 | 835,1 | 869,3 | 829,1 | **839,83** |
 | Text (ms) | 0,23 | 0,23 | 0,24 | 0,23 | 0,22 | **0,23** |
  
-Priemerné FPS bolo na druhej úrovni výrazne konzistentnejšie naprieč behmi (56,6–58,1) ako na prvej úrovni. Variabilita latencie vstupu (16,8–29,1 ms) je konzistentná s architektúrou QTimer(16 ms) — odozva závisí od fázy časovača v momente stlačenia klávesy.
+Priemerné FPS bolo na druhej úrovni výrazne konzistentnejšie naprieč meraniami (56,6–58,1) ako na prvej úrovni. Variabilita latencie vstupu (16,8–29,1 ms) je konzistentná s architektúrou `QTimer`(16 ms) — odozva závisí od fázy časovača v momente stlačenia klávesy.
  
 ---
  
@@ -420,7 +466,7 @@ Priemerné FPS bolo na druhej úrovni výrazne konzistentnejšie naprieč behmi 
 | Textúry (ms) | 202,8 | 220,4 | 195,7 | 200,1 | 202,2 | **204,24** |
 | Text (ms) | 1,45 | 0,98 | 1,38 | 2,32 | 1,07 | **1,44** |
  
-Priemerné FPS bolo vo všetkých piatich behoch takmer totožné (60,0–60,5). Minimálne FPS vykazovalo väčšiu variabilitu (22,2–58,3), čo pravdepodobne odráža nepravidelnosť streamingových bufferov pri inicializácii úrovne, nie počas samotného hrania. Čas štartu v behu 1 (19,2 ms) je výrazne nižší ako v ostatných behoch (71–81 ms), čo možno pripísať zahriateju cache operačného systému.
+Priemerné FPS bolo vo všetkých piatich meraniach takmer totožné (60,0–60,5). Minimálne FPS vykazovalo väčšiu variabilitu (22,2–58,3), čo pravdepodobne odráža nepravidelnosť streamingových bufferov pri inicializácii úrovne, nie počas samotného hrania. Čas štartu v meraní 1 (19,2 ms) je výrazne nižší ako v ostatných meraniach (71–81 ms), čo možno pripísať zahriateju cache operačného systému.
  
 ### Kivy — Úroveň 2
  
@@ -435,7 +481,7 @@ Priemerné FPS bolo vo všetkých piatich behoch takmer totožné (60,0–60,5).
 | Textúry (ms) | 228,0 | 194,9 | 203,7 | 198,9 | 197,5 | **204,60** |
 | Text (ms) | 1,23 | 0,96 | 1,63 | 6,95 | 1,06 | **2,37** |
 
- Priemerné FPS mierne pokleslo oproti prvej úrovni (50,1–56,8), čo zodpovedá väčšej scéne s vyšším počtom entít. Čas generovania textových textúr bol v behu 4 výrazne vyšší (6,95 ms oproti mediánu 1,23 ms), čo pravdepodobne súvisí s pauzou garbage collectora počas generovania textúry.
+ Priemerné FPS mierne pokleslo oproti prvej úrovni (50,1–56,8), čo zodpovedá väčšej scéne s vyšším počtom entít. Čas generovania textových textúr bol v meraní 4 výrazne vyšší (6,95 ms oproti mediánu 1,23 ms), čo pravdepodobne súvisí s pauzou *garbage collectora* počas generovania textúry.
  
 ---
  
@@ -452,7 +498,7 @@ Priemerné FPS bolo vo všetkých piatich behoch takmer totožné (60,0–60,5).
 | Textúry (ms) | 1 307,74 | 1 317,3 | 1 312,7 | 1 305,1 | 1 299,6 | **1 308,47** |
 | Text (ms) | 0,61 | 0,50 | 0,63 | 0,68 | 0,48 | **0,58** |
  
-Minimálne FPS v behu 1 dosiahlo hodnotu 14,0, čo je výrazne nižšie ako v ostatných behoch (20,1–21,7). Vyššia latencia vstupu v behoch 3 (14,73 ms) a 5 (7,43 ms) pravdepodobne súvisí s dočasným prerušením natívnej Win32 udalostnej slučky systémovými udalosťami. Čas štartu bol vo všetkých behoch výrazne vyšší ako u ostatných frameworkov, pohyboval sa v rozsahu 2 880–3 096 ms.
+Minimálne FPS v meraní 1 dosiahlo hodnotu 14,0, čo je výrazne nižšie ako v ostatných behoch (20,1–21,7). Vyššia latencia vstupu v meraní 3 (14,73 ms) a 5 (7,43 ms) pravdepodobne súvisí s dočasným prerušením natívnej *Win32* udalostnej slučky systémovými udalosťami. Čas štartu bol vo všetkých behoch výrazne vyšší ako u ostatných frameworkov, pohyboval sa v rozsahu 2 880–3 096 ms.
  
 ### wxPython — Úroveň 2
  
@@ -467,15 +513,25 @@ Minimálne FPS v behu 1 dosiahlo hodnotu 14,0, čo je výrazne nižšie ako v os
 | Textúry (ms) | 1 379,14 | 1 298,39 | 1 280,13 | 1 287,5 | 1 281,46 | **1 305,32** |
 | Text (ms) | 0,48 | 0,50 | 0,48 | 0,49 | 0,49 | **0,49** |
 
-Na druhej úrovni boli výsledky wxPython stabilnejšie ako na prvej — priemerné FPS sa pohybovalo v rozsahu 40,3–42,2 a latencia vstupu bola konzistentná (0,58–0,66 ms). Čas štartu zostal vysoký (2 913–3 270 ms), pričom beh 1 bol mierne odľahlý oproti ostatným.
+Na druhej úrovni boli výsledky *wxPython* stabilnejšie ako na prvej — priemerné FPS sa pohybovalo v rozsahu 40,3–42,2 a latencia vstupu bola konzistentná (0,58–0,66 ms). Čas štartu zostal vysoký (2 913–3 270 ms), pričom test 1 bol mierne odľahlý oproti ostatným.
+
+*PySide* javí ako najvyváženejšia voľba pre komplexné desktopové 3D aplikácie v jazyku Python. *Kivy* dosiahol porovnateľný výkon s najnižšou spotrebou pamäte, avšak jeho implementácia bola náročnejšia a absencia API na uväznenie kurzora myši na platforme *Windows* obmedzovala ovládanie kamery. Keďže je primárne navrhnutý pre dotykové a mobilné aplikácie, môže byť vhodnejší práve pre tieto scenáre. *wxPython* umožnil vytvorenie funkčnej 3D aplikácie s natívnym vzhľadom, avšak dosiahol najnižší a najmenej stabilný výkon spomedzi testovaných frameworkov, čo ho predurčuje skôr pre tradičné desktopové GUI aplikácie bez náročného 3D vykresľovania.
 
 ---
 
-Textúry použité pre brány, minimapu a platformy sú vlastnou tvorbou. Textúry pre podlahu, steny a mince pochádzajú z bezplatných zdrojov dostupných na platforme Freepik. Zvukové efekty použité v projekte boli získané z databázy Freesound.
+Textúry použité pre brány, minimapu a platformy sú vlastnou tvorbou. Textúry pre podlahu, steny a mince pochádzajú z bezplatných zdrojov dostupných na platforme *Freepik*. Zvukové efekty použité v projekte boli získané z databázy *Freesound*.
 
 ---
 
 ## Inštalácia a spustenie
+
+### Rýchle spustenie (bez inštalácie)
+
+Predinštalované `.exe` súbory sú dostupné na [stránke GitHub Releases](https://github.com/KV1k1/3D-GUI/releases/tag/v1).
+
+`.exe` súbory a priečinok `assets` musia byť umiestnené v tom istom priečinku.
+
+### Spustenie zo zdrojového kódu
 
 ### Požiadavky
 
